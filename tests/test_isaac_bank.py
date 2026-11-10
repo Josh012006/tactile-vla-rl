@@ -32,7 +32,9 @@ STATE_TOL = {"sim/": 1e-4, "env/": 1e-5, "envdict/": 0.0}        # restore vs ba
 PROBE_STEPS = 24
 
 
-@pytest.fixture(scope="module")
+# NOT module-scoped: the pool keeps ONE server alive, so a fixture that cached its server would hold a stopped one as soon as
+# another test (short_server below) asked for a different configuration. pool.get() is cheap while the server is alive.
+@pytest.fixture
 def server(isaac_pool):
     return isaac_pool.get(N, bank_size=BANK)
 
@@ -217,7 +219,7 @@ def test_reset_order_is_reproducible_by_seed(env):
 
 
 # ------------------------------------------------------------------------------------------- 4. per-environment episodes
-@pytest.fixture(scope="module")
+@pytest.fixture
 def short_server(isaac_pool):
     return isaac_pool.get(N, bank_size=BANK, max_steps_per_episode=6)
 

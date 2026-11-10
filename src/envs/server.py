@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import traceback
 
 
 def parse_args():
@@ -58,8 +59,16 @@ def main():
     from .ws_server import WsEnvServer
 
     logging.basicConfig(level=logging.INFO)
-    backend, env = build_backend(cfg, device=args.device)
-    server = WsEnvServer(backend, host=cfg.get("server_host", "0.0.0.0"), port=int(cfg.get("server_port", 8102)))
+    try:
+        backend, env = build_backend(cfg, device=args.device)
+        server = WsEnvServer(backend, host=cfg.get("server_host", "0.0.0.0"), port=int(cfg.get("server_port", 8102)))
+    except Exception:  # noqa: BLE001
+        # After an exception Kit keeps the process alive (its threads never finish): the server would hang forever with
+        # the traceback in its log and whoever started it (a test, a job) would wait for nothing. Print it and exit NOW.
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
     # AppLauncher's own SIGINT handler tries a Kit-internal shutdown that never returns (Ctrl+C did nothing, the GPU stayed
     # allocated), and Kit re-installs its handlers while the scene is built: so ours is registered LAST, here.

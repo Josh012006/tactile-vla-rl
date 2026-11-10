@@ -64,6 +64,10 @@ def build_env(cfg: dict, device: str = "cuda:0"):
     if num_envs < 1:
         raise ValueError(f"num_envs must be >= 1, got {num_envs}")
     env_cfg = parse_env_cfg(task_name, device=device, num_envs=num_envs)
+    # FORGE's stock scene is built with clone_in_fabric=True: env_1..env_{N-1} then exist only in Fabric, NOT in the USD stage.
+    # Everything that finds its prims through the stage (every Isaac Lab sensor: cameras, contact sensors) then sees ONE
+    # environment (buffers of size 1, a device-side assert at the first reset). Clones must be real USD prims.
+    env_cfg.scene.clone_in_fabric = bool(cfg.get("clone_in_fabric", False))
 
     # Robot: YAML field `robot`. The Robotiq profiles spawn a USD derived from NVIDIA's (built once, see robot_assets.py).
     profile = profile_from_yaml(cfg)

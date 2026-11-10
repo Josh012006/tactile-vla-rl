@@ -205,6 +205,9 @@ def load_or_build(env, observe: Callable[[], Dict[str, np.ndarray]], cfg: dict) 
         if bank.meta.get("format") == BANK_FORMAT and bank.size == size:
             bank.meta.update(from_cache=True, path=str(path), digest=digest)
             print(f"[start_bank] loaded {size} start states from {path}", flush=True)
+            # FORGE creates some tensors (task_prop_gains, ...) only inside its first reset, and a restore writes into them in
+            # place: with a bank from the cache this process never ran a real reset, so it runs one now (a few seconds).
+            env.reset_lockstep(seed=seed, passes=passes)
             return bank
         print(f"[start_bank] {path} does not match (format/size): rebuilding", flush=True)
     print(f"[start_bank] building {size} start states ({math.ceil(size / env.num_envs)} real resets of {env.num_envs} "
