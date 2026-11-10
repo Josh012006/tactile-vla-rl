@@ -10,7 +10,7 @@ One server owns `num_envs` INDEPENDENT environments (one Isaac Lab scene, one pr
                 place (`acting` is False for it) until the others have ended too, then the next round starts.
     reset(seed, round)   start a round. `seed` fixes the whole sequence of rounds, `round` the position in it: the start state of
                 every environment is a function of (seed, round, num_envs) up to a small dependence on the episode that ran
-                just before (Robotiq: peg <= 0.14 mm in the measurements, see tests/test_isaac_fidelity.py). The same SEQUENCE
+                just before (Robotiq: 6-8 environments in 24 differ, median 0.01-0.06 mm, up to 1-11 mm on the peg; not fixed, see reset_passes in the YAML). The same SEQUENCE
                 of resets and steps from a fresh server is bit-identical. Without arguments: the next round. With `seed` only: round 0.
     step(actions)        step ALL environments once. (num_envs, ACTION_DIM) actions in, everything back in ONE message. When the
                 last running environment ends on this step and auto_reset is on, the next round starts inside the same call:

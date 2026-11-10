@@ -99,6 +99,20 @@ def build_env(cfg: dict, device: str = "cuda:0"):
             raise ValueError("enhanced_determinism: this Isaac Lab's PhysxCfg has no enable_enhanced_determinism field")
         env_cfg.sim.physx.enable_enhanced_determinism = True
 
+    physx_set = {}
+    for key, value in cfg.items():           # physx_<field>: any field of Isaac Lab's PhysxCfg (task YAML), e.g. physx_solver_type
+        if key.startswith("physx_") and len(key) > len("physx_"):
+            field = key[len("physx_"):]
+            if not hasattr(env_cfg.sim.physx, field):
+                raise ValueError(f"{key}: Isaac Lab's PhysxCfg has no field {field!r}")
+            current = getattr(env_cfg.sim.physx, field)
+            if isinstance(current, (bool, int)) and isinstance(value, (bool, int, float)):
+                value = type(current)(value)           # a sweep may hand over 0.0 for solver_type
+            setattr(env_cfg.sim.physx, field, value)
+            physx_set[field] = value
+    if physx_set:
+        print(f"[env_server] PhysX overrides: {physx_set}", flush=True)
+
     env_cfg.sim.render_interval = env_cfg.decimation      # one render per env step
 
     # Episodes are ended by the server, never by Isaac Lab (see NATIVE_TIMEOUT_DISABLED_S).

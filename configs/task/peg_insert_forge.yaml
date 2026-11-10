@@ -70,9 +70,17 @@ disable_sleep: false
 # the data of an experiment.
 enhanced_determinism: true
 # The reset (reseed + reset) is done this many times. Measured (L40S, Robotiq, 4 envs, tests/test_isaac_fidelity.py): the reset
-# is clean until the gripper closes on the peg; there contact chaos amplifies float-level differences into <= 0.14 mm on the peg
-# and <= 2e-4 rad on the joints, in about 1 environment out of 4 after another episode (none with the Franka). A second pass
-# removes it in most environments (expo-ft measured 1.5 -> 0.2 mm), a third gave nothing more. Every pass costs one real reset.
+# is clean until the gripper closes on the peg; there float-level differences are amplified: after another episode 6 to 8
+# environments of 24 start somewhere else, by a median of 0.01 - 0.06 mm on the peg and, rarely, by 1 - 11 mm (joints up to
+# 1.4e-2 rad); none with the Franka. expo-ft measured 1.5 -> 0.2 mm on one seed with 2 passes instead of 1; a third pass gave
+# nothing more. Every pass costs one real reset.
+# NOT FIXED, on purpose (tests/test_isaac_finger_sweep.py, 4 envs x 6 starts): the count stays at 6-8 environments of 24 for
+# finger_damping 20 / 100 / 500, finger_stiffness 2000, physx_friction_correlation_distance 0.0005,
+# physx_friction_offset_threshold 0.002; finger_effort 3 gives 7/24 and worst 1.2 mm but halves the tactile force and loses pegs;
+# physx_solver_type 0 (PGS) breaks the grasp (peg dropped in 18 of 24). The cause is state inside PhysX's contact solver that none
+# of these parameters reaches; what is left (the mimic joints / collision shapes of the Robotiq asset) was judged not worth
+# redoing the demos and SFT for. What holds: the same sequence of resets and steps from a fresh server is bit-identical, so
+# compare conditions on the same sequence of rounds. physx_<field> sets any field of Isaac Lab's PhysxCfg (server restart).
 reset_passes: 2
 
 # -- Server --------------------------------------------------------------------------------------------------------------

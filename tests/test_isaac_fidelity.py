@@ -7,7 +7,8 @@ Every round starts with FORGE's own reset, so there is no approximation to measu
      b. the start of a (seed, round) does NOT forget the episode that ran just before (Robotiq only; the Franka does). It is
         measured, not claimed away: test_start_depends_little_on_the_previous_episode bounds it, test_what_survives_a_reset and
         test_where_a_reset_diverges say where it comes from (the reset is bit-identical until the gripper closes on the peg;
-        there contact chaos amplifies float-level differences, in about 1 environment out of 4). Same level as expo-ft's;
+        there contact chaos amplifies float-level differences: 8 environments of 24 start somewhere else, by up to 5-11 mm on the
+        peg in the worst cases measured by tests/test_isaac_finger_sweep.py). expo-ft measured the same phenomenon (0.2 mm on one seed);
   2. the environments of a server are INDEPENDENT: what one does does not change what another does
      (test_the_environments_of_a_round_are_independent), and their starts are valid and different
      (test_start_states_are_valid_and_diverse);
@@ -233,9 +234,10 @@ def test_where_a_reset_diverges(isaac_pool, reports_dir):
     (reports_dir / "reset_trace.json").write_text(json.dumps(report, indent=2))
 
 
-# What the start state of a (seed, round) may differ by after another episode: measured maxima (Robotiq, 4 envs, 3 starts) were
-# 1.4e-4 m on the peg and 1.8e-4 rad on the joints (expo-ft: 2e-4 m); the bounds leave a factor ~10 so only a regression fails.
-START_TOL_M, START_TOL_RAD = 2e-3, 2e-3
+# What the start state of a (seed, round) may differ by after another episode. Measured worst cases (Robotiq, 4 envs, 6 starts,
+# tests/test_isaac_finger_sweep.py): 5.2 - 11 mm on the peg, 6e-3 - 1.4e-2 rad on the joints, in 6 to 8 environments of 24. These
+# bounds only catch a GROSS failure (a lost or crushed peg, a broken reset); they are not a precision claim.
+START_TOL_M, START_TOL_RAD = 3e-2, 3e-2
 
 
 def test_start_depends_little_on_the_previous_episode(env, reports_dir):
@@ -382,4 +384,3 @@ def test_the_same_sequence_on_a_fresh_server_is_bit_exact(isaac_pool, reports_di
     print("\n" + json.dumps(diff, indent=1))
     for key, d in diff.items():
         assert d == 0.0, f"{key}: the same sequence gave a different result on a fresh server, by {d:.3e}"
-
