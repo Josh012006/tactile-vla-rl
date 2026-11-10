@@ -1,0 +1,19 @@
+# pi0.5 (flow matching, action expert), DROID joint-position weights. MODEL side only: the task, the algorithm and the use of
+# touch have their own files (configs/{task,algo,touch}).
+#
+# Code: the openpi fork Josh012006/openpi (branch expo_ft), submodule third_party/openpi, pinned by the commit that git records for
+# the submodule (f7cfe2d2e29abdc73ccb9ef0495990f3fc076234 when this file was written): the SAME commit as in expo-ft.
+name: pi05
+family: pi05
+
+# Name of a TrainConfig in third_party/openpi/src/openpi/training/config.py (tests/test_models_pin.py checks that it exists).
+# Same weights and DROID norm stats as the base pi05_droid_jointpos; this one is the config expo-ft evaluated and fine-tuned (LoRA).
+openpi_config: expo_pi05_droid_lora_finetune_sft_joint_state
+checkpoint: gs://openpi-assets/checkpoints/pi05_droid_jointpos          # params/ and assets/ (norm stats) live there
+
+action_dim: 8                  # 7 joints + gripper; the model itself works on 32 (padded), 8 are read
+action_horizon: 16             # actions per chunk
+# What the base weights return (established in expo-ft, October 2026): a chunk of OFFSETS from the joint state at the moment of
+# the plan, gripper absolute. The caller adds the chunk-start state back (expo-ft: chunk_action_reference: chunk_start_state);
+# this config has no AbsoluteActions in its outputs on purpose, so the state is added once.
+output_semantics: offsets_from_chunk_start_state

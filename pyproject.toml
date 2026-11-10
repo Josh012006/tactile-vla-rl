@@ -4,8 +4,7 @@ version = "0.1.0"
 description = "Studying how tactile feedback is integrated into reinforcement-learning fine-tuning of vision-language-action models."
 readme = "README.md"
 requires-python = ">=3.11"
-# Learner side + env client (no Isaac Sim, no torch). The Isaac Lab server has its own venv: scripts/setup_isaac_venv.sh.
-# JAX / flax / openpi will be added here when src/algos and src/models are written.
+# Learner side + env client (no Isaac Sim). The Isaac Lab server has its own venv: scripts/setup_isaac_venv.sh.
 dependencies = [
     "numpy>=1.26",
     "msgpack>=1.0",
@@ -15,8 +14,19 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8"]
+# The VLA models (pi0.5, pi0-FAST): openpi (JAX) installed editable from the submodule, so the package and its checkpoint
+# configs always come from the pinned commit. Heavy (jax[cuda12], torch): not installed by a plain `uv sync`; use
+#   uv sync --group vla
+vla = ["openpi", "openpi-client"]
+
+[tool.uv.sources]
+openpi = { path = "third_party/openpi", editable = true }
+openpi-client = { path = "third_party/openpi/packages/openpi-client", editable = true }
+lerobot = { git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" }
 
 [tool.uv]
+# Same pins as the openpi fork (and as expo-ft): its JAX stack only resolves with them.
+override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
 # The code is imported as `src.envs...` from the repo root (python -m src.envs.isaaclab.server, pytest): nothing to build or install.
 package = false
 

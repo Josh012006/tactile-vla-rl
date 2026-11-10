@@ -80,7 +80,7 @@ Deux environnements virtuels séparés :
 | `.venv` | côté apprentissage + client (numpy, msgpack, websockets, pyyaml) | `uv sync` |
 | `.venv-isaaclab` | simulateur : Isaac Sim 5.1, torch 2.7.0 (cu128), Isaac Lab (submodule `third_party/IsaacLab`) | `bash scripts/setup_isaac_venv.sh` (une fois, 10 à 20 min, ~10 GB, pas de GPU nécessaire) |
 
-Le script est idempotent ; il initialise `third_party/IsaacLab` si besoin. `third_party/robotiq` (submodule : USD NVIDIA du Robotiq + dépôt tactile) doit être présent (`git submodule update --init`).
+Le script est idempotent ; il initialise le submodule `third_party/IsaacLab` si besoin. `third_party/robotiq/` n'est **pas** un submodule : ce sont les fichiers originaux de NVIDIA, copiés à la main et listés dans `.gitignore` (jamais commités) : `robotiq_usd/franka_robotiq_2f_85_flattened.usd`, `robotiq_usd/TSF_85.usd` et `robotiq-tsf85-contact-twin-main/`. Sans eux, le serveur s'arrête avec un `FileNotFoundError` qui les liste.
 
 Tests CPU, sans simulateur :
 

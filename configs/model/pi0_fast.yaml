@@ -1,0 +1,24 @@
+# pi0-FAST (autoregressive: the action chunk is a sequence of FAST tokens, decoded back into actions), DROID joint-position
+# weights. MODEL side only (see configs/model/pi05.yaml).
+#
+# Code: the SAME fork and the SAME pinned commit as pi05: pi0-FAST is part of openpi (models/pi0_fast.py, gemma_fast.py, the FAST
+# tokenizer in models/tokenizer.py), there is no second repository to fork.
+name: pi0_fast
+family: pi0_fast
+
+# The only joint-POSITION pi0-FAST that openpi defines is the PolaRiS one (src/openpi/training/misc/polaris_config.py): DROID
+# (90 %) co-trained with the PolaRiS simulation data (10 %). `pi0_fast_droid` is joint VELOCITY and does not fit absolute joint
+# targets. tests/test_models_pin.py checks that this config exists in the pinned fork.
+openpi_config: pi0_fast_droid_jointpos_polaris
+checkpoint: gs://openpi-assets/checkpoints/polaris/pi0_fast_droid_jointpos_polaris      # params/ and assets/ (norm stats)
+
+action_dim: 8                  # 7 joints + gripper (no padding: this model is built with action_dim 8)
+action_horizon: 10
+max_token_len: 180             # maximum length of the prompt + state + action tokens; a chunk that needs more is cut
+# NOT verified yet: that this checkpoint exists in the bucket and what it returns. This config's data pipeline (RLDS, action space
+# JOINT_POSITION) puts DeltaActions on the inputs AND AbsoluteActions on the outputs, so the policy is expected to return ABSOLUTE
+# targets (the chunk-start state is already added inside), unlike pi05 above. Read from the code, to be confirmed on a rollout
+# before anything is built on it: adding the chunk-start state again would add it twice.
+output_semantics: absolute_targets
+# The FAST tokenizer is not in the checkpoint: openpi downloads `physical-intelligence/fast` from the Hugging Face Hub at runtime
+# (trust_remote_code=True) and the PaliGemma tokenizer from gs://big_vision. Not pinned by the submodule: see docs.
