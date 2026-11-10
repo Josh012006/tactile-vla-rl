@@ -1,6 +1,8 @@
 # Jamais commit
-/results/
-/src/data/
+results/
+src/data/
+cache/
+reports/
 
 # Python
 __pycache__/
