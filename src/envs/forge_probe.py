@@ -1,11 +1,14 @@
 """Diagnostic ops of the Isaac Lab server used by tests/test_isaac_bank.py (not by training).
 
-`probe` plays a scripted sequence of actions from a known start and returns what the simulator did, for three starts:
-    real                the REAL FORGE reset of build round r (same seed as the bank build)
+`probe` plays a scripted sequence of actions from a known start and returns what the simulator did, for four starts:
+    real                the REAL FORGE reset of build round r (same seed as the bank build), after whatever ran before
+    real_history        the real resets of rounds 0, 1, ..., r in a row: exactly the sequence that built the bank, so the
+                        episode that precedes round r is the one that preceded it at build time (the reference of the test)
     restore             bank entries of round r written back into the same slots
     restore_permuted    the same entries written into the NEXT slot (slot i gets the entry captured in slot i + 1)
-Comparing them measures (a) how faithful a restore is to the real reset and (b) whether a state captured in one slot is
-independent of that slot (env-frame content). Comparing `real` with itself gives the repeatability floor of the simulator.
+Comparing them measures (a) how faithful a restore is to the real reset, (b) whether a state captured in one slot is
+independent of that slot (env-frame content), (c) how much the real reset itself depends on what ran before it (`real` vs
+`real_history`). Repeating a mode gives its own repeatability floor (a different history precedes each repetition).
 It moves the simulator: the episodes in flight are invalid afterwards (the client must reset).
 """
 from __future__ import annotations
@@ -15,6 +18,7 @@ from typing import Dict
 
 import numpy as np
 import torch
+from isaaclab.utils.math import quat_apply
 
 from . import protocol as P
 
@@ -31,9 +35,16 @@ def _record(sim) -> Dict[str, np.ndarray]:
     env = sim.env
     cpu = lambda x: x.detach().float().cpu().numpy()
     origins = env.scene.env_origins
+    axis_z = torch.zeros(env.num_envs, 3, device=env.device)
+    axis_z[:, 2] = 1.0
     rec = {
         "joint_pos": cpu(env._robot.data.joint_pos), "joint_vel": cpu(env._robot.data.joint_vel),
-        "held_pose": cpu(torch.cat([env._held_asset.data.root_pos_w - origins, env._held_asset.data.root_quat_w], -1)),
+        # The peg is round: a spin about its own axis changes the quaternion and nothing physical. So the pose is recorded as
+        # its position (env frame, m), the direction of its axis (local z rotated into the world: a tilt of x rad moves it by
+        # ~x) and, for information only, the raw quaternion.
+        "held_pos": cpu(env._held_asset.data.root_pos_w - origins),
+        "held_axis": cpu(quat_apply(env._held_asset.data.root_quat_w, axis_z)),
+        "held_quat": cpu(env._held_asset.data.root_quat_w),
         "peg_socket_offset": cpu(env.peg_socket_offset()), "ft_force": cpu(env.force_sensor_smooth[:, 0:3]),
         "inserted": cpu(env.inserted()),
     }
@@ -55,8 +66,12 @@ def probe(sim, request: dict) -> Dict[str, np.ndarray]:
         raise ValueError(f"round {rnd} needs bank entries {first}..{first + n - 1}, the bank has {bank.size}")
     ids = np.arange(n)
     entries = first + ids
+    seed, passes = int(bank.meta["seed"]), int(bank.meta["passes"])
     if mode == "real":
-        env.reset_lockstep(seed=int(bank.meta["seed"]) + rnd, passes=int(bank.meta["passes"]))
+        env.reset_lockstep(seed=seed + rnd, passes=passes)
+    elif mode == "real_history":
+        for k in range(rnd + 1):                       # as in start_bank.build_bank
+            env.reset_lockstep(seed=seed + k, passes=passes)
     elif mode in ("restore", "restore_permuted"):
         order = ids if mode == "restore" else np.roll(ids, -1)
         sim.restore(ids, entries[order])

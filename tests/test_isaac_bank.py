@@ -4,14 +4,16 @@ What is verified, in order of importance:
   1. a restore writes exactly the captured state (and nothing else moves): test_restore_writes_exactly_the_bank_state,
      test_restore_leaves_the_other_environments_bit_identical;
   2. the state captured is COMPLETE and slot-independent: test_capture_is_complete, test_restore_matches_the_real_reset
-     (the trajectory after a restore follows the one after the real FORGE reset, within the repeatability floor of the
-     simulator itself), and the same with the entries written in the NEXT slot (env-frame content);
+     (the trajectory after a restore follows the one after the real FORGE reset replayed in build order, within the
+     repeatability floors of the real reset and of the restore themselves), and the same with the entries written in the
+     NEXT slot (env-frame content);
   3. the running environments keep behaving when another one is reset: test_resets_do_not_disturb_running_environments;
   4. the per-environment episode logic works on the real thing: test_asynchronous_auto_reset_on_the_real_simulator,
      test_long_run_is_stable.
 
-TOLERANCES are first guesses (nobody has run this on the cluster yet). The floor (two REAL resets with the same seed, same
-slot) is always measured and printed; a comparison passes if its error is within max(absolute tolerance, FLOOR_FACTOR x floor).
+TOLERANCES are first guesses (first runs on the cluster: the peg's quaternion and the next-slot images were not comparable
+quantities, see TOL and compare()). The floors (the real reset repeated, the restore repeated, each after another history)
+are always measured and printed; a comparison passes if its error is within max(absolute tolerance, FLOOR_FACTOR x the larger floor).
 After the first run, tighten TOL to what you see. Every number is also written to reports/restore_equivalence.json.
 """
 import json
@@ -26,8 +28,11 @@ pytestmark = pytest.mark.isaac
 N = 4
 BANK = 16                                   # 4 real resets of 4 environments
 FLOOR_FACTOR = 10.0
-TOL = {"joint_pos": 5e-3, "joint_vel": 5e-2, "held_pose": 2e-3, "peg_socket_offset": 2e-3, "ft_force": 3.0, "tactile": 3.0,
-       "image_mean_exterior": 2.0, "image_mean_wrist": 4.0}
+# held_pos: peg position, env frame (m). held_axis: direction of the peg's axis (a tilt of x rad moves it by ~x). The peg is
+# round, so its quaternion (held_quat) is only INFORMATION: a spin about its own axis changes it and nothing physical.
+TOL = {"joint_pos": 5e-3, "joint_vel": 5e-2, "held_pos": 2e-3, "held_axis": 2e-2, "peg_socket_offset": 2e-3, "ft_force": 3.0,
+       "tactile": 3.0, "image_mean_exterior": 2.0, "image_mean_wrist": 4.0}
+INFO = ("held_quat",)                       # compared and written to the report, never asserted
 STATE_TOL = {"sim/": 1e-4, "env/": 1e-5, "envdict/": 0.0}        # restore vs bank, read back from the simulator
 PROBE_STEPS = 24
 
@@ -142,7 +147,7 @@ def probe(env, mode, rnd):
 
 def compare(a, b):
     out = {}
-    for key in TOL:
+    for key in (*TOL, *INFO):
         if key not in a:
             continue
         sl = slice(1, None) if key.startswith("image") else slice(None)           # images at step 0 are the reset state's, not rendered
@@ -150,28 +155,89 @@ def compare(a, b):
     return out
 
 
+CURVE_KEYS = ("tactile", "ft_force", "held_pos", "held_axis", "joint_pos")      # where the restore differs most / matters most
+ROUNDS = (1, 3)               # not 0: round 0 follows the construction of the environment, which a replay cannot recreate
+
+
+def curve(a, b, key):
+    """Error of `key` at EACH step (max over environments and components): a list of PROBE_STEPS + 1 numbers (step 0 = the state
+    right after the reset or restore, before any control step)."""
+    d = np.abs(a[key].astype(np.float64) - b[key].astype(np.float64))
+    return [float(x) for x in d.reshape(d.shape[0], -1).max(axis=1)]
+
+
+def settle_step(err_curve, floor_curves, factor=2.0):
+    """First step from which the restore error stays within `factor` x the worst floor error: the length of the transient after
+    a restore. None = it never settles within the probe."""
+    limit = factor * max(max(c) for c in floor_curves)
+    for k in range(len(err_curve)):
+        if all(e <= limit for e in err_curve[k:]):
+            return k
+    return None
+
+
+def print_curves(rnd, curves):
+    print(f"\n[round {rnd}] error per step (steps 0..{PROBE_STEPS}). restore = restore vs the REAL resets in build order; "
+          "floor_ref / floor_restore = each repeated after a different history; history = real reset without the replay vs with it")
+    for key in CURVE_KEYS:
+        c = curves[key]
+        for name in ("restore", "floor_ref", "floor_restore", "history"):
+            print(f"  {key if name == 'restore' else '':10s} {name:13s} " + " ".join(f"{x:.2g}" for x in c[name]))
+        print(f"  {'':10s} settles at step {c['settle_step']}")
+
+
+def print_summary(rnd, floor_ref, floor_restore, history, err, err_perm):
+    print(f"\n[round {rnd}] worst error over the whole probe (floor_ref: the real reset repeated; floor_restore: the restore repeated)")
+    print(f"  {'':18s} {'floor_ref':>10s} {'floor_rest':>10s} {'history':>10s} {'restore':>10s} {'next_slot':>10s} {'restore/floor':>14s}")
+    for key in (*TOL, *INFO):
+        if key in err:
+            fl = max(floor_ref[key], floor_restore[key])
+            print(f"  {key:18s} {floor_ref[key]:10.3g} {floor_restore[key]:10.3g} {history[key]:10.3g} {err[key]:10.3g} "
+                  f"{err_perm.get(key, float('nan')):10.3g} {err[key] / max(fl, 1e-12):14.1f}")
+
+
 def test_restore_matches_the_real_reset(env, reports_dir):
+    """The reference is the real reset replayed in BUILD ORDER (rounds 0..r in a row), because the start of a real reset depends
+    a little on the episode that ran before it. Two floors are measured: the reference repeated after another history, and the
+    restore repeated after another history. A restore is faithful when its error is not larger than the floors."""
     report = {"steps": PROBE_STEPS, "n": N, "floor_factor": FLOOR_FACTOR, "tol": TOL, "rounds": {}}
     failures = []
-    for rnd in (0, 2):
-        real = probe(env, "real", rnd)
-        real2 = probe(env, "real", rnd)                                      # same seed, same slots: the simulator's own floor
+    for rnd in ROUNDS:
+        real = probe(env, "real", rnd)                                       # reset with whatever history precedes it
+        ref = probe(env, "real_history", rnd)                                # reset in build order: what the bank captured
+        ref2 = probe(env, "real_history", rnd)                               # repeated (preceded by the end of the first run)
         restored = probe(env, "restore", rnd)
         permuted = probe(env, "restore_permuted", rnd)
-        floor = compare(real, real2)
-        err = compare(real, restored)
-        rolled = {k: np.roll(v, -1, axis=1) if v.ndim > 1 and v.shape[1] == N else v for k, v in real.items()}
-        err_perm = compare(rolled, permuted)           # slot i of `permuted` holds entry of slot i+1: compare with real's slot i+1
-        report["rounds"][rnd] = {"floor": floor, "restore_vs_real": err, "restore_next_slot_vs_real": err_perm}
+        restored2 = probe(env, "restore", rnd)                               # repeated (preceded by another entry's run)
+        floor_ref, floor_restore, history = compare(ref, ref2), compare(restored, restored2), compare(real, ref)
+        err = compare(ref, restored)
+        rolled = {k: np.roll(v, -1, axis=1) if v.ndim > 1 and v.shape[1] == N else v for k, v in ref.items()}
+        err_perm = compare(rolled, permuted)            # slot i of `permuted` holds entry of slot i+1: compare with ref's slot i+1
+        # An image also depends on WHERE the environment is (neighbours, light), so it is only comparable in the same slot.
+        err_perm = {k: v for k, v in err_perm.items() if not k.startswith("image")}
+        floor = {k: max(floor_ref[k], floor_restore[k]) for k in floor_ref}
+        curves = {}
+        for key in CURVE_KEYS:
+            c = {"restore": curve(ref, restored, key), "floor_ref": curve(ref, ref2, key),
+                 "floor_restore": curve(restored, restored2, key), "history": curve(real, ref, key)}
+            c["settle_step"] = settle_step(c["restore"], (c["floor_ref"], c["floor_restore"]))
+            curves[key] = c
+        print_summary(rnd, floor_ref, floor_restore, history, err, err_perm)
+        print_curves(rnd, curves)
+        if "tactile" in ref:
+            print(f"\n[round {rnd}] tactile at step 0, largest taxel: real reset {np.abs(ref['tactile'][0]).max():.3g} N, "
+                  f"restore {np.abs(restored['tactile'][0]).max():.3g} N, at step 1: {np.abs(ref['tactile'][1]).max():.3g} N vs "
+                  f"{np.abs(restored['tactile'][1]).max():.3g} N")
+        report["rounds"][rnd] = {"floor_ref": floor_ref, "floor_restore": floor_restore, "real_vs_history": history,
+                                 "restore_vs_real": err, "restore_next_slot_vs_real": err_perm, "per_step": curves}
         for label, e in (("restore", err), ("next-slot restore", err_perm)):
             for key, value in e.items():
-                if not passes(value, floor[key], key):
+                if key in TOL and not passes(value, floor[key], key):
                     failures.append(f"round {rnd} {label} {key}: {value:.3e} > max({TOL[key]}, {FLOOR_FACTOR}x floor {floor[key]:.3e})")
-        for name, traj in (("restored", restored), ("permuted", permuted)):
+        for name, traj in (("restored", restored), ("permuted", permuted), ("restored2", restored2)):
             for key, v in traj.items():
                 assert np.isfinite(v.astype(np.float64)).all(), f"{name} {key} not finite"
     (reports_dir / "restore_equivalence.json").write_text(json.dumps(report, indent=2))
-    print("\n" + json.dumps(report["rounds"], indent=1))
     assert not failures, "\n".join(failures)
 
 
