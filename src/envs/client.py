@@ -8,7 +8,7 @@
         # res.done rows ended an episode on this step, res.final_obs holds their last observation. An environment that
         # ended waits (res.acting False) until the others of its server have ended: then the next round starts by itself and
         # res.obs holds its first observation.
-    env.reset(seed=0, round=5)                                        # replay round 5 of seed 0: the same starts, bit for bit
+    env.reset(seed=0, round=5)                                        # round 5 of seed 0: the same starts (bit for bit when the whole sequence is replayed from a fresh server)
 
 Differences with the old EnvClientWrapper, on purpose:
   * no silent recovery: when a call fails the exception propagates. The old wrapper re-created the environment, reset

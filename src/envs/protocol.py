@@ -9,8 +9,9 @@ One server owns `num_envs` INDEPENDENT environments (one Isaac Lab scene, one pr
                 its own episode (it succeeds or times out on its own clock); an environment whose episode ended is held in
                 place (`acting` is False for it) until the others have ended too, then the next round starts.
     reset(seed, round)   start a round. `seed` fixes the whole sequence of rounds, `round` the position in it: the start state of
-                every environment is a deterministic function of (seed, round, num_envs), whatever ran before (checked bit for bit
-                by tests/test_isaac_fidelity.py). Without arguments: the next round. With `seed` only: round 0.
+                every environment is a function of (seed, round, num_envs) up to a small dependence on the episode that ran
+                just before (Robotiq: peg <= 0.14 mm in the measurements, see tests/test_isaac_fidelity.py). The same SEQUENCE
+                of resets and steps from a fresh server is bit-identical. Without arguments: the next round. With `seed` only: round 0.
     step(actions)        step ALL environments once. (num_envs, ACTION_DIM) actions in, everything back in ONE message. When the
                 last running environment ends on this step and auto_reset is on, the next round starts inside the same call:
                 the returned `obs` is the first observation of the new round, the real last observation of every episode that

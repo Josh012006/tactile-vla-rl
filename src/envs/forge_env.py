@@ -438,8 +438,9 @@ class ForgeEnvJointPosPi05(ForgeEnv):
           env.reset(): that would reseed a second time, non-deterministically; see the notes in isaaclab/utils/seed.py).
           All randomizations of FORGE (peg and socket pose noise, force threshold, ...) are batched draws from that one
           generator, so the start state of environment i is a function of (seed, num_envs, i): reproducible for a fixed
-          num_envs (bit for bit, whatever ran before: tests/test_isaac_fidelity.py), NOT equal to what a single environment gets
-          from the same seed.
+          num_envs: bit for bit when the same sequence of resets and steps is replayed from a fresh server, and up to a small
+          dependence on the episode that ran just before otherwise (Robotiq only, measured by
+          tests/test_isaac_fidelity.py::test_where_a_reset_diverges). NOT equal to what a single environment gets from the same seed.
         passes: the whole reset is repeated this many times (YAML `reset_passes`): the start state otherwise depends a
           little on the episode that ran before (measured on the Robotiq, see the task YAML).
         After the reset one hold step is taken so that the TiledCameras have rendered the new state (DirectRLEnv.reset

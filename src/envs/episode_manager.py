@@ -8,7 +8,9 @@ what the CPU tests exercise and what runs on the cluster.
 Rounds. FORGE's reset acts on ALL environments and steps the physics, so the environments of a server start their episodes
 together (a round) and the next round starts when the last of them has ended; an environment that ended earlier is held in place
 and ignored (`acting` False). The real reset of round r is seeded with `seed + r`: the start state of every environment is a
-deterministic function of (seed, r, num_envs), whatever ran before, so a run can be replayed exactly from (seed, rounds).
+function of (seed, r, num_envs) up to a small dependence on the episode that ran just before (Robotiq, measured in
+tests/test_isaac_fidelity.py). The same sequence of resets and steps from a fresh server is bit-identical: a run is replayed
+exactly by running the same sequence again.
 """
 from __future__ import annotations
 
@@ -109,7 +111,7 @@ class VectorEnvManager:
         """Start a round in every environment (real FORGE reset).
 
         seed  : sets the seed of the whole sequence of rounds (round 0 unless `round` says otherwise);
-        round : the position in the sequence (same seed, same round: same start states, bit for bit);
+        round : the position in the sequence (same seed, same round: the same start states up to the small dependence on the previous episode, see the top of the file);
         neither: the next round."""
         if seed is not None:
             self.seed = self._check_seed(seed)

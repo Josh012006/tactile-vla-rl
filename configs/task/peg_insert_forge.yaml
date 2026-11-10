@@ -22,8 +22,9 @@ clone_in_fabric: false
 # -- Rounds --------------------------------------------------------------------------------------------------------------
 # FORGE's reset acts on ALL environments and steps the physics, so the environments of a server start their episodes together
 # (a round, with the real reset) and each runs its own episode; one that ended waits, held in place, until the others have ended,
-# then the next round starts (src/envs/episode_manager.py). The start state of every environment is a deterministic function of
-# (seed, round, num_envs), whatever ran before: a run is replayed exactly from (seed, rounds).
+# then the next round starts (src/envs/episode_manager.py). The start state of every environment is a function of
+# (seed, round, num_envs) up to a small dependence on the previous episode (see reset_passes); the same sequence of resets and
+# steps from a fresh server is bit-identical, so a run is replayed exactly by running the same sequence again.
 env_seed: 0               # default seed of the sequence of rounds (a client reset(seed=...) overrides it)
 auto_reset: true          # the next round starts by itself when the last episode of the round ends (false: the client resets)
 
@@ -68,8 +69,10 @@ disable_sleep: false
 # PhysX deterministic GPU solver: identical results for an identical sequence of resets and steps. Must be the same for ALL
 # the data of an experiment.
 enhanced_determinism: true
-# The reset (reseed + reset) is done this many times: the start state otherwise depends a little on the previous episode.
-# Every pass costs one real reset (seconds) at the start of each round.
+# The reset (reseed + reset) is done this many times. Measured (L40S, Robotiq, 4 envs, tests/test_isaac_fidelity.py): the reset
+# is clean until the gripper closes on the peg; there contact chaos amplifies float-level differences into <= 0.14 mm on the peg
+# and <= 2e-4 rad on the joints, in about 1 environment out of 4 after another episode (none with the Franka). A second pass
+# removes it in most environments (expo-ft measured 1.5 -> 0.2 mm), a third gave nothing more. Every pass costs one real reset.
 reset_passes: 2
 
 # -- Server --------------------------------------------------------------------------------------------------------------

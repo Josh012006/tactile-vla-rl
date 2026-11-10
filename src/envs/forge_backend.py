@@ -122,10 +122,16 @@ class ForgeSim:
             raise ValueError(f"reset_passes must be >= 1, got {reset_passes}")
         self.env, self.profile, self.gripper_obs, self.reset_passes = env, profile, gripper_obs, int(reset_passes)
         self.num_envs = env.num_envs
+        self._trace_armed, self._trace = False, None     # debug ops trace_next_reset / reset_trace
 
     # -- SimAdapter ------------------------------------------------------------------------------------------------------
     def reset(self, seed: int):
-        self.env.reset_lockstep(seed=int(seed), passes=self.reset_passes)
+        run = lambda: self.env.reset_lockstep(seed=int(seed), passes=self.reset_passes)
+        if self._trace_armed:
+            self._trace_armed = False
+            self._trace = self._traced(run)
+        else:
+            run()
         torch.cuda.synchronize()
 
     def step_physics(self, actions: np.ndarray):
@@ -180,6 +186,14 @@ class ForgeSim:
             return {"pos": env.fingertip_midpoint_pos.cpu().numpy(), "quat": env.fingertip_midpoint_quat.cpu().numpy()}
         if kind == "vram":
             return self._vram()
+        if kind == "state_dump":                  # what the simulation and the env hold, per environment (see _state_dump)
+            return self._state_dump()
+        if kind == "trace_next_reset":            # the NEXT reset records the physical state after every physics step it takes
+            self._trace_armed, self._trace = True, None
+            return True
+        if kind == "reset_trace":                 # ... and this returns that record (see _traced)
+            trace, self._trace = self._trace, None
+            return trace if trace is not None else {"error": "no trace: call trace_next_reset, then reset"}
         if kind == "peg_pose":                    # held peg, env frame: position (m) and direction of its axis (unit vector)
             from isaaclab.utils.math import quat_apply
             axis = torch.zeros(env.num_envs, 3, device=env.device)
@@ -188,6 +202,116 @@ class ForgeSim:
             return {"pos": np_({"p": held.root_pos_w - env.scene.env_origins})["p"],
                     "axis": np_({"a": quat_apply(held.root_quat_w, axis)})["a"]}
         return {"error": f"unknown debug kind: {kind}"}
+
+    def _state_dump(self) -> dict:
+        """{name: array with one row per environment} of every torch tensor held by the env (its buffers), the robot, the two
+        assets and the contact sensors (cameras excluded). tests/test_isaac_fidelity.py compares two dumps taken right after a
+        reset, once per kind of episode that ran before it: a tensor that differs holds something the reset did not clear."""
+        env, n = self.env, self.num_envs
+        out = {}
+
+        def keep(name, value):
+            if not isinstance(value, torch.Tensor) or value.dim() < 1 or value.shape[0] != n:
+                return
+            if value.dtype not in (torch.float16, torch.float32, torch.float64, torch.int32, torch.int64, torch.bool, torch.uint8):
+                return
+            array = value.detach().cpu().numpy()
+            out[name] = array.astype("uint8") if array.dtype == bool else array
+
+        def from_object(prefix, obj):
+            for name in dir(obj):
+                if name.startswith("__"):
+                    continue
+                try:
+                    value = getattr(obj, name)
+                except Exception:  # noqa: BLE001  -- a lazy property that needs something this scene does not have
+                    continue
+                if not callable(value):
+                    keep(f"{prefix}.{name}", value)
+
+        for name, value in vars(env).items():
+            keep(f"env.{name}", value)
+        from_object("robot", env._robot.data)
+        from_object("held", env._held_asset.data)
+        from_object("fixed", env._fixed_asset.data)
+        for key, sensor in env.scene.sensors.items():
+            if "cam" not in key.lower():
+                from_object(f"sensor.{key}", sensor.data)
+        torch.cuda.synchronize()
+        return out
+
+    # Methods of FORGE's reset, in the order they run; the trace names the physics steps after the one that is running.
+    _RESET_PHASES = ("_set_assets_to_default_pose", "_set_franka_to_default_pose", "randomize_initial_state",
+                     "set_pos_inverse_kinematics", "close_gripper_in_place")
+
+    def _physx_state(self) -> dict:
+        """The simulation's own state, read straight from PhysX (no Isaac Lab buffer, nothing cached): joint positions and
+        velocities, pose and velocity of every link of the robot, pose and velocity of the peg, pose of the socket."""
+        env = self.env
+        view, held, fixed = env._robot.root_physx_view, env._held_asset.root_physx_view, env._fixed_asset.root_physx_view
+        torch.cuda.synchronize()
+        read = lambda t: t.detach().clone().cpu().numpy()
+        # FORGE's peg and socket are Articulations (ArticulationView: get_root_*); a RigidObject view would be get_transforms.
+        root_pose = lambda v: v.get_root_transforms() if hasattr(v, "get_root_transforms") else v.get_transforms()
+        root_vel = lambda v: v.get_root_velocities() if hasattr(v, "get_root_velocities") else v.get_velocities()
+        return {"dof_pos": read(view.get_dof_positions()), "dof_vel": read(view.get_dof_velocities()),
+                "link_pose": read(view.get_link_transforms()), "link_vel": read(view.get_link_velocities()),
+                "held_pose": read(root_pose(held)), "held_vel": read(root_vel(held)),
+                "fixed_pose": read(root_pose(fixed))}
+
+    def _traced(self, run) -> dict:
+        """Run `run()` (a reset) and record the PhysX state after EVERY physics step it takes (the reset steps the simulation
+        by itself: env.step_sim_no_action). {name: (T, N, ...)} + `phases` (what ran at each record: pass, FORGE method) +
+        joint_names + body_names. Record 0 is the state left by the previous episode, before anything is touched. Reads only:
+        the traced reset is the same reset. tests/test_isaac_fidelity.py::test_where_a_reset_diverges compares two traces."""
+        env = self.env
+        rows, labels, current, wrapped = [self._physx_state()], ["left by the previous episode"], {"pass": 0, "method": "reset"}, []
+
+        def label():
+            return f"pass {current['pass']}: {current['method']}"
+
+        def install(name, fn):
+            setattr(env, name, fn)           # instance attribute shadows the class method; removed in `finally`
+            wrapped.append(name)
+
+        raw_step, raw_reset = env.step_sim_no_action, env.reset
+
+        def step_sim_no_action():
+            raw_step()
+            rows.append(self._physx_state())
+            labels.append(label())
+
+        def reset(*args, **kwargs):
+            current["pass"] += 1
+            current["method"] = "reset"
+            return raw_reset(*args, **kwargs)
+
+        def phase(name, raw):
+            def inner(*args, **kwargs):
+                before, current["method"] = current["method"], name.lstrip("_")
+                try:
+                    return raw(*args, **kwargs)
+                finally:
+                    current["method"] = before
+            return inner
+
+        try:
+            install("step_sim_no_action", step_sim_no_action)
+            install("reset", reset)
+            for name in self._RESET_PHASES:
+                install(name, phase(name, getattr(env, name)))
+            run()
+        finally:
+            for name in wrapped:
+                try:
+                    delattr(env, name)
+                except AttributeError:
+                    pass
+        rows.append(self._physx_state())
+        labels.append("after the hold step that ends reset_lockstep")
+        out = {k: np.stack([r[k] for r in rows]) for k in rows[0]}
+        out.update(phases=labels, joint_names=list(env._robot.data.joint_names), body_names=list(env._robot.body_names))
+        return out
 
     def _vram(self) -> dict:
         """GPU memory of THIS process, from NVML (Kit / PhysX / RTX allocate outside torch's allocator, so torch's own
