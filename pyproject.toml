@@ -1,15 +1,26 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "tactile-vla-rl"
 version = "0.1.0"
 description = "Studying how tactile feedback is integrated into reinforcement-learning fine-tuning of vision-language-action models."
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.11"
+# Learner side + env client (no Isaac Sim, no torch). The Isaac Lab server has its own venv: scripts/setup_isaac_venv.sh.
+# JAX / flax / openpi will be added here when src/algos and src/models are written.
+dependencies = [
+    "numpy>=1.26",
+    "msgpack>=1.0",
+    "websockets>=13",
+    "pyyaml>=6",
+]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-namespaces = true
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+# The code is imported as `src.envs...` from the repo root (python -m src.envs.server, pytest): nothing to build or install.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+addopts = "-ra"

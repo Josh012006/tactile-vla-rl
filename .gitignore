@@ -29,3 +29,7 @@ slurm-*.out
 # Divers
 .env
 .DS_Store
+
+# Assets NVIDIA (copiés à la main) et USD générés
+third_party/robotiq/
+.venv-isaaclab/
