@@ -185,7 +185,7 @@ def trace_differences(a, b):
 
 def test_where_a_reset_diverges(isaac_pool, reports_dir):
     """MEASUREMENT (no threshold): at which physics step of the reset do two histories start to differ, and in which joint or link?
-    The reset is traced (forge_backend.py _traced: the PhysX state after every physics step it takes). For each start of
+    The reset is traced (isaaclab/forge_backend.py _traced: the PhysX state after every physics step it takes). For each start of
     LEAK_STARTS it is run after a bare reset (a), again after the same (a again: the floor, must be 0) and after 24 steps of another
     seed (b). Record 0 is the state left by the previous episode, so it differs by construction; record 1 is the first physics
     step after FORGE has written the robot and the assets to their default pose: a difference THERE means the teleport did not

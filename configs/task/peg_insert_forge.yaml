@@ -2,7 +2,7 @@
 # own files under configs/{model,algo,touch}: the server always sends everything the robot can sense (tactile, force, gripper
 # effort) and the consumer decides what to use, so ONE server serves the runs with and without touch.
 #
-# Read by:  python -m src.envs.server --config configs/task/peg_insert_forge.yaml [--set KEY=VALUE ...]
+# Read by:  python -m src.envs.isaaclab.server --config configs/task/peg_insert_forge.yaml [--set KEY=VALUE ...]
 #
 # Carried over from the EXPO-FT task files (values and their reasons unchanged; see that repo's YAML for the measurements).
 
@@ -15,7 +15,7 @@ language_instruction: "Insert the peg into the socket."
 # processes (several GPUs): list their endpoints in the client, nothing else changes. Measure time and memory as a function of N:
 #   pytest tests/test_isaac_cost.py --isaac -s        (writes reports/env_cost_*.json)
 num_envs: 8
-# false (required by the sensors, see src/envs/forge_backend.py): the N environments are cloned as USD prims. FORGE's own default
+# false (required by the sensors, see src/envs/isaaclab/forge_backend.py): the N environments are cloned as USD prims. FORGE's own default
 # is true (clones only in Fabric), under which every camera / contact sensor sees a single environment.
 clone_in_fabric: false
 
@@ -32,7 +32,7 @@ auto_reset: true          # the next round starts by itself when the last episod
 #   franka            FORGE's own Franka + Franka Hand
 #   robotiq_2f85      Franka arm + Robotiq 2F-85 (NVIDIA RoboLab USD), no taxels
 #   robotiq_2f85_tsf  same + 7x4 tactile zones on each finger (56 taxels): sends extra/tactile (2, 7, 4) in N
-# The Robotiq USD is built from third_party/robotiq/ on the first start (see src/envs/robot_assets.py).
+# The Robotiq USD is built from third_party/robotiq/ on the first start (see src/envs/isaaclab/robot_assets.py).
 robot: "robotiq_2f85_tsf"
 # Optional, Robotiq only (None = NVIDIA's values; the profile carries finger_effort 6.0 and fingerpad_length 0.0056):
 # finger_stiffness: 5.7e3

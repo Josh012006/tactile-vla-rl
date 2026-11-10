@@ -24,9 +24,9 @@ import torch
 import isaaclab_tasks  # noqa: F401  (registers Isaac-Forge-*-Direct-v0)
 from isaaclab_tasks.utils import parse_env_cfg
 
-from . import protocol as P
-from .backend import ManagerBackend
-from .episode_manager import VectorEnvManager
+from .. import protocol as P
+from ..backend import ManagerBackend
+from ..episode_manager import VectorEnvManager
 from .forge_env import CAMERA_SIZE, GRIPPER_OPEN_WIDTH, ForgeEnvJointPosPi05
 from .robot_assets import ensure_robot_usd
 from .robots import TACTILE_COLS, TACTILE_ROWS, apply_to_env_cfg, profile_from_yaml, robot_info

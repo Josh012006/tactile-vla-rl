@@ -29,7 +29,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional, Tuple
 
-REPO_ROOT = Path(__file__).resolve().parents[2]      # src/envs/robots.py -> repo root
+REPO_ROOT = Path(__file__).resolve().parents[3]      # src/envs/isaaclab/robots.py -> repo root
 
 ROBOTIQ_DIR = REPO_ROOT / "third_party" / "robotiq"
 ROBOTIQ_SOURCE_USD = ROBOTIQ_DIR / "robotiq_usd" / "franka_robotiq_2f_85_flattened.usd"

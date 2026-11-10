@@ -17,7 +17,7 @@ dependencies = [
 dev = ["pytest>=8"]
 
 [tool.uv]
-# The code is imported as `src.envs...` from the repo root (python -m src.envs.server, pytest): nothing to build or install.
+# The code is imported as `src.envs...` from the repo root (python -m src.envs.isaaclab.server, pytest): nothing to build or install.
 package = false
 
 [tool.pytest.ini_options]

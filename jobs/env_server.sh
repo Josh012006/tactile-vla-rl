@@ -7,5 +7,5 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source .venv-isaaclab/bin/activate
 export OMNI_KIT_ACCEPT_EULA=YES
-export CUBLAS_WORKSPACE_CONFIG=:4096:8      # reproducible resets (src/envs/server.py explains)
-exec python -m src.envs.server --config "${ENV_CONFIG:-configs/task/peg_insert_forge.yaml}" "$@"
+export CUBLAS_WORKSPACE_CONFIG=:4096:8      # reproducible resets (src/envs/isaaclab/server.py explains)
+exec python -m src.envs.isaaclab.server --config "${ENV_CONFIG:-configs/task/peg_insert_forge.yaml}" "$@"

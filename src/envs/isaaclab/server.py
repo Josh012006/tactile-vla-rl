@@ -1,8 +1,8 @@
 """Isaac Lab environment server (run inside the Isaac Lab virtualenv ONLY).
 
     export CUBLAS_WORKSPACE_CONFIG=:4096:8        # required for reproducible resets, set it BEFORE the process starts
-    python -m src.envs.server --config configs/task/peg_insert_forge.yaml
-    python -m src.envs.server --config ... --set num_envs=16 --set robot=robotiq_2f85_tsf     # any YAML field, one run
+    python -m src.envs.isaaclab.server --config configs/task/peg_insert_forge.yaml
+    python -m src.envs.isaaclab.server --config ... --set num_envs=16 --set robot=robotiq_2f85_tsf     # any YAML field, one run
 
 The process owns the simulation: `num_envs` independent environments in ONE scene (protocol.py), served on `server_port`. They
 start their episodes together, with FORGE's own reset (a round), and each runs its own episode; the next round starts when the
@@ -56,7 +56,7 @@ def main():
 
     # Everything that imports Isaac Sim comes after AppLauncher.
     from .forge_backend import build_backend
-    from .ws_server import WsEnvServer
+    from ..ws_server import WsEnvServer
 
     logging.basicConfig(level=logging.INFO)
     try:

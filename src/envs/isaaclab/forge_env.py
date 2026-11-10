@@ -47,7 +47,7 @@ both confined to this file:
    smoothing (`ema_factor`), which was tuned for the task-space action's
    scale/semantics and has no established meaning for a joint-position target.
 
-3. Robot and taxels (src/envs/robots.py, YAML field `robot`). With the Robotiq 2F-85 profiles the gripper is ONE
+3. Robot and taxels (src/envs/isaaclab/robots.py, YAML field `robot`). With the Robotiq 2F-85 profiles the gripper is ONE
    driven joint (`finger_joint`, radians, 0 = open) plus five mimic joints that PhysX moves by itself, instead of
    FORGE's two prismatic fingers. FORGE keeps writing "width in m per finger, 0 = closed, GRIPPER_OPEN_WIDTH = open" in
    columns 7:9 of its joint tensors; `_install_gripper_adapter` converts that width at the two places where a joint

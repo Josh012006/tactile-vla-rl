@@ -1,6 +1,6 @@
 """Builds the FORGE-ready USD of the Robotiq robots (needs pxr: runs inside Isaac Sim / Kit, or with usd-core).
 
-    src/envs/server.py calls ensure_robot_usd() itself when the YAML says `robot: robotiq_2f85[_tsf]`
+    src/envs/isaaclab/server.py calls ensure_robot_usd() itself when the YAML says `robot: robotiq_2f85[_tsf]`
     (the first server start builds the USD; it is rebuilt when one of its inputs changes).
 
 Output: third_party/robotiq/_build/<robot>.usda (+ <robot>.json stamp, + <robot>_zones.usda for the taxel variant). All gitignored.

@@ -1,7 +1,7 @@
 """Glue between the WebSocket server and a VectorEnvManager (numpy only: no Isaac Sim, usable with a fake simulator).
 
 `ManagerBackend` implements ws_server.Backend: it turns the requests of protocol.py into manager calls and describes the task
-(`spec`). The Isaac Lab side (forge_backend.py) builds a manager around the real simulator and wraps it in this class; the
+(`spec`). The Isaac Lab side (isaaclab/forge_backend.py) builds a manager around the real simulator and wraps it in this class; the
 tests wrap a fake simulator in the SAME class, so the protocol logic that runs on the cluster is the one the CPU tests run.
 """
 from __future__ import annotations

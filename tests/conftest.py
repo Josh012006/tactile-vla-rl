@@ -3,7 +3,7 @@
 Two families of tests:
   * pure tests (default): numpy only, no GPU, no Isaac Sim. They test the logic that runs on the cluster, with a fake simulator
     behind the same SimAdapter (tests/fakes.py).
-  * Isaac tests (`--isaac`): start real env servers (python -m src.envs.server) in subprocesses, so they need the Isaac Lab
+  * Isaac tests (`--isaac`): start real env servers (python -m src.envs.isaaclab.server) in subprocesses, so they need the Isaac Lab
     virtualenv and a GPU. They check the part that cannot be tested without the simulator (reset fidelity, independence of the environments)
     and measure time and GPU memory as a function of the number of environments.
 """
@@ -63,7 +63,7 @@ class IsaacServer:
 
     def start(self, timeout_s=1800):
         env = {**os.environ, "CUBLAS_WORKSPACE_CONFIG": ":4096:8"}
-        cmd = [sys.executable, "-m", "src.envs.server", "--config", self.config, *sum((["--set", s] for s in self.sets), [])]
+        cmd = [sys.executable, "-m", "src.envs.isaaclab.server", "--config", self.config, *sum((["--set", s] for s in self.sets), [])]
         t0 = time.time()
         with open(self.log_path, "w") as log:
             self.proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)

@@ -2,7 +2,7 @@
 
 Why it lives on the SERVER side: the old client kept ONE scalar state (done, success, streak) and Isaac Lab ended episodes by
 itself and reset inside env.step(), so the step that timed out returned a post-reset observation and an always-False success
-flag. Here Isaac Lab never ends or resets anything (its timeout is disabled, see forge_env.py): this class decides, per
+flag. Here Isaac Lab never ends or resets anything (its timeout is disabled, see isaaclab/forge_env.py): this class decides, per
 environment, when an episode is over, from the "inserted" flag FORGE computes at each step.
 
 Rules, for each environment e whose episode is running before a step (`acting[e]`):

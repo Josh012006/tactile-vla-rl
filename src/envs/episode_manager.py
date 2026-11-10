@@ -2,7 +2,7 @@
 
 `VectorEnvManager` is everything the server does between two physics steps: when a round starts, when an episode ends, which
 environments are held, the final observations. The simulator is behind the small `SimAdapter` interface: the real one
-(forge_backend.ForgeSim) drives Isaac Lab, the fake one (tests/fakes.py) is a few lines of numpy, so the SAME manager code is
+(isaaclab/forge_backend.ForgeSim) drives Isaac Lab, the fake one (tests/fakes.py) is a few lines of numpy, so the SAME manager code is
 what the CPU tests exercise and what runs on the cluster.
 
 Rounds. FORGE's reset acts on ALL environments and steps the physics, so the environments of a server start their episodes
