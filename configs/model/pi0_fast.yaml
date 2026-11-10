@@ -15,10 +15,19 @@ checkpoint: gs://openpi-assets/checkpoints/polaris/pi0_fast_droid_jointpos_polar
 action_dim: 8                  # 7 joints + gripper (no padding: this model is built with action_dim 8)
 action_horizon: 10
 max_token_len: 180             # maximum length of the prompt + state + action tokens; a chunk that needs more is cut
-# NOT verified yet: that this checkpoint exists in the bucket and what it returns. This config's data pipeline (RLDS, action space
-# JOINT_POSITION) puts DeltaActions on the inputs AND AbsoluteActions on the outputs, so the policy is expected to return ABSOLUTE
-# targets (the chunk-start state is already added inside), unlike pi05 above. Read from the code, to be confirmed on a rollout
-# before anything is built on it: adding the chunk-start state again would add it twice.
+# Checked on 2026-11-10 (src.models.fetch: the checkpoint exists; src.models.probe: 5 chunks of a FORGE rollout all look ABSOLUTE).
+# This config's data pipeline (RLDS, action space JOINT_POSITION) puts DeltaActions on the inputs AND AbsoluteActions on the outputs, so
+# the policy returns ABSOLUTE targets (the chunk-start state is already added inside), unlike pi05 above: adding the chunk-start state
+# again would add it twice.
 output_semantics: absolute_targets
-# The FAST tokenizer is not in the checkpoint: openpi downloads `physical-intelligence/fast` from the Hugging Face Hub at runtime
-# (trust_remote_code=True) and the PaliGemma tokenizer from gs://big_vision. Not pinned by the submodule: see docs.
+
+# LoRA keys (see configs/model/pi05.yaml; pi0-FAST has no action expert, hence no action_head). This checkpoint is a FULL fine-tune of the
+# VLM: false loads it as it is (openpi's strict loading, `load: strict`). true would add LoRA matrices on top (`load: weight_loader`).
+use_lora: false
+lora_rank:
+  vlm: 16
+load: strict
+# The FAST tokenizer is not in the checkpoint: openpi loads `physical-intelligence/fast` from the Hugging Face Hub
+# (trust_remote_code=True) and the PaliGemma tokenizer from gs://big_vision. The submodule does not pin them. Revision of the FAST
+# tokenizer fetched by `python -m src.models.fetch` on 2026-11-10 (a RECORD of what the experiments ran with: nothing enforces it yet):
+fast_tokenizer_revision: ec4d7aa71691cac0b8bed6942be45684db2110f4

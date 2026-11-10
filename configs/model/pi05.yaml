@@ -6,10 +6,29 @@
 name: pi05
 family: pi05
 
-# Name of a TrainConfig in third_party/openpi/src/openpi/training/config.py (tests/test_models_pin.py checks that it exists).
-# Same weights and DROID norm stats as the base pi05_droid_jointpos; this one is the config expo-ft evaluated and fine-tuned (LoRA).
+# Name of a TrainConfig in third_party/openpi/src/openpi/training/config.py (tests/test_models_pin.py checks that it exists). It provides
+# the data pipeline, the DROID norm stats and the weights (pi05_droid_jointpos); its Gemma variants are OVERRIDDEN by use_lora / lora_rank
+# below (src/models/openpi_config.py), so its "lora" in the name only says that it is the config expo-ft evaluated and fine-tuned.
 openpi_config: expo_pi05_droid_lora_finetune_sft_joint_state
 checkpoint: gs://openpi-assets/checkpoints/pi05_droid_jointpos          # params/ and assets/ (norm stats) live there
+
+# LoRA, as openpi has it (nothing re-implemented):
+#   use_lora: true  -> the Gemma weights are frozen and LoRA matrices are trained (openpi's freeze filter: the SigLIP vision tower and the
+#                      action projections stay trainable too). false -> no LoRA, everything is trained (full fine-tuning). Default: true.
+#   lora_rank       -> openpi's defaults: 16 for the VLM (gemma_2b_lora), 32 for the action expert (gemma_300m_lora). Another rank changes the
+#                      model structure: the same value must be used wherever a checkpoint trained with it is loaded.
+use_lora: true
+lora_rank:
+  vlm: 16
+  action_head: 32
+
+# How the weights are loaded (src/models/loading.py). The checkpoint has NO LoRA tensors, so openpi's strict loading fails with LoRA
+# ("symmetric difference of key sets: {'lora_a', 'lora_b'}"). expo-ft loads through the config's weight_loader, which keeps the checkpoint
+# weights and takes the LoRA parameters from the model's own initialisation: `load: weight_loader` does the same. openpi initialises
+# lora_a AND lora_b with normal(0.01) whereas the LoRA paper (Hu et al. 2021) starts from B = 0: a freshly initialised LoRA model is the
+# base model plus a random perturbation, not exactly the base function (its size is being measured). `use_lora: false` is the exact base
+# function (`python -m src.models.probe --model pi05 --use-lora false`).
+load: weight_loader
 
 action_dim: 8                  # 7 joints + gripper; the model itself works on 32 (padded), 8 are read
 action_horizon: 16             # actions per chunk

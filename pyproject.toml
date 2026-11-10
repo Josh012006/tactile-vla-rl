@@ -25,8 +25,10 @@ openpi-client = { path = "third_party/openpi/packages/openpi-client", editable =
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" }
 
 [tool.uv]
-# Same pins as the openpi fork (and as expo-ft): its JAX stack only resolves with them.
-override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
+# Same pins as the openpi fork and as expo-ft: its JAX stack only resolves with them. openpi needs numpy < 2, and the newest
+# `datasets` / `pyarrow` need numpy >= 2 (ImportError: pyarrow requires NumPy 2.0 or newer): datasets 3.x and the pyarrow that
+# expo-ft ran with, with numpy 1.26.4, are the combination that is known to import.
+override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "datasets>=3.0,<4.0", "pyarrow==24.0.0"]
 # The code is imported as `src.envs...` from the repo root (python -m src.envs.isaaclab.server, pytest): nothing to build or install.
 package = false
 
