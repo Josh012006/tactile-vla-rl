@@ -31,7 +31,7 @@ class Backend(Protocol):
     """Every method runs on the thread that called WsEnvServer.serve_forever()."""
 
     def spec(self) -> dict: ...                                   # protocol.EnvSpec.to_wire()
-    def reset(self, request: dict) -> dict: ...                   # request: env_ids, bank_ids, seed -> StepResult in wire form
+    def reset(self, request: dict) -> dict: ...                   # request: seed, round -> StepResult in wire form
     def step(self, request: dict) -> dict: ...                    # request: actions, auto_reset -> StepResult in wire form
     def observe(self) -> dict: ...                                # {"obs": ...}
     def debug(self, request: dict) -> Any: ...                    # optional diagnostics, simulation-only

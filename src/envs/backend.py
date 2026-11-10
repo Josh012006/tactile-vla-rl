@@ -14,13 +14,11 @@ from .episode_manager import VectorEnvManager
 
 class ManagerBackend:
     def __init__(self, manager: VectorEnvManager, obs_spec: P.ObsSpec, prompt: str = "", control_hz: float = 15.0,
-                 robot: Optional[dict] = None, debug_fn: Optional[Callable[[dict], Any]] = None,
-                 sim_touching_kinds=()):
+                 robot: Optional[dict] = None, debug_fn: Optional[Callable[[dict], Any]] = None):
         self.manager = manager
         self.obs_spec = obs_spec
         self.prompt, self.control_hz, self.robot = prompt, float(control_hz), dict(robot or {})
         self.debug_fn = debug_fn
-        self.sim_touching_kinds = frozenset(sim_touching_kinds)     # debug ops that move the simulator
         self._checked = False
 
     def spec(self) -> dict:
@@ -28,7 +26,7 @@ class ManagerBackend:
         return P.EnvSpec(
             protocol_version=P.PROTOCOL_VERSION, num_envs=m.n, action_dim=P.ACTION_DIM, max_steps=m.tracker.max_steps,
             success_hold_steps=m.tracker.hold_steps, control_hz=self.control_hz, prompt=self.prompt,
-            auto_reset=m.auto_reset, bank_size=m.bank_size, obs=self.obs_spec, robot=self.robot).to_wire()
+            auto_reset=m.auto_reset, obs=self.obs_spec, robot=self.robot).to_wire()
 
     def _check_obs(self, obs: dict):
         """Once: what the spec announces is what is sent."""
@@ -46,7 +44,7 @@ class ManagerBackend:
         self._checked = True
 
     def reset(self, request: dict) -> dict:
-        out = self.manager.reset(env_ids=request.get("env_ids"), bank_ids=request.get("bank_ids"), seed=request.get("seed"))
+        out = self.manager.reset(seed=request.get("seed"), round=request.get("round"))
         self._check_obs(out["obs"])
         return out
 
@@ -64,6 +62,4 @@ class ManagerBackend:
             return self.manager.timings(reset=bool(request.get("reset", False)))
         if self.debug_fn is None:
             return {"error": f"unknown debug kind: {kind}"}
-        if kind in self.sim_touching_kinds:        # it moves the simulator: the episodes in flight are no longer valid
-            self.manager.invalidate()
         return self.debug_fn(request)

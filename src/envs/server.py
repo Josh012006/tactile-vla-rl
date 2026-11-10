@@ -4,10 +4,10 @@
     python -m src.envs.server --config configs/task/peg_insert_forge.yaml
     python -m src.envs.server --config ... --set num_envs=16 --set robot=robotiq_2f85_tsf     # any YAML field, one run
 
-The process owns the simulation: `num_envs` independent environments in ONE scene (protocol.py), served on `server_port`. At
-start-up it builds (or loads from cache) the bank of start states with the real FORGE reset; from then on an environment is
-reset by writing a bank entry into it, without disturbing the others. The learner is the client (src/envs/client.py). The task
-is fixed for the life of the process: loading another scene would cost the ~2 minute Isaac Sim start-up again.
+The process owns the simulation: `num_envs` independent environments in ONE scene (protocol.py), served on `server_port`. They
+start their episodes together, with FORGE's own reset (a round), and each runs its own episode; the next round starts when the
+last one has ended. The learner is the client (src/envs/client.py). The task is fixed for the life of the process: loading
+another scene would cost the ~2 minute Isaac Sim start-up again.
 
 Why everything is inside main(): AppLauncher must exist before any isaaclab_tasks / omni import, and importing this
 module (e.g. for `--help` or by a test) must not start Kit.
@@ -83,7 +83,7 @@ def main():
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
-    print(f"[env_server] ready: {backend.manager.n} environments, bank of {backend.manager.bank_size}, port {server.port or cfg.get('server_port', 8102)}", flush=True)
+    print(f"[env_server] ready: {backend.manager.n} environments, port {server.port or cfg.get('server_port', 8102)}", flush=True)
     server.serve_forever()      # returns only through shutdown() -> os._exit(0)
 
 

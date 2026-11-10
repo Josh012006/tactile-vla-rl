@@ -12,22 +12,20 @@ language_instruction: "Insert the peg into the socket."
 
 # -- Parallelism ---------------------------------------------------------------------------------------------------------
 # Independent environments simulated by ONE server process, in one scene (see src/envs/protocol.py). More servers = more
-# processes (several GPUs): list their endpoints in the client, nothing else changes. Measure time and memory per environment:
+# processes (several GPUs): list their endpoints in the client, nothing else changes. Measure time and memory as a function of N:
 #   pytest tests/test_isaac_cost.py --isaac -s        (writes reports/env_cost_*.json)
 num_envs: 8
 # false (required by the sensors, see src/envs/forge_backend.py): the N environments are cloned as USD prims. FORGE's own default
 # is true (clones only in Fabric), under which every camera / contact sensor sees a single environment.
 clone_in_fabric: false
 
-# -- Start states --------------------------------------------------------------------------------------------------------
-# FORGE's reset acts on ALL environments and steps the physics, so it cannot run while others collect. It runs ONCE at start-up
-# (ceil(bank_size / num_envs) real resets), every start state is captured completely, and "reset environment i" afterwards
-# writes one of them into environment i (no physics step, the others are untouched). See src/envs/start_bank.py.
-bank_size: 256            # distinct start states. Every one is used once before any repeats (per environment, own random stream)
-bank_seed: 1234           # seed of the real resets that build the bank
-bank_cache_dir: "cache/start_banks"   # the bank is saved here (key: all the physics/robot/camera fields + num_envs); null = rebuild
-env_seed: 0               # default seed of the start-state order (a client reset(seed=...) overrides it)
-auto_reset: true          # an environment whose episode ends is restarted at once (false: it is held until the client resets it)
+# -- Rounds --------------------------------------------------------------------------------------------------------------
+# FORGE's reset acts on ALL environments and steps the physics, so the environments of a server start their episodes together
+# (a round, with the real reset) and each runs its own episode; one that ended waits, held in place, until the others have ended,
+# then the next round starts (src/envs/episode_manager.py). The start state of every environment is a deterministic function of
+# (seed, round, num_envs), whatever ran before: a run is replayed exactly from (seed, rounds).
+env_seed: 0               # default seed of the sequence of rounds (a client reset(seed=...) overrides it)
+auto_reset: true          # the next round starts by itself when the last episode of the round ends (false: the client resets)
 
 # -- Robot ---------------------------------------------------------------------------------------------------------------
 #   franka            FORGE's own Franka + Franka Hand
@@ -71,6 +69,7 @@ disable_sleep: false
 # the data of an experiment.
 enhanced_determinism: true
 # The reset (reseed + reset) is done this many times: the start state otherwise depends a little on the previous episode.
+# Every pass costs one real reset (seconds) at the start of each round.
 reset_passes: 2
 
 # -- Server --------------------------------------------------------------------------------------------------------------

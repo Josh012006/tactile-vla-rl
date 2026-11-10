@@ -7,9 +7,8 @@
    subset while the others run would therefore disturb them. So:
      - the native reset is never allowed to fire (the server sets episode_length_s so large that `_get_dones` never
        reports a timeout; `assert_no_native_reset()` checks it after every step);
-     - the real reset (`reset_lockstep`, all environments together) runs ONLY at start-up, to build the bank of start
-       states (start_bank.py); during collection "reset environment i" = write one bank entry into environment i, which
-       needs no physics step and leaves the other environments alone (`write_robot_state_raw`, `refresh_kinematics`).
+     - the environments start their episodes together, with the real reset (`reset_lockstep`, all environments at once), and
+       the next reset waits until every episode of the round has ended (episode_manager.py).
    The episode bookkeeping (steps, success streak, who is running) is NOT here: see episode_tracker.py.
 
 Two changes relative to stock FORGE (isaaclab_tasks.direct.forge.forge_env.ForgeEnv),
@@ -120,9 +119,6 @@ class ForgeEnvJointPosPi05(ForgeEnv):
         self._zone_sync = None              # fallback, see _init_zone_sync
         self._finger_adapter = None         # Robotiq only, see _install_gripper_adapter
         super().__init__(cfg, render_mode=render_mode, **kwargs)
-        # The unwrapped joint-state writer (the Robotiq adapter below replaces robot.write_joint_state_to_sim by a version
-        # that converts FORGE's gripper width to the finger angle): the start-state bank stores and writes RAW angles.
-        self._raw_write_joint_state = self._robot.write_joint_state_to_sim
         if self._tactile_sensors:
             self._init_tactile()
             self._sync_zones()
@@ -425,24 +421,7 @@ class ForgeEnvJointPosPi05(ForgeEnv):
         # stray effort command can ever linger, regardless of what reset does.
         self._robot.set_joint_effort_target(torch.zeros_like(self._target_joint_pos))
 
-    # ------------------------------------------------------------------ start-state restore (see start_bank.py)
-
-    def write_robot_state_raw(self, joint_pos, joint_vel, env_ids):
-        """Write the RAW simulation joint state (rad; Robotiq finger angle and mimic joints as stored, no width conversion)
-        of `env_ids` only. `joint_pos`, `joint_vel`: (len(env_ids), num_joints)."""
-        self._raw_write_joint_state(joint_pos, joint_vel, env_ids=env_ids)
-        self._sync_zones()
-
-    def refresh_kinematics(self):
-        """Make the link poses (and the camera / contact frames hanging on them) follow joint states written without a
-        physics step."""
-        if hasattr(self.sim, "forward"):
-            self.sim.forward()
-        else:
-            from isaacsim.core.simulation_manager import SimulationManager
-            SimulationManager.get_physics_sim_view().update_articulations_kinematic()
-
-    # ------------------------------------------------------------------ real reset (start-up only)
+    # ------------------------------------------------------------------ real reset (all environments together)
 
     def hold_action(self):
         """(num_envs, 8) action that keeps every arm and gripper where it is. Actions are ABSOLUTE joint targets, so an
@@ -453,13 +432,14 @@ class ForgeEnvJointPosPi05(ForgeEnv):
 
     def reset_lockstep(self, seed=None, passes: int = 1):
         """The REAL FORGE reset of ALL environments together, then one hold step so the cameras show the new state.
-        Used at start-up to build the start-state bank (start_bank.py), never during collection.
+        This is the only reset of the server: it starts a round (episode_manager.py).
 
         seed: reseeds the global torch RNG with torch_deterministic=True BEFORE each reset pass (not passed to
           env.reset(): that would reseed a second time, non-deterministically; see the notes in isaaclab/utils/seed.py).
           All randomizations of FORGE (peg and socket pose noise, force threshold, ...) are batched draws from that one
           generator, so the start state of environment i is a function of (seed, num_envs, i): reproducible for a fixed
-          num_envs, NOT equal to what a single environment gets from the same seed.
+          num_envs (bit for bit, whatever ran before: tests/test_isaac_fidelity.py), NOT equal to what a single environment gets
+          from the same seed.
         passes: the whole reset is repeated this many times (YAML `reset_passes`): the start state otherwise depends a
           little on the episode that ran before (measured on the Robotiq, see the task YAML).
         After the reset one hold step is taken so that the TiledCameras have rendered the new state (DirectRLEnv.reset

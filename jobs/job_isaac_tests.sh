@@ -1,9 +1,9 @@
 #!/bin/bash
-# Isaac tests (restore equivalence, isolation, time and VRAM per environment) as a batch job on an L40S.
-#   sbatch jobs/job_isaac_tests.sh                       # everything (bank tests, then the cost sweep)
-#   sbatch jobs/job_isaac_tests.sh tests/test_isaac_bank.py
-#   COST_NUM_ENVS=1,2,4,8,16,32,64 sbatch --export=ALL jobs/job_isaac_tests.sh tests/test_isaac_cost.py
-# Output: logs/slurm/isaac_tests_<jobid>.out and reports/*.json (restore_equivalence, isolation, env_cost_*).
+# Isaac tests (fidelity of the real reset, independence of the environments, time and VRAM as a function of N) on an L40S.
+#   sbatch jobs/job_isaac_tests.sh                       # everything (fidelity tests, then the cost sweep)
+#   sbatch jobs/job_isaac_tests.sh tests/test_isaac_fidelity.py
+#   COST_NUM_ENVS=1,4,16,64 sbatch --export=ALL jobs/job_isaac_tests.sh tests/test_isaac_cost.py
+# Output: logs/slurm/isaac_tests_<jobid>.out and reports/*.json (reset_fidelity, isolation, env_cost_*).
 #
 #SBATCH --job-name=isaac_tests
 #SBATCH --ntasks=1

@@ -1,13 +1,14 @@
-"""The logic of a vector of independent environments, with no simulator in it (numpy only, tested without a GPU).
+"""The logic of a vector of environments driven in rounds, with no simulator in it (numpy only, tested without a GPU).
 
-`VectorEnvManager` is everything the server does between two physics steps: which start state each environment gets, when an
-episode ends, the auto-reset, the final observation, the frozen environments. The simulator is behind the small `SimAdapter`
-interface: the real one (forge_backend.ForgeSim) drives Isaac Lab, the fake one (testing.FakeSim) is a few lines of numpy, so
-the SAME manager code is what the CPU tests exercise and what runs on the cluster.
+`VectorEnvManager` is everything the server does between two physics steps: when a round starts, when an episode ends, which
+environments are held, the final observations. The simulator is behind the small `SimAdapter` interface: the real one
+(forge_backend.ForgeSim) drives Isaac Lab, the fake one (tests/fakes.py) is a few lines of numpy, so the SAME manager code is
+what the CPU tests exercise and what runs on the cluster.
 
-Start states: environment slot s draws its start states from its OWN random stream, seeded by (seed, s): a permutation of the
-bank, consumed in order, reshuffled when exhausted. So the initialisation of an environment depends on nothing but its seed
-and its own episode count, never on the other environments, and every bank entry is used once before any is repeated.
+Rounds. FORGE's reset acts on ALL environments and steps the physics, so the environments of a server start their episodes
+together (a round) and the next round starts when the last of them has ended; an environment that ended earlier is held in place
+and ignored (`acting` False). The real reset of round r is seeded with `seed + r`: the start state of every environment is a
+deterministic function of (seed, r, num_envs), whatever ran before, so a run can be replayed exactly from (seed, rounds).
 """
 from __future__ import annotations
 
@@ -17,12 +18,16 @@ from typing import Dict, Optional, Protocol
 import numpy as np
 
 from .episode_tracker import EpisodeTracker, StepFlags
+from .protocol import MAX_ROUND
 
 Obs = Dict[str, np.ndarray]
 
 
 class SimAdapter(Protocol):
     num_envs: int
+
+    def reset(self, seed: int) -> None:
+        """The real reset of ALL environments, seeded with `seed`, followed by the step that renders the cameras."""
 
     def step_physics(self, actions: np.ndarray) -> None:
         """Advance ALL environments by one control step with (N, 8) actions."""
@@ -33,49 +38,29 @@ class SimAdapter(Protocol):
     def observe(self) -> Obs:
         """Observation of ALL environments, numpy, environment index first."""
 
-    def restore(self, env_ids: np.ndarray, bank_ids: np.ndarray) -> None:
-        """Write bank entry bank_ids[i] into environment env_ids[i]. No physics step; the other environments are untouched."""
-
     def hold_actions(self) -> np.ndarray:
         """(N, 8) actions that keep every robot where it is now."""
 
 
 class VectorEnvManager:
-    def __init__(self, sim: SimAdapter, bank_obs: Obs, max_steps: int, success_hold_steps: int = 1,
-                 auto_reset: bool = True, seed: int = 0):
+    def __init__(self, sim: SimAdapter, max_steps: int, success_hold_steps: int = 1, auto_reset: bool = True, seed: int = 0):
         self.sim = sim
         self.n = int(sim.num_envs)
-        self.bank_obs = bank_obs
-        sizes = {len(v) for v in bank_obs.values()}
-        if len(sizes) != 1 or min(sizes) < 1:
-            raise ValueError(f"bank_obs must hold the same, non-zero number of entries for every key, got {sizes}")
-        self.bank_size = sizes.pop()
         self.tracker = EpisodeTracker(self.n, max_steps, success_hold_steps)
         self.auto_reset = bool(auto_reset)
-        self.start_id = np.full(self.n, -1, dtype=np.int64)
+        self.seed = self._check_seed(seed)
+        self.round = -1                         # round of the episodes in flight (-1: nothing started yet)
         self._last_action: Optional[np.ndarray] = None
         self._started = False
         self._timings: Dict[str, list] = {}
-        self.reseed(seed)
-
-    # -- start-state sampling ----------------------------------------------------------------------------------------
-    def reseed(self, seed: int):
-        if int(seed) < 0:
-            raise ValueError(f"seed must be >= 0, got {seed}")
-        self.seed = int(seed)
-        self._rngs = [np.random.default_rng([self.seed, slot]) for slot in range(self.n)]
-        self._perm = [None] * self.n
-        self._pos = [0] * self.n
-
-    def _next_bank_id(self, slot: int) -> int:
-        if self._perm[slot] is None or self._pos[slot] >= self.bank_size:
-            self._perm[slot] = self._rngs[slot].permutation(self.bank_size)
-            self._pos[slot] = 0
-        value = int(self._perm[slot][self._pos[slot]])
-        self._pos[slot] += 1
-        return value
 
     # -- helpers -----------------------------------------------------------------------------------------------------
+    @staticmethod
+    def _check_seed(seed) -> int:
+        if int(seed) < 0:
+            raise ValueError(f"seed must be >= 0, got {seed}")
+        return int(seed)
+
     def _timed(self, name: str, fn, *args):
         """fn(*args), its wall time added to timings()[name] (the simulator adapters synchronise the GPU before returning)."""
         t0 = time.perf_counter()
@@ -86,21 +71,11 @@ class VectorEnvManager:
         return out
 
     def timings(self, reset: bool = False) -> Dict[str, dict]:
-        """{name: {"total_s", "calls", "mean_ms"}} for step_physics / inserted / observe / restore since the last reset."""
+        """{name: {"total_s", "calls", "mean_ms"}} for reset / step_physics / inserted / observe since the last reset=True."""
         out = {k: {"total_s": v[0], "calls": v[1], "mean_ms": 1e3 * v[0] / max(v[1], 1)} for k, v in self._timings.items()}
         if reset:
             self._timings = {}
         return out
-
-    def invalidate(self):
-        """The simulator was touched behind the manager's back (debug ops): reset() is needed before the next step."""
-        self._started = False
-
-    def _check_ids(self, env_ids) -> np.ndarray:
-        ids = np.asarray(env_ids, dtype=np.int64).reshape(-1)
-        if ids.size and (ids.min() < 0 or ids.max() >= self.n or len(np.unique(ids)) != len(ids)):
-            raise ValueError(f"env_ids must be distinct integers in [0, {self.n}), got {ids.tolist()}")
-        return ids
 
     def _empty_final(self, obs: Obs) -> Obs:
         return {k: v[:0] for k, v in obs.items()}
@@ -115,53 +90,33 @@ class VectorEnvManager:
         else:
             body = dict(reward=flags.reward, terminated=flags.terminated, truncated=flags.truncated, acting=flags.acting,
                         inserted=flags.inserted, success=flags.success, t=flags.t, all_done=self.tracker.all_done)
-        return {"obs": obs, "start_id": self.start_id.copy(), "final_obs": final_obs,
+        return {"obs": obs, "round_id": np.full(n, self.round, dtype=np.int64), "final_obs": final_obs,
                 "final_ids": np.asarray(final_ids, dtype=np.int64), **body}
 
-    def _splice_bank_obs(self, obs: Obs, ids: np.ndarray, bank: np.ndarray) -> Obs:
-        out = {}
-        for k, v in obs.items():
-            row = v if v.flags.writeable else np.array(v)
-            row[ids] = self.bank_obs[k][bank]
-            out[k] = row
-        return out
+    def _start_round(self, round_id: int) -> Obs:
+        """The real reset of every environment for round `round_id`; returns the first observation of the round."""
+        if not 0 <= round_id < MAX_ROUND:
+            raise ValueError(f"round must be in [0, {MAX_ROUND}), got {round_id}")
+        self._timed("reset", self.sim.reset, self.seed + round_id)
+        self.tracker.reset_envs()
+        self._last_action = self.sim.hold_actions().copy()
+        self.round = round_id
+        self._started = True
+        return self._timed("observe", self.sim.observe)
 
     # -- the operations ----------------------------------------------------------------------------------------------
-    def reset(self, env_ids=None, bank_ids=None, seed: Optional[int] = None) -> dict:
-        """Start new episodes in `env_ids` (default all) from `bank_ids` (default: drawn by each slot's own stream).
+    def reset(self, seed: Optional[int] = None, round: Optional[int] = None) -> dict:
+        """Start a round in every environment (real FORGE reset).
 
-        `env_ids=[]` is allowed and does nothing but report the current state (a client driving several servers uses it for
-        the servers it does not reset). `seed` reseeds the start-state streams of EVERY slot: only with env_ids=None."""
-        if seed is not None and env_ids is not None:
-            raise ValueError("seed reseeds the start-state stream of every environment: pass it with env_ids=None only")
-        ids = np.arange(self.n) if env_ids is None else self._check_ids(env_ids)
-        if not self._started and len(ids) != self.n:
-            raise RuntimeError("the first reset must reset every environment (reset(env_ids=None))")
-        if len(ids) == 0:
-            obs = self._timed("observe", self.sim.observe)
-            return self._wire(obs, None, self._empty_final(obs), np.zeros(0, np.int64))
+        seed  : sets the seed of the whole sequence of rounds (round 0 unless `round` says otherwise);
+        round : the position in the sequence (same seed, same round: same start states, bit for bit);
+        neither: the next round."""
         if seed is not None:
-            self.reseed(seed)
-        if bank_ids is None:
-            bank = np.array([self._next_bank_id(int(i)) for i in ids], dtype=np.int64)
+            self.seed = self._check_seed(seed)
+            target = 0 if round is None else int(round)
         else:
-            bank = np.asarray(bank_ids, dtype=np.int64).reshape(-1)
-            if len(bank) != len(ids):
-                raise ValueError(f"bank_ids has {len(bank)} entries for {len(ids)} environments")
-            if bank.min() < 0 or bank.max() >= self.bank_size:
-                raise ValueError(f"bank_ids must be in [0, {self.bank_size}), got {bank.tolist()}")
-        self._timed("restore", self.sim.restore, ids, bank)
-        self.tracker.reset_envs(ids)
-        self.start_id[ids] = bank
-        hold = self.sim.hold_actions()
-        self._last_action = hold.copy() if self._last_action is None else self._last_action
-        self._last_action[ids] = hold[ids]
-        if len(ids) == self.n:      # every row comes from the bank: no need to read the simulator
-            obs = {k: np.empty((self.n, *v.shape[1:]), v.dtype) for k, v in self.bank_obs.items()}
-        else:
-            obs = self._timed("observe", self.sim.observe)
-        obs = self._splice_bank_obs(obs, ids, bank)
-        self._started = True
+            target = self.round + 1 if round is None else int(round)
+        obs = self._start_round(target)
         return self._wire(obs, None, self._empty_final(obs), np.zeros(0, np.int64))
 
     def step(self, actions, auto_reset: Optional[bool] = None) -> dict:
@@ -183,23 +138,16 @@ class VectorEnvManager:
             return self._wire(obs, flags, self._empty_final(obs), np.zeros(0, np.int64))
 
         running = self.tracker.active
-        actions = np.where(running[:, None], actions, self._last_action)     # ended episodes repeat their last action
+        actions = np.where(running[:, None], actions, self._last_action)     # held environments repeat their last action
         self._last_action = actions.copy()
         self._timed("step_physics", self.sim.step_physics, actions)
         flags = self.tracker.update(self._timed("inserted", self.sim.inserted))
         obs = self._timed("observe", self.sim.observe)
 
-        done = flags.terminated | flags.truncated
-        final_obs, final_ids = self._empty_final(obs), np.zeros(0, np.int64)
-        if auto and done.any():
-            final_ids = np.flatnonzero(done)
-            final_obs = {k: np.array(v[final_ids]) for k, v in obs.items()}    # BEFORE the restore overwrites the rows
-            bank = np.array([self._next_bank_id(int(i)) for i in final_ids], dtype=np.int64)
-            self._timed("restore", self.sim.restore, final_ids, bank)
-            self.tracker.reset_envs(final_ids)
-            self.start_id[final_ids] = bank
-            self._last_action[final_ids] = self.sim.hold_actions()[final_ids]
-            obs = self._splice_bank_obs(obs, final_ids, bank)
+        final_ids = np.flatnonzero(flags.terminated | flags.truncated)
+        final_obs = {k: np.array(v[final_ids]) for k, v in obs.items()}      # BEFORE a new round overwrites the observation
+        if auto and self.tracker.all_done:
+            obs = self._start_round(self.round + 1)
         return self._wire(obs, flags, final_obs, final_ids)
 
     def observe(self) -> dict:

@@ -1,10 +1,12 @@
-"""Collector (steps / episodes modes) and run_fixed_episodes against a fake simulator through the real manager. Pure."""
+"""Collector (steps / episodes modes) and run_fixed_rounds against a fake simulator through the real manager. Pure (no GPU)."""
 import numpy as np
 import pytest
 
-from fakes import ScriptedPolicy, expected_length, make_manager
+from fakes import ScriptedPolicy, expected_length, make_manager, tag_of
 from src.envs import protocol as P
-from src.envs.collect import Collector, run_fixed_episodes
+from src.envs.collect import Collector, run_fixed_rounds
+
+J = P.JOINT_POSITION
 
 
 class DirectEnv:
@@ -13,8 +15,8 @@ class DirectEnv:
     def __init__(self, mgr):
         self.mgr, self.num_envs = mgr, mgr.n
 
-    def reset(self, env_ids=None, bank_ids=None, seed=None):
-        return P.StepResult.from_wire(self.mgr.reset(env_ids, bank_ids, seed))
+    def reset(self, seed=None, round=None):
+        return P.StepResult.from_wire(self.mgr.reset(seed, round))
 
     def step(self, actions, auto_reset=None):
         return P.StepResult.from_wire(self.mgr.step(actions, auto_reset))
@@ -26,68 +28,81 @@ def env_of(**kw):
 
 
 # ------------------------------------------------------------------------------------------------------------ steps mode
-def test_steps_mode_shapes_and_every_slot_gets_exactly_T_steps():
-    env, mgr, sim = env_of(num_envs=4, bank_size=12, max_steps=10)
+def test_steps_mode_shapes_and_every_environment_gets_exactly_T_steps():
+    env, mgr, sim = env_of(num_envs=4, max_steps=10)
     c = Collector(env, ScriptedPolicy(), mode="steps")
     r = c.collect(25)
-    assert r.action.shape == (25, 4, 8) and r.reward.shape == (25, 4) and r.obs[P.JOINT_POSITION].shape == (25, 4, 7)
-    assert r.next_obs[P.JOINT_POSITION].shape == (25, 4, 7) and r.last_obs[P.JOINT_POSITION].shape == (4, 7)
-    assert sim.physics_steps == 25 and c.total_env_steps == 100                      # nobody waited, nobody ran extra
+    assert r.reward.shape == (25, 4) and r.acting.shape == (25, 4) and r.round.shape == (25, 4)
+    assert r.obs[J].shape == (25, 4, 7) and r.next_obs[J].shape == (25, 4, 7) and r.last_obs[J].shape == (4, 7)
+    assert sim.physics_steps == 25
+    assert c.total_env_steps + c.total_idle_steps == 25 * 4 and c.total_env_steps == int(r.acting.sum())
 
 
-def test_next_obs_is_the_true_next_observation_and_never_crosses_an_episode_boundary():
-    env, mgr, sim = env_of(num_envs=3, bank_size=9, max_steps=6)
+def test_waiting_environments_are_marked_not_acting_and_a_round_restarts_all_of_them():
+    env, mgr, sim = env_of(num_envs=4, max_steps=10, seed=1)
+    r = Collector(env, ScriptedPolicy(), mode="steps").collect(12)
+    lengths = [expected_length(tag_of(1, e), 10)[0] for e in range(4)]
+    for e in range(4):
+        k = np.arange(1, 11)                                       # steps of round 0 (transition k is row k - 1)
+        assert (r.acting[:10, e] == (k <= lengths[e])).all()
+    assert r.acting[10:].all()                                     # rows 10 and 11: round 1 is running everywhere
+    assert (r.round[:10] == 0).all() and (r.round[10:] == 1).all()
+    assert c_idle(r) == sum(10 - n for n in lengths)
+
+
+def c_idle(r):
+    return int((~r.acting).sum())
+
+
+def test_next_obs_is_the_true_next_observation_and_never_crosses_a_round():
+    env, mgr, sim = env_of(num_envs=3, max_steps=6, seed=2)
+    r = Collector(env, ScriptedPolicy(), mode="steps").collect(30)
+    done = r.done
+    assert done.any()
+    assert (r.next_obs[J][done][:, 1] == r.t[done]).all()           # clock of the last observation = steps of the episode
+    first = ~done & r.acting & (r.t > 0)
+    assert (r.next_obs[J][first][:, 1] == r.t[first]).all()         # inside an episode, next obs is the following observation
+    ok = r.acting                                                   # (a waiting row is not a transition: its obs is the next round's)
+    assert (r.next_obs[J][..., 2][ok] == r.obs[J][..., 2][ok]).all()   # same start state: never the first obs of another round
+
+
+def test_flags_and_lengths_are_consistent_with_the_predicted_episodes():
+    env, mgr, sim = env_of(num_envs=4, max_steps=10, seed=5)
     r = Collector(env, ScriptedPolicy(), mode="steps").collect(40)
-    j = P.JOINT_POSITION
-    for t in range(40):
-        for e in range(3):
-            if r.done[t, e]:
-                assert r.next_obs[j][t, e, 1] == r.t[t, e]                           # last obs of the ended episode: clock == length
-                assert r.next_obs[j][t, e, 2] == r.obs[j][t, e, 2]                   # same start state: same episode
-                if t + 1 < 40:
-                    assert r.obs[j][t + 1, e, 1] == 0                                # the following transition starts a new episode
-            elif t + 1 < 40:
-                assert (r.next_obs[j][t, e] == r.obs[j][t + 1, e]).all()             # otherwise next_obs[t] == obs[t+1]
-
-
-def test_flags_are_consistent_with_the_predicted_episode_lengths():
-    env, mgr, sim = env_of(num_envs=4, bank_size=12, max_steps=10)
-    r = Collector(env, ScriptedPolicy(), mode="steps").collect(60)
-    assert len(r.episodes) >= 12
+    assert len(r.episodes) >= 8
     for ep in r.episodes:
-        length, term = expected_length(ep.start_id, 10)
-        assert ep.length == length and ep.terminated == term and ep.truncated == (not term) and ep.success == term
-        assert ep.episode_return == (1.0 if term else 0.0)                           # sparse reward: 1 at the inserting step
-    assert (r.reward[r.terminated] == 1.0).all() and (r.reward[~r.terminated] == 0.0).all()
-    assert not (r.terminated & r.truncated).any()
+        length, term = expected_length(tag_of(5 + ep.round, ep.env), 10)
+        assert (ep.length, ep.terminated, ep.truncated, ep.success) == (length, term, not term, term)
+        assert ep.episode_return == (1.0 if term else 0.0)
 
 
-def test_start_id_of_a_transition_is_the_start_state_of_its_own_episode():
-    env, mgr, sim = env_of(num_envs=3, bank_size=9, max_steps=6)
-    r = Collector(env, ScriptedPolicy(), mode="steps").collect(40)
-    assert (r.start_id == r.obs[P.JOINT_POSITION][:, :, 2]).all()
+def test_the_round_of_a_transition_is_the_round_of_its_own_episode():
+    env, mgr, sim = env_of(num_envs=3, max_steps=6, seed=4)
+    r = Collector(env, ScriptedPolicy(), mode="steps").collect(30)
+    seed_of_row = 4 + r.round
+    tags = r.obs[J][:, :, 2].astype(np.int64)
+    expected = np.array([[tag_of(seed_of_row[k, e], e) for e in range(3)] for k in range(30)])
+    assert (tags == expected).all()
 
 
 def test_the_episodes_in_flight_continue_across_calls_and_the_policy_version_is_stamped():
-    env, mgr, sim = env_of(num_envs=2, bank_size=6, max_steps=10)
+    env, mgr, sim = env_of(num_envs=2, max_steps=10)
     c = Collector(env, ScriptedPolicy(), mode="steps")
-    a = c.collect(4)
-    c.version += 1                                                                    # the learner "updated"
-    b = c.collect(4)
-    assert a.version.tolist() == [0] * 4 and b.version.tolist() == [1] * 4
-    assert (b.obs[P.JOINT_POSITION][0] == a.last_obs[P.JOINT_POSITION]).all()        # continues exactly where it stopped
-    j = P.JOINT_POSITION
-    for e in range(2):                                                                # an episode spans the two calls: clock is continuous
-        clocks = np.concatenate([a.obs[j][:, e, 1], b.obs[j][:, e, 1]])
-        resets = np.flatnonzero(np.diff(clocks) != 1)
-        assert all(clocks[i + 1] == 0 for i in resets)
+    a = c.collect(3)
+    c.version += 1
+    b = c.collect(3)
+    assert a.version.tolist() == [0, 0, 0] and b.version.tolist() == [1, 1, 1]
+    running = b.acting[0]
+    assert running.any() and not running.all()                      # env 0 (3 steps) ended in the first call, env 1 is still going
+    assert (b.t[0][running] == a.t[-1][running] + 1).all()          # the call continued the episode: t did not restart
+    assert (b.obs[J][0] == a.last_obs[J]).all()
 
 
 def test_extras_from_the_policy_are_stored_per_step():
     env, mgr, sim = env_of(num_envs=2)
-    pol = ScriptedPolicy()
-    r = Collector(env, lambda obs: (pol(obs), {"value": obs[P.JOINT_POSITION][:, 1]}), mode="steps").collect(5)
-    assert r.extras["value"].shape == (5, 2) and (r.extras["value"] == r.obs[P.JOINT_POSITION][:, :, 1]).all()
+    inner = ScriptedPolicy()
+    r = Collector(env, lambda o: (inner(o), {"logp": np.full(2, -1.5, np.float32)}), mode="steps").collect(4)
+    assert r.extras["logp"].shape == (4, 2) and (r.extras["logp"] == -1.5).all()
 
 
 def test_store_next_obs_false_saves_the_memory():
@@ -97,80 +112,68 @@ def test_store_next_obs_false_saves_the_memory():
 
 def test_bad_policy_output_and_arguments():
     env, mgr, sim = env_of(num_envs=2)
-    with pytest.raises(ValueError, match="actions"):
-        Collector(env, lambda obs: np.zeros((3, 8), np.float32), mode="steps").collect(1)
-    with pytest.raises(ValueError):
-        Collector(env, ScriptedPolicy(), mode="nope")
-    with pytest.raises(ValueError):
-        Collector(env, ScriptedPolicy(), mode="steps").collect(0)
+    with pytest.raises(ValueError, match="num_envs"):
+        Collector(env, lambda o: np.zeros((3, 8), np.float32)).collect(1)
+    with pytest.raises(ValueError, match="amount"):
+        Collector(env, ScriptedPolicy()).collect(0)
+    with pytest.raises(ValueError, match="mode"):
+        Collector(env, ScriptedPolicy(), mode="chunks")
 
 
-# ---------------------------------------------------------------------------------------------------------- episodes mode
+# -------------------------------------------------------------------------------------------------------- episodes mode
 def test_episodes_mode_returns_complete_episodes_with_their_final_observation():
-    env, mgr, sim = env_of(num_envs=4, bank_size=12, max_steps=10)
-    eps = Collector(env, ScriptedPolicy(), mode="episodes").collect(10)
-    assert len(eps) >= 10 and len(eps) <= 10 + 3                                       # may overshoot by < num_envs
-    j = P.JOINT_POSITION
+    env, mgr, sim = env_of(num_envs=4, max_steps=10, seed=3)
+    eps = Collector(env, ScriptedPolicy(), mode="episodes").collect(8)
+    assert len(eps) >= 8
     for ep in eps:
-        length, term = expected_length(ep.start_id, 10)
-        assert ep.length == length and ep.terminated == term and ep.success == term and ep.truncated == (not term)
-        assert ep.obs[j].shape == (length, 7) and ep.action.shape == (length, 8)
-        assert ep.obs[j][0, 1] == 0 and ep.obs[j][0, 2] == ep.start_id                  # starts at the start state, clock 0
-        assert (np.diff(ep.obs[j][:, 1]) == 1).all()                                    # contiguous steps of ONE episode
-        assert ep.final_obs[j][1] == length and ep.final_obs[j][2] == ep.start_id       # final obs: after the last action
-        assert ep.episode_return == (1.0 if term else 0.0)
+        length, term = expected_length(tag_of(3 + ep.round, ep.env), 10)
+        assert ep.length == length and ep.terminated == term and ep.truncated == (not term) and ep.success == term
+        assert ep.obs[J][0, 1] == 0 and ep.obs[J][0, 2] == tag_of(3 + ep.round, ep.env)       # starts at the start state, clock 0
+        assert ep.final_obs[J][1] == length and ep.final_obs[J][2] == ep.obs[J][0, 2]         # final obs: after the last action
+        assert ep.obs[J].shape == (length, 7) and ep.action.shape == (length, 8) and ep.reward.shape == (length,)
+        assert ep.reward.sum() == (1.0 if term else 0.0)
+
+
+def test_a_whole_round_is_N_episodes_one_per_environment_and_waiting_adds_no_rows():
+    env, mgr, sim = env_of(num_envs=4, max_steps=10, seed=1)
+    lengths = sorted(expected_length(tag_of(1, e), 10)[0] for e in range(4))
+    assert lengths == [3, 4, 7, 10]
+    c = Collector(env, ScriptedPolicy(), mode="episodes")
+    eps = c.collect(4)
+    assert sorted(ep.env for ep in eps) == [0, 1, 2, 3] and {ep.round for ep in eps} == {0}
+    assert sorted(ep.length for ep in eps) == lengths               # nobody was padded to the length of the slowest
+    assert c.total_env_steps == sum(lengths) and c.total_idle_steps == 4 * 10 - sum(lengths)
+    assert mgr.round == 1                                           # the next round has already started
 
 
 def test_episodes_in_flight_continue_after_the_update_and_mix_policy_versions():
-    env, mgr, sim = env_of(num_envs=3, bank_size=9, max_steps=10)
+    env, mgr, sim = env_of(num_envs=3, max_steps=10, seed=1)       # tags 3, 4, 5: lengths 10, 7, 3
+    assert [expected_length(tag_of(1, e), 10)[0] for e in range(3)] == [10, 7, 3]
     c = Collector(env, ScriptedPolicy(), mode="episodes")
-    first = c.collect(3)
+    first = c.collect(2)                                            # stops when the second episode ends, env 0 is still running
+    assert {ep.env for ep in first} == {1, 2}
     c.version += 1
-    second = c.collect(3)
-    mixed = [ep for ep in second if ep.version.min() != ep.version.max()]
-    assert mixed, "at least one episode was in flight during the update"
-    for ep in mixed:
-        assert ep.version[0] == 0 and ep.version[-1] == 1 and (np.diff(ep.version) >= 0).all()
-        assert (np.diff(ep.obs[P.JOINT_POSITION][:, 1]) == 1).all()                      # still one continuous episode
+    rest = c.collect(1)
+    assert [ep.env for ep in rest] == [0] and rest[0].length == 10
+    assert set(rest[0].version.tolist()) == {0, 1}                  # the update fell inside this episode
 
 
-def test_no_environment_waits_in_episodes_mode_either():
-    env, mgr, sim = env_of(num_envs=4, bank_size=12, max_steps=10)
-    c = Collector(env, ScriptedPolicy(), mode="episodes")
-    c.collect(8)
-    assert c.total_env_steps == 4 * sim.physics_steps
+# ----------------------------------------------------------------------------------------------------------- fixed rounds
+def test_fixed_rounds_give_the_same_episodes_every_time_and_in_order():
+    env, mgr, sim = env_of(num_envs=3, max_steps=10)
+    res = run_fixed_rounds(env, ScriptedPolicy(), [0, 2, 5], seed=7)
+    assert [(r["round"], r["env"]) for r in res] == [(r, e) for r in (0, 2, 5) for e in range(3)]
+    for r in res:
+        length, term = expected_length(tag_of(7 + r["round"], r["env"]), 10)
+        assert (r["length"], r["terminated"], r["truncated"], r["success"]) == (length, term, not term, term)
+    env2, mgr2, sim2 = env_of(num_envs=3, max_steps=10)
+    env2.reset(seed=99)                                             # something else ran before
+    assert run_fixed_rounds(env2, ScriptedPolicy(), [0, 2, 5], seed=7) == res
+    assert sim.reset_calls == [7, 9, 12]                            # each round is reset explicitly, never skipped or repeated
 
 
-# ---------------------------------------------------------------------------------------------- fixed-set evaluation
-def reference(bank_ids, max_steps=10):
-    return [expected_length(b, max_steps) for b in bank_ids]
-
-
-@pytest.mark.parametrize("num_envs", [1, 3, 8])
-def test_fixed_episodes_give_the_same_results_whatever_the_number_of_environments(num_envs):
-    ids = [0, 4, 3, 7, 1, 2, 11, 5, 9, 10]
-    env, mgr, sim = env_of(num_envs=num_envs, bank_size=12, max_steps=10)
-    res = run_fixed_episodes(env, ScriptedPolicy(), ids)
-    assert [r["bank_id"] for r in res] == ids                                           # one result per id, in order
-    for r, (length, term) in zip(res, reference(ids)):
-        assert r["length"] == length and r["terminated"] == term and r["success"] == term
-        assert r["episode_return"] == (1.0 if term else 0.0)
-
-
-def test_fixed_episodes_fewer_than_environments_and_empty():
-    env, mgr, sim = env_of(num_envs=5, bank_size=12)
-    res = run_fixed_episodes(env, ScriptedPolicy(), [2, 3])
-    assert [r["bank_id"] for r in res] == [2, 3] and res[1]["truncated"]
-    assert run_fixed_episodes(env, ScriptedPolicy(), []) == []
-
-
-def test_fixed_episodes_repeated_ids_are_run_separately():
-    env, mgr, sim = env_of(num_envs=2, bank_size=12)
-    res = run_fixed_episodes(env, ScriptedPolicy(), [0, 0, 0])
-    assert len(res) == 3 and len({r["length"] for r in res}) == 1
-
-
-def test_fixed_episodes_loop_guard():
-    env, mgr, sim = env_of(num_envs=1, bank_size=12, max_steps=10)
-    with pytest.raises(RuntimeError, match="not finished"):
-        run_fixed_episodes(env, ScriptedPolicy(), [3], max_loops=4)
+def test_fixed_rounds_repeated_rounds_are_run_separately_and_empty_is_empty():
+    env, mgr, sim = env_of(num_envs=2)
+    res = run_fixed_rounds(env, ScriptedPolicy(), [1, 1], seed=0)
+    assert len(res) == 4 and res[:2] == [{**r} for r in res[2:]]
+    assert run_fixed_rounds(env, ScriptedPolicy(), [], seed=0) == []

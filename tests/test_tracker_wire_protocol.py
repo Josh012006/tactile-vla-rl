@@ -97,7 +97,7 @@ def test_wire_rejects_object_arrays():
 # ----------------------------------------------------------------------------------------------------------- protocol
 def spec(**kw):
     base = dict(protocol_version=PROTOCOL_VERSION, num_envs=4, action_dim=ACTION_DIM, max_steps=10, success_hold_steps=1,
-                control_hz=15.0, prompt="p", auto_reset=True, bank_size=8,
+                control_hz=15.0, prompt="p", auto_reset=True,
                 obs=build_obs_spec(4, gripper_effort=True, tactile=True), robot={"name": "x"})
     base.update(kw)
     return EnvSpec(**base)
@@ -117,7 +117,7 @@ def make_result(n, final_ids=(), reward=None):
     z = np.zeros(n, bool)
     return StepResult(obs=obs, reward=np.zeros(n, np.float32) if reward is None else reward, terminated=z.copy(),
                       truncated=z.copy(), acting=np.ones(n, bool), inserted=z.copy(), success=z.copy(),
-                      t=np.zeros(n, np.int32), start_id=np.arange(n, dtype=np.int64), final_obs=fin,
+                      t=np.zeros(n, np.int32), round_id=np.zeros(n, dtype=np.int64), final_obs=fin,
                       final_ids=np.asarray(final_ids, np.int64), all_done=False)
 
 

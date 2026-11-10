@@ -1,12 +1,11 @@
-"""Builds the FORGE environment from a task YAML and serves it as a vector of independent environments.
+"""Builds the FORGE environment from a task YAML and serves it as a vector of environments driven in rounds.
 
 Imports Isaac Lab: import this module only AFTER AppLauncher exists (server.py does it).
 
 Layers (each testable on its own):
-  forge_env.py       the Isaac Lab environment (cameras, joint-position actions, Robotiq, taxels, state restore primitives)
-  start_bank.py      capture / restore of complete start states; the bank is built once at start-up (real FORGE resets)
+  forge_env.py       the Isaac Lab environment (cameras, joint-position actions, Robotiq, taxels, the real reset)
   ForgeSim (here)    the SimAdapter of episode_manager.py for that environment
-  episode_manager    per-environment episodes, auto-reset from the bank, final observations (numpy only)
+  episode_manager    rounds, per-environment episodes, held environments, final observations (numpy only)
   backend.py         protocol <-> manager;  ws_server.py: the WebSocket
 
 Isaac Lab's own episode logic is switched off (episode_length_s = NATIVE_TIMEOUT_DISABLED_S): episodes are ended by the
@@ -26,7 +25,6 @@ import isaaclab_tasks  # noqa: F401  (registers Isaac-Forge-*-Direct-v0)
 from isaaclab_tasks.utils import parse_env_cfg
 
 from . import protocol as P
-from . import forge_probe, start_bank
 from .backend import ManagerBackend
 from .episode_manager import VectorEnvManager
 from .forge_env import CAMERA_SIZE, GRIPPER_OPEN_WIDTH, ForgeEnvJointPosPi05
@@ -115,16 +113,21 @@ def build_env(cfg: dict, device: str = "cuda:0"):
 
 
 class ForgeSim:
-    """episode_manager.SimAdapter for a ForgeEnvJointPosPi05 (+ its start-state bank)."""
+    """episode_manager.SimAdapter for a ForgeEnvJointPosPi05."""
 
     def __init__(self, env, profile, gripper_obs: str, reset_passes: int):
         if gripper_obs not in GRIPPER_OBS_MODES:
             raise ValueError(f"gripper_obs must be one of {GRIPPER_OBS_MODES}, got {gripper_obs!r}")
+        if int(reset_passes) < 1:
+            raise ValueError(f"reset_passes must be >= 1, got {reset_passes}")
         self.env, self.profile, self.gripper_obs, self.reset_passes = env, profile, gripper_obs, int(reset_passes)
         self.num_envs = env.num_envs
-        self.bank: start_bank.BankState = None     # set by build_backend
 
     # -- SimAdapter ------------------------------------------------------------------------------------------------------
+    def reset(self, seed: int):
+        self.env.reset_lockstep(seed=int(seed), passes=self.reset_passes)
+        torch.cuda.synchronize()
+
     def step_physics(self, actions: np.ndarray):
         env = self.env
         action = torch.from_numpy(np.array(actions, dtype=np.float32)).to(env.device)
@@ -137,12 +140,6 @@ class ForgeSim:
 
     def hold_actions(self) -> np.ndarray:
         return self.env.hold_action().cpu().numpy().astype(np.float32)
-
-    def restore(self, env_ids: np.ndarray, bank_ids: np.ndarray):
-        ids = torch.as_tensor(np.asarray(env_ids), dtype=torch.long, device=self.env.device)
-        b = torch.as_tensor(np.asarray(bank_ids), dtype=torch.long, device=self.env.device)
-        start_bank.restore(self.env, self.bank, ids, b)
-        torch.cuda.synchronize()
 
     def observe(self) -> Dict[str, np.ndarray]:
         env = self.env
@@ -183,19 +180,13 @@ class ForgeSim:
             return {"pos": env.fingertip_midpoint_pos.cpu().numpy(), "quat": env.fingertip_midpoint_quat.cpu().numpy()}
         if kind == "vram":
             return self._vram()
-        if kind == "bank_info":
-            return {**self.bank.meta, "captured": sorted(self.bank.state), "unlisted": start_bank.scan_unlisted(env),
-                    "obs_keys": sorted(self.bank.obs)}
-        if kind == "bank_state":                  # bank entries (tensors by name)
-            b = torch.as_tensor(np.asarray(request["bank_ids"]), dtype=torch.long, device=env.device)
-            return np_({k: v[b] for k, v in self.bank.state.items()})
-        if kind == "bank_obs":
-            return {k: v[np.asarray(request["bank_ids"])] for k, v in self.bank.obs.items()}
-        if kind == "env_state":                   # the same tensors, read NOW from the environments `env_ids`
-            ids = torch.as_tensor(np.asarray(request["env_ids"]), dtype=torch.long, device=env.device)
-            return np_({k: v[ids] for k, v in start_bank.capture(env).items()})
-        if kind == "probe":
-            return forge_probe.probe(self, request)
+        if kind == "peg_pose":                    # held peg, env frame: position (m) and direction of its axis (unit vector)
+            from isaaclab.utils.math import quat_apply
+            axis = torch.zeros(env.num_envs, 3, device=env.device)
+            axis[:, 2] = 1.0
+            held = env._held_asset.data
+            return {"pos": np_({"p": held.root_pos_w - env.scene.env_origins})["p"],
+                    "axis": np_({"a": quat_apply(held.root_quat_w, axis)})["a"]}
         return {"error": f"unknown debug kind: {kind}"}
 
     def _vram(self) -> dict:
@@ -224,19 +215,16 @@ class ForgeSim:
 
 
 def build_backend(cfg: dict, device: str = "cuda:0"):
-    """(ManagerBackend, env): the environment, its start-state bank, the manager and the protocol layer."""
+    """(ManagerBackend, env): the environment, the manager and the protocol layer."""
     env, profile = build_env(cfg, device)
     sim = ForgeSim(env, profile, cfg.get("gripper_obs", "normalized"), int(cfg.get("reset_passes", 1)))
-    sim.bank = start_bank.load_or_build(env, sim.observe, cfg)
     manager = VectorEnvManager(
-        sim, bank_obs=sim.bank.obs, max_steps=int(cfg["max_steps_per_episode"]),
-        success_hold_steps=int(cfg.get("success_hold_steps", 1)), auto_reset=bool(cfg.get("auto_reset", True)),
-        seed=int(cfg.get("env_seed", 0)))
+        sim, max_steps=int(cfg["max_steps_per_episode"]), success_hold_steps=int(cfg.get("success_hold_steps", 1)),
+        auto_reset=bool(cfg.get("auto_reset", True)), seed=int(cfg.get("env_seed", 0)))
     obs_spec = P.build_obs_spec(env._camera_size, gripper_effort=env._is_robotiq, tactile=bool(env._tactile_sensors),
                                 tactile_shape=(2, TACTILE_ROWS, TACTILE_COLS))
     robot = {**robot_info(profile), "gripper_can_open": bool(env._gripper_can_open),
-             "joint_names": list(env._robot.data.joint_names), "bank": {k: v for k, v in sim.bank.meta.items()}}
+             "joint_names": list(env._robot.data.joint_names)}
     backend = ManagerBackend(manager, obs_spec, prompt=cfg.get("language_instruction", ""),
-                             control_hz=float(cfg.get("control_hz", 1.0 / env.step_dt)), robot=robot, debug_fn=sim.debug,
-                             sim_touching_kinds=forge_probe.PROBE_KINDS)
+                             control_hz=float(cfg.get("control_hz", 1.0 / env.step_dt)), robot=robot, debug_fn=sim.debug)
     return backend, env

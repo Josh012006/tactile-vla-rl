@@ -4,8 +4,8 @@ Two families of tests:
   * pure tests (default): numpy only, no GPU, no Isaac Sim. They test the logic that runs on the cluster, with a fake simulator
     behind the same SimAdapter (tests/fakes.py).
   * Isaac tests (`--isaac`): start real env servers (python -m src.envs.server) in subprocesses, so they need the Isaac Lab
-    virtualenv and a GPU. They check the part that cannot be tested without the simulator (state restore, isolation) and
-    measure time and GPU memory per environment.
+    virtualenv and a GPU. They check the part that cannot be tested without the simulator (reset fidelity, independence of the environments)
+    and measure time and GPU memory as a function of the number of environments.
 """
 import os
 import subprocess
@@ -44,7 +44,7 @@ def pytest_collection_modifyitems(config, items):
 
 # ------------------------------------------------------------------------------------------------------------ Isaac servers
 class IsaacServer:
-    """One env server process. `start()` blocks until it answers (Isaac Sim start-up + bank build can take minutes)."""
+    """One env server process. `start()` blocks until it answers (Isaac Sim start-up can take minutes)."""
 
     def __init__(self, config, num_envs, port, tmp_path, sets=()):
         self.config, self.num_envs, self.port = config, num_envs, port
@@ -122,8 +122,7 @@ class ServerPool:
             return self.current
         self.stop()
         self._port += 1
-        sets = [f"bank_cache_dir={ROOT / 'cache' / 'start_banks_tests'}", *self.extra_sets,
-                *[f"{k}={v}" for k, v in overrides.items()]]
+        sets = [*self.extra_sets, *[f"{k}={v}" for k, v in overrides.items()]]
         srv = IsaacServer(self.config, num_envs, self._port, self.log_dir, sets)
         self.current, self.key = srv, key
         try:
