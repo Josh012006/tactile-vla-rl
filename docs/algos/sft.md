@@ -1,7 +1,7 @@
 # SFT: supervised fine-tuning on the FORGE demonstrations
 
 `python -m scripts.sft --model <pi05 | pi0_fast>` fine-tunes a VLA on the demonstrations of `docs/demos.md` (the same as expo-ft's). The result is a
-checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/algos/demos.py` (data), `src/algos/sft.py` (loop, checkpoints),
+checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/algos/demos.py` (data), `src/algos/sft.py` (loop, checkpoints), `src/algos/tracking.py` (wandb),
 `scripts/sft.py` (command line). **Status: written and tested on a tiny model on the CPU; no run on the cluster yet** (section 9).
 
 ## 1. Commands
@@ -15,11 +15,12 @@ checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/alg
 | another rank | `sbatch jobs/job_sft_lora.sh pi05 --model-set vlm.lora_rank=8 --model-set action_head.lora_rank=16` |
 | shorter run, smaller micro-batch | `sbatch jobs/job_sft_lora.sh pi05 --set steps=1500 --set micro_batch_size=8` |
 | continue a run that stopped | `sbatch jobs/job_sft_lora.sh pi05 --resume <run name>` (or `job_sft_full.sh`): see section 6 |
-| follow a run | `tail -f runs/sft/<run>/metrics.jsonl` (or `logs/slurm/sft_lora_<jobid>.out`) |
+| follow a run | wandb (project `tactile-vla-rl`, section 5b), or `tail -f runs/sft/<run>/metrics.jsonl` (or `logs/slurm/sft_lora_<jobid>.out`) |
+| no wandb, or wandb offline | `--set wandb_mode=disabled`, `--set wandb_mode=offline` (then `wandb sync runs/sft/<run>/wandb/offline-run-*`) |
 
 `--set KEY=VALUE` overrides a key of `configs/algo/sft.yaml`; `--model-set KEY=VALUE` a key of the model YAML (`<component>.<key>`, the
 probe's `--set`); `--full` is `use_lora: false` in every component the model has. Before the first job, on the login node:
-`uv sync --group vla`, `python -m scripts.fetch_models`, then the `--dry-run`. The jobs run offline.
+`uv sync --group vla`, `python -m scripts.fetch_models`, `wandb login` (once), then the `--dry-run`. The jobs run offline for the models (`HF_HUB_OFFLINE`); wandb needs the network of the node (section 5b).
 
 ## 2. The data
 
@@ -80,6 +81,8 @@ so full fine-tuning needs roughly 54 GB (pi0.5) or 47 GB (pi0-FAST) before the a
 |---|---|
 | `config.json` | the algorithm settings and the model YAML as run (overrides included); read back by `--resume` |
 | `metrics.jsonl` | one JSON line per event: `start` (parameter counts, sizes), `first_step` (seconds including the compilation, memory), `train` (every `log_interval`: loss, gradient norm, learning rate, seconds per step, memory), `eval` (with `eval_s`), `checkpoint` (with `save_s` and `size_mib`), `resume_snapshot` (same), `resume`, `done` or `stopped`; every line has `elapsed_s` |
+| `wandb_id.txt` | the id of the wandb run of this training (section 5b); `--resume` reads it to continue the same run |
+| `wandb/` | the local files of wandb (the whole run when it is offline) |
 | `resume/` | the training state to resume from (section 6), replaced at each snapshot |
 | `checkpoints/<step>/` | `params` (orbax: the trainable parameters in bfloat16) and `meta.json` (step, model, overrides, demos, settings) |
 | `summary.json` | final loss, checkpoint list, duration |
@@ -88,6 +91,22 @@ so full fine-tuning needs roughly 54 GB (pi0.5) or 47 GB (pi0-FAST) before the a
 the policy's own chunks (`plan`, sampled as at deployment) against the demonstration's: mean absolute error of the 7 joints over the chunk, of the first step, of the
 gripper. For pi0-FAST the line also has `decode`: the failures of the FAST decoder, the chunks without an end token and the token-string lengths
 (`OpenPIPolicy.decode_stats`); a chunk that could not be decoded is counted and left out of the errors. This is not the success rate, which only the env gives.
+
+## 5b. wandb
+
+The events of `metrics.jsonl` are also logged to Weights & Biases (`src/algos/tracking.py`, settings `wandb_mode` and `wandb_project` in `configs/algo/sft.yaml`; the run is named after its folder),
+as expo-ft did: `train/*` (loss, `grad_norm`, `lr`, `step_s`, `memory_mib/*`), `eval/<train|val>/*` (loss, own-chunk errors, FAST decoding statistics), `checkpoint/*`, `snapshot/*` (`save_s`, `size_mib`),
+`perf/*` (the first step, compilation included), and the parameter counts and final numbers in the run's summary. The config (settings + model YAML) is the run's config in wandb. Tags: the model and `lora`/`full`.
+
+- **Resume = the same wandb run.** The id is written to `<run>/wandb_id.txt` when the training starts; `--resume` calls `wandb.init(id=..., resume="must")`, in the project the run was created in
+  (a `wandb_project` given on resume is ignored), so the curves continue in the same run instead of a new one. `resume="must"` is expo-ft's choice: an error rather than a new run if that one does not exist.
+  A run that was never logged to wandb (no `wandb_id.txt`) gets a new wandb run on resume, with a warning.
+- **x axis: `step`.** Every point carries our `step` and `define_metric("*", step_metric="step")` makes it the axis, because wandb's own step may only increase and a resumed run goes back to its snapshot
+  (the points that go back would be dropped). Consequence: steps that were run twice (a crash, then a resume from an older snapshot) are on the curve twice. After a SIGTERM stop the snapshot is
+  at the stop step, so there is no overlap.
+- **Never stops a run.** `wandb_mode: online` (default) that cannot start (no login, no network on the node) falls back to **offline** with a warning, in the same run id: `wandb sync runs/sft/<run>/wandb/offline-run-*`
+  uploads it later. A package that is not installed, or an error while logging, leaves `metrics.jsonl` alone (it stays the reference). `disabled` logs nothing and does not import wandb.
+- Not known yet: whether the compute nodes reach wandb's servers (the first job says it: `[wandb] ... falling back to offline` in the log if not). `wandb login` on the login node is needed once.
 
 ## 6. Resume
 
@@ -138,19 +157,20 @@ of another shape (another rank), naming the first ones. A stopped run is continu
 | steps | `num_train_steps: 4001` (4001 iterations) | `steps: 4000` updates |
 | evaluation | none during the run | loss and own-chunk error on a fixed set, FAST decoding statistics |
 | resume | yes (openpi's) | yes (section 6) |
-| FSDP, wandb | yes (openpi's) | no |
+| wandb | yes, the same run on resume (`wandb_id.txt`) | yes, same logic (section 5b), x axis `step` |
+| FSDP | yes (openpi's) | no (one device) |
 
 ## 9. Checked and not checked
 
 Checked (`tests/test_sft_demos.py`, `tests/test_sft.py`, CPU): the chunks (last action repeated, never across episodes), the options of the data and of the command line, the refusal of broken
 demonstrations, the loop on a tiny pi0.5 (micro-batches, accumulation, only the trainable part moves, the log, the checkpoints), the loading of a checkpoint into a fresh policy and the refusal of one
-that does not fit, the resume (2 + 2 steps end in the state of 4 in one go, the refusals, the SIGTERM stop, a crash while swapping snapshots). The vision tower of that tiny model is frozen (its optimiser state does not fit the test machine).
+that does not fit, the resume (2 + 2 steps end in the state of 4 in one go, the refusals, the SIGTERM stop, a crash while swapping snapshots). wandb (`tests/test_tracking.py`: a fake `wandb` module for the id file, the resume, the fallbacks and the events; and a real offline run of 2 + 2 steps: one id, two attempts). The vision tower of that tiny model is frozen (its optimiser state does not fit the test machine).
 
 **Not checked, to be seen in the first runs:**
 
+- wandb ONLINE from a compute node (the tests are offline or fake);
 - the whole thing on the real models and the GPUs: memory (LoRA on the L40S, full on the A100), seconds per step, the best micro-batch;
 - pi0-FAST training on real FAST tokens: the path through the real tokenizer (the tests use a stub) has only been exercised by `scripts/fast_tokens.py` for the lengths;
 - that the 4000 steps and the learning rate give a policy as good as expo-ft's SFT (success rate in the env: this is the RL's evaluation, not this file's);
 - the time to write a resume snapshot and its size on the real models (`resume_snapshot` lines: `save_s`, `size_mib`), above all the 35 to 40 GB of the full fine-tuning against the 10 minutes of the SIGTERM warning;
 - the bfloat16 checkpoint of a full fine-tuning (about 6.7 GB for pi0.5) against the disk: 20 of them for `save_interval: 200`.
-

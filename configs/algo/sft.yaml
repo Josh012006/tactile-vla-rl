@@ -48,6 +48,14 @@ resume_interval: 500
 prefetch: 3             # batches prepared ahead by a thread (openpi's transforms are CPU work)
 seed: 0
 
+# -- Weights & Biases (src/algos/tracking.py) ------------------------------------------------------------------------------------------
+# The events of metrics.jsonl (train, eval, checkpoint, ...) are also logged to wandb, x axis `step`. The id of the wandb run is written to
+# <run>/wandb_id.txt, and `--resume` continues THAT run (in the project it was created in), not a new one. Log in once on the login node: `wandb login`.
+# online: needs the network on the node; if it cannot start (no login, no network) the run falls back to offline, with a warning, and goes on.
+# offline: written to <run>/wandb/, uploaded later with `wandb sync <run>/wandb/offline-run-*`. disabled: metrics.jsonl only.
+wandb_mode: online
+wandb_project: tactile-vla-rl
+
 # -- Output ------------------------------------------------------------------------------------------------------------------------------
 # <output_root>/<run name>/{config.json, metrics.jsonl, summary.json, checkpoints/<step>/{params, meta.json}, resume/}. `runs` is a link to the scratch disk.
 output_root: runs/sft

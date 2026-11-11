@@ -29,6 +29,9 @@ uninterrupted one would have seen (up to the non-determinism of the GPU kernels)
 (5.5 GB with LoRA, 35 to 40 GB for full fine-tuning), written aside and swapped in once complete, so the disk holds two of them for a moment.
 What may change on resume: `steps` (only when the learning rate is constant, lr = lr_end: a decay depends on the total), the intervals, `eval_samples`,
 `prefetch`. Everything that shapes the optimisation or the data may not (FROZEN_ON_RESUME), nor the model YAML.
+
+wandb (src/algos/tracking.py): the events of metrics.jsonl are also logged to a wandb run (`wandb_mode`, `wandb_project`), whose id is kept in
+<run>/wandb_id.txt; a resumed run continues that same wandb run (in the project it was created in).
 """
 from __future__ import annotations
 
@@ -38,6 +41,7 @@ import json
 import queue
 import shutil
 import signal
+import sys
 import threading
 import time
 from pathlib import Path
@@ -46,6 +50,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
 import numpy as np
 import yaml
 
+from src.algos import tracking
 from src.algos.demos import DemoSet
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -79,6 +84,8 @@ class SFTConfig:
     resume_interval: int = 0
     prefetch: int = 3
     seed: int = 0
+    wandb_mode: str = "online"                              # "online", "offline" or "disabled" (src/algos/tracking.py)
+    wandb_project: str = "tactile-vla-rl"
     output_root: str = "runs/sft"
 
     def __post_init__(self):
@@ -94,6 +101,8 @@ class SFTConfig:
             raise ValueError("warmup_steps, num_demos, val_episodes and resume_interval must be >= 0")
         if self.lr <= 0 or self.lr_end < 0:
             raise ValueError("lr must be > 0 and lr_end >= 0")
+        if self.wandb_mode not in tracking.MODES:
+            raise ValueError(f"wandb_mode must be one of {tracking.MODES}, got {self.wandb_mode!r}")
 
 
 def load_config(path: Optional[Path] = None, overrides: Optional[Mapping[str, Any]] = None) -> SFTConfig:
@@ -358,19 +367,32 @@ def device_memory_mib() -> Optional[dict]:
 
 
 class MetricsLog:
-    """One JSON object per line in <run>/metrics.jsonl, and the same on the standard output. Every line carries `elapsed_s`, the seconds since the log was opened."""
+    """One JSON object per line in <run>/metrics.jsonl, and the same on the standard output. Every line carries `elapsed_s`, the seconds since the log was opened.
+    `sink` (tracking.WandbSink) gets each event too; a failure of the sink is reported once and drops it, it never stops the run."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, sink=None):
         self.file = open(path, "a", buffering=1)
         self.t0 = time.monotonic()
+        self.sink = sink
 
     def write(self, **fields) -> None:
         line = json.dumps({**fields, "elapsed_s": round(time.monotonic() - self.t0, 1)}, default=float)
         self.file.write(line + "\n")
         print(line, flush=True)
+        if self.sink is not None:
+            try:
+                self.sink(json.loads(line))
+            except Exception as error:                      # noqa: BLE001
+                print(f"[wandb] logging stopped: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+                self.sink = None
 
     def close(self) -> None:
         self.file.close()
+        if self.sink is not None:
+            try:
+                self.sink.close()
+            except Exception as error:                      # noqa: BLE001
+                print(f"[wandb] closing failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
 
 
 # -- the run ---------------------------------------------------------------------------------------------------------------------------
@@ -390,16 +412,20 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
     run_dir = Path(run_dir)
     meta = {**(meta or {}), "model": policy.info.name, "family": policy.info.family, "action_horizon": policy.info.action_horizon}
     snapshot_found = find_resume(run_dir) if resume else None
+    wandb_project = cfg.wandb_project
     if resume:
         if snapshot_found is None:
             raise ValueError(f"{run_dir} has no complete resume snapshot (resume_interval was 0 and the run was not stopped by a SIGTERM?)")
         saved_cfg = json.loads((run_dir / "config.json").read_text())
+        wandb_project = saved_cfg["sft"].get("wandb_project", wandb_project)       # the wandb run lives in the project it was created in
         check_resume_compatible(saved_cfg["sft"], cfg, saved_cfg.get("model_cfg"), meta.get("model_cfg"))
         if snapshot_found[1]["step"] >= cfg.steps:
             raise ValueError(f"the run is already at step {snapshot_found[1]['step']} (steps = {cfg.steps}): give a larger `steps` to train further")
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps({"sft": dataclasses.asdict(cfg), **meta}, indent=2, default=str))
-    log = MetricsLog(run_dir / "metrics.jsonl")
+    sink = tracking.start_tracking(run_dir, resume, wandb_project, run_dir.name, cfg.wandb_mode, {"sft": dataclasses.asdict(cfg), **meta},
+                                   tags=[str(meta.get("model_name", meta["model"])), str(meta.get("mode", ""))])
+    log = MetricsLog(run_dir / "metrics.jsonl", sink)
 
     trainable, frozen = split_state(policy)
     trainable = tree_cast(trainable, jnp.float32, copy=True)

@@ -11,7 +11,9 @@
 
 --resume: the model, its overrides and the demonstrations are the run's own (config.json), so only --set is accepted next to it, and only for what
 may change on resume (steps, intervals, eval_samples, prefetch: see src/algos/sft.py). The snapshot is <run>/resume/, written every `resume_interval`
-steps, at the last step and when the job gets a SIGTERM.
+steps, at the last step and when the job gets a SIGTERM. The wandb run of the first attempt (<run>/wandb_id.txt) is continued, not a new one.
+
+wandb: `wandb login` once on the login node; `--set wandb_mode=offline` (then `wandb sync <run>/wandb/offline-run-*`) or `--set wandb_mode=disabled` to change it.
 
 --set KEY=VALUE overrides a key of configs/algo/sft.yaml, --model-set KEY=VALUE a key of the model YAML (`<component>.<key>`, as the probe's
 --set); values are read as YAML (`--set val_episodes=5`, `--model-set vlm.use_lora=false`). The run goes to <output_root>/<run name>/.
@@ -84,7 +86,7 @@ def print_dry_run(train, val, cfg, model_cfg, mode) -> None:
         print(f"held-out set: {val.describe()['episodes']} episodes, {len(val)} steps")
     epochs = cfg.steps * cfg.batch_size / len(train)
     print(f"{cfg.steps} updates of {cfg.batch_size} rows ({cfg.batch_size // cfg.micro_batch_size} micro-batches of {cfg.micro_batch_size}) = {epochs:.1f} epochs; "
-          f"checkpoints every {cfg.save_interval} steps, evaluation every {cfg.eval_interval}")
+          f"checkpoints every {cfg.save_interval} steps, evaluation every {cfg.eval_interval}, wandb {cfg.wandb_mode} (project {cfg.wandb_project})")
     obs, prompts, target = train.sample([0, len(train) // 2, len(train) - 1])
     print(f"a sample: first chunk target (env space, absolute) {target[0, 0].round(3).tolist()}; last row's chunk repeats the last action: "
           f"{bool((target[2] == target[2, -1]).all())}")

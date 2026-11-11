@@ -4,7 +4,9 @@ vision tower is FROZEN (the freeze filter of the policy) and only the language m
 the loop (micro-batches, accumulation, optimiser, evaluation, checkpoints), not the size of the model.
 
 Needs the `vla` dependency group (skipped otherwise)."""
+import importlib.util
 import json
+import os
 import types
 
 import numpy as np
@@ -21,13 +23,15 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import openpi.shared.nnx_utils as nnx_utils  # noqa: E402
 
-from src.algos import demos, sft  # noqa: E402
+from src.algos import demos, sft, tracking  # noqa: E402
 from test_openpi_policy import H, build  # noqa: E402
 from test_sft_demos import write_demo  # noqa: E402
 
 PROMPT = "insert the peg"
 META = {"model_name": "tiny", "model_cfg": {"name": "tiny"}}
-COMMON = {"demos": ["x"], "batch_size": 4, "micro_batch_size": 2, "lr": 1e-3, "lr_end": 1e-3, "log_interval": 2, "eval_interval": 100, "eval_samples": 2,
+os.environ.setdefault("WANDB_SILENT", "true")
+HAS_WANDB = importlib.util.find_spec("wandb") is not None
+COMMON = {"wandb_mode": "disabled", "demos": ["x"], "batch_size": 4, "micro_batch_size": 2, "lr": 1e-3, "lr_end": 1e-3, "log_interval": 2, "eval_interval": 100, "eval_samples": 2,
           "save_interval": 2, "resume_interval": 2, "prefetch": 1}
 
 
@@ -52,7 +56,7 @@ def run(sets, tmp_path_factory):
     policy = vision_frozen_policy()
     trainable0, frozen0 = sft.split_state(policy)
     before = {k: np.asarray(v) for k, v in tu.flatten_dict(policy.state.to_pure_dict()).items()}
-    cfg = sft.load_config(overrides={"demos": ["x"], "steps": 4, "batch_size": 4, "micro_batch_size": 2, "lr": 1e-3, "lr_end": 1e-3, "log_interval": 2,
+    cfg = sft.load_config(overrides={"wandb_mode": "disabled", "demos": ["x"], "steps": 4, "batch_size": 4, "micro_batch_size": 2, "lr": 1e-3, "lr_end": 1e-3, "log_interval": 2,
                                      "eval_interval": 2, "eval_samples": 2, "save_interval": 2, "resume_interval": 2, "prefetch": 1})
     run_dir = tmp_path_factory.mktemp("run") / "r"
     summary = sft.train(policy, train_set, val_set, cfg, run_dir, META)
@@ -137,15 +141,29 @@ def resumed(sets, tmp_path_factory):
     """The run of `run` (4 steps in one go) done in two parts: 2 steps, then a resume to 4."""
     train_set, val_set = sets
     run_dir = tmp_path_factory.mktemp("resumed") / "r"
-    first = sft.train(vision_frozen_policy(), train_set, val_set, sft.load_config(overrides={**COMMON, "steps": 2}), run_dir, META)
-    second = sft.train(vision_frozen_policy(), train_set, val_set, sft.load_config(overrides={**COMMON, "steps": 4}), run_dir, META, resume=True)
-    return run_dir, first, second
+    # wandb offline (when installed), the second attempt asking for another project: what tracking.start_tracking gets is recorded
+    mode, started, real = ("offline" if HAS_WANDB else "disabled"), [], tracking.start_tracking
+
+    def recording(run_dir, resuming, project, *args, **kwargs):
+        started.append((resuming, project))
+        return real(run_dir, resuming, project, *args, **kwargs)
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(tracking, "start_tracking", recording)
+    try:
+        first = sft.train(vision_frozen_policy(), train_set, val_set,
+                          sft.load_config(overrides={**COMMON, "wandb_mode": mode, "wandb_project": "proj_a", "steps": 2}), run_dir, META)
+        second = sft.train(vision_frozen_policy(), train_set, val_set,
+                           sft.load_config(overrides={**COMMON, "wandb_mode": mode, "wandb_project": "proj_b", "steps": 4}), run_dir, META, resume=True)
+    finally:
+        patch.undo()
+    return run_dir, first, second, started
 
 
 def test_a_resumed_run_ends_in_the_same_state_as_an_uninterrupted_one(run, resumed):
     """The parameters (float32) and the whole optimiser state after step 4 are the same whether the run was cut at step 2 or not."""
     _, run_dir_a, *_ = run
-    run_dir_b, first, second = resumed
+    run_dir_b, first, second, _ = resumed
     meta_a, leaves_a = snapshot_leaves(run_dir_a)
     meta_b, leaves_b = snapshot_leaves(run_dir_b)
     assert meta_a["step"] == meta_b["step"] == 4 and len(leaves_a) == len(leaves_b) > 10
@@ -162,6 +180,15 @@ def test_the_log_of_a_resume_continues_the_numbering(resumed):
     assert [line["step"] for line in lines if line["event"] == "train"] == [2, 4]                     # the first part logged at its last step 2, the second at 4 (log every 2 steps)
     assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["2", "4"]
     assert sft.find_resume(run_dir)[1]["step"] == 4
+
+
+@pytest.mark.skipif(not HAS_WANDB, reason="wandb is not installed")
+def test_a_resumed_run_continues_the_same_wandb_run_in_its_project(resumed):
+    run_dir, _, _, started = resumed
+    run_id = (run_dir / "wandb_id.txt").read_text().strip()
+    assert started == [(False, "proj_a"), (True, "proj_a")]                              # `proj_b` of the second attempt is ignored: the run lives in proj_a
+    attempts = sorted((run_dir / "wandb").glob("offline-run-*"))
+    assert len(attempts) == 2 and all(p.name.endswith(run_id) for p in attempts)         # two attempts, one wandb run (same id)
 
 
 def test_a_resume_that_would_change_the_optimisation_or_has_nothing_to_resume_is_refused(resumed, sets, tmp_path):
