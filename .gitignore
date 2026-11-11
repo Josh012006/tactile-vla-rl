@@ -1,11 +1,14 @@
-# Jamais commit
+# Never commit
 results/
 cache/
 reports/
 
-# Liens symboliques vers scratch (scripts/link_scratch.sh) : SANS slash final, pour git un lien n'est pas un dossier
-demos
-runs
+# Symlinks to scratch (demos -> the expo-ft demos, runs -> checkpoints and training outputs).
+# Two rules matter here:
+#   * no trailing slash: for git a symlink is a file, not a directory, so `demos/` would not match it;
+#   * a leading slash: a bare `demos` would also ignore scripts/demos/ (the demo tools).
+/demos
+/runs
 
 # Python
 __pycache__/
@@ -16,23 +19,23 @@ dist/
 .venv/
 venv/
 
-# Outils
+# Tools
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .ipynb_checkpoints/
 
-# Sorties d'expériences (lourdes, hors dépôt)
+# Experiment outputs (heavy, kept out of the repo)
 wandb/
 tensorboard/
 logs/
 checkpoints/
 slurm-*.out
 
-# Divers
+# Misc
 .env
 .DS_Store
 
-# Assets NVIDIA (copiés à la main) et USD générés
+# NVIDIA assets (copied by hand) and generated USD
 third_party/robotiq/
 .venv-isaaclab/
