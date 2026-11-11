@@ -65,6 +65,8 @@ def test_the_run_trains_the_trainable_part_only_and_writes_its_log(run):
     assert all(np.isfinite(line["loss"]) and line["grad_norm"] > 0 for line in lines if line["event"] == "train")
     evals = [line for line in lines if line["event"] == "eval"]
     assert set(evals[0]) >= {"train", "val"} and np.isfinite(evals[0]["val"]["loss"]) and evals[0]["train"]["chunks"] == 2
+    assert all("elapsed_s" in line for line in lines) and evals[0]["eval_s"] > 0                  # time and size of what a run costs
+    assert all(line["save_s"] >= 0 and line["size_mib"] > 0 for line in lines if line["event"] == "checkpoint")
     assert lines[0]["trainable_m"] > 0 and lines[0]["frozen_m"] > 100                       # SigLIP (frozen) is the bulk of this tiny model
     after = {k: np.asarray(v) for k, v in tu.flatten_dict(policy.state.to_pure_dict()).items()}
     frozen_keys = {k for k in tu.flatten_dict(frozen0.to_pure_dict())}

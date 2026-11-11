@@ -261,13 +261,14 @@ def device_memory_mib() -> Optional[dict]:
 
 
 class MetricsLog:
-    """One JSON object per line in <run>/metrics.jsonl, and the same on the standard output."""
+    """One JSON object per line in <run>/metrics.jsonl, and the same on the standard output. Every line carries `elapsed_s`, the seconds since the log was opened."""
 
     def __init__(self, path: Path):
         self.file = open(path, "a", buffering=1)
+        self.t0 = time.monotonic()
 
     def write(self, **fields) -> None:
-        line = json.dumps(fields, default=float)
+        line = json.dumps({**fields, "elapsed_s": round(time.monotonic() - self.t0, 1)}, default=float)
         self.file.write(line + "\n")
         print(line, flush=True)
 
@@ -328,6 +329,7 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
     sets = {"train": train_set, "val": val_set}
 
     def evaluate(step: int) -> None:
+        t_eval = time.monotonic()
         state = deployed_state(trainable, frozen)
         policy.set_state(state)
         policy.seed(cfg.seed + 1)                          # the same noise at every evaluation
@@ -336,12 +338,14 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
             losses = [float(eval_loss_fn(state, jax.random.key(cfg.seed + 2), *b))
                       for b in micro_batches(policy, sets[name], rows, min(cfg.micro_batch_size, len(rows)))]
             result[name] = {"loss": float(np.mean(losses)), **evaluate_chunks(policy, sets[name], rows)}
-        log.write(event="eval", step=step, **result)
+        log.write(event="eval", step=step, eval_s=round(time.monotonic() - t_eval, 1), **result)
 
     def checkpoint(step: int) -> str:
         path = run_dir / "checkpoints" / str(step)
+        t_save = time.monotonic()
         save_checkpoint(path, trainable, {**meta, "step": step, "sft": dataclasses.asdict(cfg)})
-        log.write(event="checkpoint", step=step, path=str(path))
+        size_mib = round(sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 2**20)
+        log.write(event="checkpoint", step=step, path=str(path), save_s=round(time.monotonic() - t_save, 1), size_mib=size_mib)
         return str(path)
 
     base_key = jax.random.key(cfg.seed)
