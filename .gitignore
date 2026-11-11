@@ -1,8 +1,11 @@
 # Jamais commit
 results/
-src/data/
 cache/
 reports/
+
+# Liens symboliques vers scratch (scripts/link_scratch.sh) : SANS slash final, pour git un lien n'est pas un dossier
+demos
+runs
 
 # Python
 __pycache__/

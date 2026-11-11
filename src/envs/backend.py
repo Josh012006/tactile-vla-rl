@@ -6,19 +6,25 @@ tests wrap a fake simulator in the SAME class, so the protocol logic that runs o
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Optional
 
+import numpy as np
+
 from . import protocol as P
+from .demo_store import save_teleop_demo
 from .episode_manager import VectorEnvManager
 
 
 class ManagerBackend:
     def __init__(self, manager: VectorEnvManager, obs_spec: P.ObsSpec, prompt: str = "", control_hz: float = 15.0,
-                 robot: Optional[dict] = None, debug_fn: Optional[Callable[[dict], Any]] = None):
+                 robot: Optional[dict] = None, debug_fn: Optional[Callable[[dict], Any]] = None,
+                 project_root: Optional[Path] = None):
         self.manager = manager
         self.obs_spec = obs_spec
         self.prompt, self.control_hz, self.robot = prompt, float(control_hz), dict(robot or {})
         self.debug_fn = debug_fn
+        self.project_root = None if project_root is None else Path(project_root)    # where `save_teleop_demo` may write (inside it only)
         self._checked = False
 
     def spec(self) -> dict:
@@ -60,6 +66,34 @@ class ManagerBackend:
         kind = request.get("kind")
         if kind == "timings":                      # server-side time per phase since the last call with reset=True
             return self.manager.timings(reset=bool(request.get("reset", False)))
+        if kind == "teleop_step":                  # one control step of a human operator, in ONE round trip (see _teleop_step)
+            return self._teleop_step(request)
+        if kind == "save_teleop_demo":             # write a demonstration sent by the operator's PC (demo_store.py)
+            if self.project_root is None:
+                return {"error": "this server was started without a project root: it cannot save demonstrations"}
+            return save_teleop_demo(self.project_root, request)
         if self.debug_fn is None:
             return {"error": f"unknown debug kind: {kind}"}
         return self.debug_fn(request)
+
+    def _teleop_step(self, request: dict) -> dict:
+        """IK + step in one message, for the operator of scripts/demos/teleop_client.py (the tunnel costs ~0.3 s per round trip).
+
+        request: delta_pos (N, 3) m in the env frame (or (3,): the same for every environment), target_quat (N, 4) or (4,), cmd_gain,
+        max_joint_step. The peg is rigidly held, so moving the fingertip by delta_pos moves the peg by it. The simulator's op
+        `ik_joint_target` gives the 7 absolute joint targets of FORGE's damped-least-squares IK; the action is
+            measured angles + clip(cmd_gain * (IK target - measured angles), +-max_joint_step),   gripper 1.0 (closed)
+        exactly like scripts/demos/collect_waypoint_demos.py builds it (the action is the label of the observation BEFORE this call).
+        Never auto-resets: when the episode ends the operator saves it, then calls `reset`. Returns the usual step response plus
+        `action` (N, 8) and `clipped` (N,) bool (max_joint_step was hit)."""
+        if self.debug_fn is None:
+            return {"error": "this server has no simulator ops (no ik_joint_target)"}
+        ik = self.debug_fn({"kind": "ik_joint_target", "delta_pos": request["delta_pos"], "target_quat": request["target_quat"]})
+        q_now, q_ik = np.asarray(ik["q_now"], dtype=np.float64), np.asarray(ik["q_target"], dtype=np.float64)
+        dq = float(request.get("cmd_gain", 1.0)) * (q_ik - q_now)
+        max_step = float(request.get("max_joint_step", 0.05))
+        clipped = np.abs(dq).max(axis=1) > max_step
+        action = np.concatenate([q_now + np.clip(dq, -max_step, max_step), np.ones((len(q_now), 1))], axis=1).astype(np.float32)
+        if not np.isfinite(action).all():
+            raise RuntimeError(f"non-finite teleop action: {action}")
+        return {**self.step({"actions": action, "auto_reset": False}), "action": action, "clipped": clipped}

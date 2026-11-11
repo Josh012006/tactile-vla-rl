@@ -10,12 +10,15 @@ Layers (each testable on its own):
 
 Isaac Lab's own episode logic is switched off (episode_length_s = NATIVE_TIMEOUT_DISABLED_S): episodes are ended by the
 manager, per environment, so nothing is ever reset behind the client's back and the success flag of the step that times out
-is a real one. The teleoperation / demo-saving / grasp-geometry debug ops of the old server are not ported.
+is a real one. Of the old server's debug ops, the ones the demo scripts need are here (`finger_width`, `finger_distance`,
+`ik_joint_target`; `teleop_step` and `save_teleop_demo` are in backend.py, they need no simulator); the grasp-geometry
+op (scripts/isaaclab/grasp_check.py of expo-ft, a one-off calibration of the Robotiq grasp) is not ported.
 """
 from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
@@ -192,6 +195,13 @@ class ForgeSim:
         if kind == "robot_info":
             return {**robot_info(self.profile), "gripper_can_open": bool(env._gripper_can_open),
                     "joint_names": list(env._robot.data.joint_names), "gripper_adapter": env.gripper_info()}
+        if kind == "finger_width":                # (N,) finger opening (m per finger, FORGE's convention), whatever `gripper_obs` is
+            return env.gripper_width().detach().cpu().numpy().astype(np.float32)
+        if kind == "finger_distance":             # (N,) distance (m) between the origins of the two finger bodies, from the simulated poses
+            names, pos = list(env._robot.body_names), env._robot.data.body_pos_w
+            return np_({"d": torch.linalg.norm(pos[:, names.index("panda_leftfinger")] - pos[:, names.index("panda_rightfinger")], dim=-1)})["d"]
+        if kind == "ik_joint_target":             # the 7 absolute joint targets of ONE inverse-kinematics step, see _ik_joint_target
+            return self._ik_joint_target(request["delta_pos"], request["target_quat"])
         if kind == "task_geometry":
             task = env.cfg_task
             hole_depth = float(task.fixed_asset_cfg.height)
@@ -216,6 +226,29 @@ class ForgeSim:
             return {"pos": np_({"p": held.root_pos_w - env.scene.env_origins})["p"],
                     "axis": np_({"a": quat_apply(held.root_quat_w, axis)})["a"]}
         return {"error": f"unknown debug kind: {kind}"}
+
+    def _ik_joint_target(self, delta_pos, target_quat) -> dict:
+        """ONE inverse-kinematics step for every environment: the 7 ABSOLUTE joint targets that move the fingertip by `delta_pos` (m,
+        env frame; (N, 3), or (3,) for all) while turning it towards `target_quat` (w, x, y, z; (N, 4) or (4,)).
+
+        FORGE's own helpers (factory_control.get_pose_error / get_delta_dof_pos, damped least squares), the ones its
+        set_pos_inverse_kinematics() uses at reset, applied to the Jacobian and the joint state the env computed after the last step.
+        Returns {"q_now": (N, 7), "q_target": (N, 7) = q_now + dq}: the arm part of the action that makes the move. Nothing moves here."""
+        from isaaclab_tasks.direct.factory import factory_control
+
+        env = self.env
+        n = env.num_envs
+        delta = torch.as_tensor(np.asarray(delta_pos, dtype=np.float32), device=env.device).reshape(-1, 3).expand(n, 3)
+        quat = torch.as_tensor(np.asarray(target_quat, dtype=np.float32), device=env.device).reshape(-1, 4).expand(n, 4)
+        pos_error, rot_error = factory_control.get_pose_error(
+            fingertip_midpoint_pos=env.fingertip_midpoint_pos, fingertip_midpoint_quat=env.fingertip_midpoint_quat,
+            ctrl_target_fingertip_midpoint_pos=env.fingertip_midpoint_pos + delta, ctrl_target_fingertip_midpoint_quat=quat,
+            jacobian_type="geometric", rot_error_type="axis_angle")
+        dq = factory_control.get_delta_dof_pos(delta_pose=torch.cat((pos_error, rot_error), dim=-1), ik_method="dls",
+                                               jacobian=env.fingertip_midpoint_jacobian, device=env.device)
+        q_now = env.joint_pos[:, 0:7]
+        cpu = lambda x: x.detach().cpu().numpy().astype(np.float32)
+        return {"q_now": cpu(q_now), "q_target": cpu(q_now + dq[:, 0:7])}
 
     def _state_dump(self) -> dict:
         """{name: array with one row per environment} of every torch tensor held by the env (its buffers), the robot, the two
@@ -364,5 +397,6 @@ def build_backend(cfg: dict, device: str = "cuda:0"):
     robot = {**robot_info(profile), "gripper_can_open": bool(env._gripper_can_open),
              "joint_names": list(env._robot.data.joint_names)}
     backend = ManagerBackend(manager, obs_spec, prompt=cfg.get("language_instruction", ""),
-                             control_hz=float(cfg.get("control_hz", 1.0 / env.step_dt)), robot=robot, debug_fn=sim.debug)
+                             control_hz=float(cfg.get("control_hz", 1.0 / env.step_dt)), robot=robot, debug_fn=sim.debug,
+                             project_root=Path(__file__).resolve().parents[3])     # the repo root: where demos can be saved
     return backend, env
