@@ -6,6 +6,13 @@
     python -m scripts.sft --model pi05 --demos demos/isaaclab/ForgePegInsert_Robotiq_noisy --set steps=1500 --run-name pi05_noisy
     python -m scripts.sft --model pi05 --model-set vlm.lora_rank=8 --model-set action_head.lora_rank=16
 
+    python -m scripts.sft --model pi05 --resume pi05_scripted_lora_20261112_091500              # continue a stopped run (name under output_root, or path)
+    python -m scripts.sft --model pi05 --resume <run> --set steps=6000                          # ... and train longer (constant learning rate only)
+
+--resume: the model, its overrides and the demonstrations are the run's own (config.json), so only --set is accepted next to it, and only for what
+may change on resume (steps, intervals, eval_samples, prefetch: see src/algos/sft.py). The snapshot is <run>/resume/, written every `resume_interval`
+steps, at the last step and when the job gets a SIGTERM.
+
 --set KEY=VALUE overrides a key of configs/algo/sft.yaml, --model-set KEY=VALUE a key of the model YAML (`<component>.<key>`, as the probe's
 --set); values are read as YAML (`--set val_episodes=5`, `--model-set vlm.use_lora=false`). The run goes to <output_root>/<run name>/.
 
@@ -50,6 +57,18 @@ def model_overrides(model_cfg: dict, full: bool, model_set: Dict[str, object]) -
     return overrides
 
 
+def load_output_root(config: str) -> str:
+    return sft_mod.load_config(config).output_root
+
+
+def find_run_dir(name_or_path: str, output_root: str) -> Path:
+    """A run given as a path (absolute, or relative to where the command runs) or as its folder name under output_root."""
+    for candidate in (Path(name_or_path), ROOT / output_root / name_or_path):
+        if (candidate / "config.json").exists():
+            return candidate.resolve()
+    raise SystemExit(f"no run {name_or_path!r} (looked for config.json at that path and under {output_root}/)")
+
+
 def run_name_of(model: str, folders, mode: str) -> str:
     tags = "+".join(Path(f).name.replace("ForgePegInsert_Robotiq_", "") for f in folders)
     return f"{model}_{tags}_{mode}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -79,17 +98,29 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default=str(sft_mod.CONFIG_PATH), help="algorithm YAML (default configs/algo/sft.yaml)")
     ap.add_argument("--set", action="append", metavar="KEY=VALUE", help="override a key of the algorithm YAML")
     ap.add_argument("--model-set", action="append", metavar="KEY=VALUE", help="override a key of the model YAML: <component>.<key>")
+    ap.add_argument("--resume", metavar="RUN", help="continue the run RUN (folder name under output_root, or a path) from its resume snapshot")
     ap.add_argument("--run-name", help="folder name of the run (default: <model>_<demos>_<lora|full>_<date>)")
     ap.add_argument("--dry-run", action="store_true", help="read the demonstrations and print what would be trained on; load no model")
     args = ap.parse_args(argv)
 
     sets = parse_assignments(args.set)
-    if args.demos:
-        sets["demos"] = args.demos
-    cfg = sft_mod.load_config(args.config, sets)
-    base_cfg = load_model_cfg(args.model)
-    model_cfg = apply_overrides(base_cfg, model_overrides(base_cfg, args.full, parse_assignments(args.model_set)))
-    mode = "lora" if parse_model_settings(model_cfg).any_lora else "full"
+    saved = None
+    if args.resume:
+        if args.full or args.demos or args.model_set or args.dry_run:
+            raise SystemExit("--resume takes the model, its overrides and the demonstrations from the run: only --set is accepted next to it")
+        run_dir = find_run_dir(args.resume, load_output_root(args.config))
+        saved = json.loads((run_dir / "config.json").read_text())
+        if saved["model_name"] != args.model:
+            raise SystemExit(f"{run_dir} is a run of {saved['model_name']}, not of {args.model}")
+        cfg = sft_mod.config_from_dict(saved["sft"], sets)
+        model_cfg, mode = saved["model_cfg"], saved["mode"]
+    else:
+        if args.demos:
+            sets["demos"] = args.demos
+        cfg = sft_mod.load_config(args.config, sets)
+        base_cfg = load_model_cfg(args.model)
+        model_cfg = apply_overrides(base_cfg, model_overrides(base_cfg, args.full, parse_assignments(args.model_set)))
+        mode = "lora" if parse_model_settings(model_cfg).any_lora else "full"
 
     train, val = demos_mod.load_demos(cfg.demos, int(model_cfg["action_horizon"]), num_demos=cfg.num_demos, val_episodes=cfg.val_episodes,
                                       default_prompt=cfg.prompt, root=ROOT)
@@ -98,14 +129,17 @@ def main(argv=None) -> int:
         return 0
 
     from src.models import load_model
-    run_dir = ROOT / cfg.output_root / (args.run_name or run_name_of(args.model, cfg.demos, mode))
-    if run_dir.exists():
-        raise SystemExit(f"{run_dir} exists: choose another --run-name")
-    print(f"run: {run_dir}", flush=True)
+    if not args.resume:
+        run_dir = ROOT / cfg.output_root / (args.run_name or run_name_of(args.model, cfg.demos, mode))
+        if run_dir.exists():
+            raise SystemExit(f"{run_dir} exists: choose another --run-name, or continue it with --resume")
+    print(f"run: {run_dir}" + (" (resumed)" if args.resume else ""), flush=True)
     policy = load_model(model_cfg, seed=cfg.seed)
     meta = {"model_name": args.model, "mode": mode, "model_cfg": model_cfg, "demos": list(cfg.demos)}
-    summary = sft_mod.train(policy, train, val, cfg, run_dir, meta)
+    summary = sft_mod.train(policy, train, val, cfg, run_dir, meta, resume=bool(args.resume))
     print(json.dumps(summary, indent=2))
+    if summary["stopped"]:
+        print(f"stopped at step {summary['last_step']} on a SIGTERM; continue with: --model {args.model} --resume {run_dir.name}")
     return 0
 
 

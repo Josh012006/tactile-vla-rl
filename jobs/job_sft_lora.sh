@@ -3,12 +3,14 @@
 #   sbatch jobs/job_sft_lora.sh pi0_fast                                    # the demonstrations of configs/algo/sft.yaml (scripted)
 #   sbatch jobs/job_sft_lora.sh pi05 --demos demos/isaaclab/ForgePegInsert_Robotiq_noisy --run-name pi05_noisy
 #   sbatch jobs/job_sft_lora.sh pi05 --set steps=1500 --set micro_batch_size=8 --model-set vlm.lora_rank=8
+#   sbatch jobs/job_sft_lora.sh pi05 --resume <run name>                     # continue a run that stopped (time limit, failure): its own settings are used
 # Everything after the model name goes to `python -m scripts.sft` (see its --help; --set overrides configs/algo/sft.yaml, --model-set the model YAML).
 # Full fine-tuning does not fit here: jobs/job_sft_full.sh (A100 80 GB).
 # Before the first run, on the login node (internet needed, the job itself runs offline):
 #   uv sync --group vla && source .venv/bin/activate && python -m scripts.fetch_models
 #   python -m scripts.sft --model <model> --dry-run                         # reads the demonstrations, loads no model
-# Output: runs/sft/<run name>/ (metrics.jsonl, checkpoints/<step>/), logs/slurm/sft_lora_<jobid>.out
+# Output: runs/sft/<run name>/ (metrics.jsonl, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out
+# Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (5.5 GB with LoRA) and stops cleanly.
 #
 #SBATCH --job-name=sft_lora
 #SBATCH --ntasks=1
@@ -31,7 +33,13 @@ nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
 source .venv/bin/activate
 export XLA_PYTHON_CLIENT_PREALLOCATE=false      # allocate what is used (the default preallocates 75 % of the GPU and hides the real size)
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1  # everything was fetched by scripts.fetch_models: a missing file fails instead of downloading
-python -m scripts.sft --model "$MODEL" "$@"
-status=$?
+# Run in the background and forward the SIGTERM Slurm sends 5 minutes before the time limit (--signal=B:TERM@300): the SFT then writes a resume
+# snapshot after its current step and exits 0 ("stopped at step N ... continue with ..."). `wait` returns early on a trapped signal: wait again.
+python -m scripts.sft --model "$MODEL" "$@" &
+child=$!
+trap 'kill -TERM $child 2>/dev/null' TERM
+wait $child; status=$?
+while kill -0 $child 2>/dev/null; do wait $child; status=$?; done
+trap - TERM
 nvidia-smi --query-gpu=memory.used --format=csv,noheader | sed 's/^/GPU memory still in use at the end: /'
 exit $status

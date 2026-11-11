@@ -170,3 +170,58 @@ def test_prefetch_gives_the_items_in_order_and_raises_the_error_of_its_thread():
         for item in prefetch(broken(), depth=2):
             got.append(item)
     assert got == [1]
+
+
+def test_row_batches_can_skip_the_batches_a_resumed_run_already_did():
+    from src.algos.sft import row_batches
+    full = [b.tolist() for b in row_batches(10, 4, 7, seed=3)]
+    assert [b.tolist() for b in row_batches(10, 4, 7, seed=3, skip=3)] == full[3:]
+    assert list(row_batches(10, 4, 7, seed=3, skip=7)) == []
+
+
+def test_resume_refuses_what_changes_the_optimisation_and_accepts_the_rest():
+    from src.algos import sft
+    saved = dataclass_dict(sft.load_config(overrides={"steps": 100}))
+    sft.check_resume_compatible(saved, sft.load_config(overrides={"steps": 200, "log_interval": 7, "eval_samples": 32, "resume_interval": 9}))     # constant lr: longer is fine
+    for key, value in (("lr", 1e-4), ("batch_size", 32), ("seed", 5), ("demos", ["demos/other"]), ("b2", 0.99)):
+        with pytest.raises(ValueError, match=f"{key}: "):
+            sft.check_resume_compatible(saved, sft.load_config(overrides={"steps": 100, key: value, **({"lr_end": 1e-4} if key == "lr" else {})}))
+    decaying = dataclass_dict(sft.load_config(overrides={"steps": 100, "lr_end": 1e-6}))
+    with pytest.raises(ValueError, match="the schedule depends on the total"):
+        sft.check_resume_compatible(decaying, sft.load_config(overrides={"steps": 200, "lr_end": 1e-6}))
+    with pytest.raises(ValueError, match="model YAML"):
+        sft.check_resume_compatible(saved, sft.load_config(overrides={"steps": 100}), {"vlm": {"use_lora": True}}, {"vlm": {"use_lora": False}})
+
+
+def dataclass_dict(cfg):
+    import dataclasses
+    import json
+    return json.loads(json.dumps(dataclasses.asdict(cfg)))            # as config.json stores it (tuples become lists)
+
+
+def test_find_resume_takes_the_newest_complete_snapshot_after_a_crash_while_swapping(tmp_path):
+    import json
+    from src.algos import sft
+    assert sft.find_resume(tmp_path) is None
+    for name, step, complete in (("resume.old", 10, True), ("resume.new", 20, False), ("resume", 5, True)):
+        (tmp_path / name).mkdir()
+        if complete:
+            (tmp_path / name / "meta.json").write_text(json.dumps({"step": step}))
+    directory, meta = sft.find_resume(tmp_path)
+    assert directory.name == "resume.old" and meta["step"] == 10               # an unfinished `.new` (no meta.json) is ignored
+
+
+def test_resume_on_the_command_line_takes_everything_from_the_run(tmp_path, folder):
+    import json
+    from scripts import sft as cli
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    (run / "config.json").write_text(json.dumps({"model_name": "pi05", "mode": "lora", "model_cfg": {}, "sft": {"demos": [str(folder)]}}))
+    assert cli.find_run_dir(str(run), "runs/sft") == run.resolve()
+    with pytest.raises(SystemExit, match="no run"):
+        cli.find_run_dir("nope", "runs/sft")
+    for extra in (["--full"], ["--demos", str(folder)], ["--model-set", "vlm.lora_rank=8"]):
+        with pytest.raises(SystemExit, match="only --set is accepted"):
+            cli.main(["--model", "pi05", "--resume", str(run), *extra])
+    with pytest.raises(SystemExit, match="not of pi0_fast"):
+        cli.main(["--model", "pi0_fast", "--resume", str(run)])

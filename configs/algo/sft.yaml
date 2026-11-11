@@ -40,9 +40,14 @@ log_interval: 50        # a `train` line in metrics.jsonl: mean loss and gradien
 eval_interval: 200
 eval_samples: 16        # keep it a multiple of micro_batch_size (another batch shape is another compilation)
 save_interval: 200      # a checkpoint holds the trainable parameters in bfloat16: small with LoRA (SigLIP is trained too), the whole model without
+# Resume (python -m scripts.sft --model <m> --resume <run>): the full training state (float32 parameters, AdamW state, step) is written to
+# <run>/resume/ every resume_interval steps, at the last step and when the job gets a SIGTERM (Slurm's warning before the time limit; the jobs forward
+# it). 0 = no periodic snapshot (a SIGTERM still writes one). A snapshot is about 3x the float32 trainable parameters: 5.5 GB with LoRA, 35-40 GB for
+# full fine-tuning (the full job sets 1000), written aside and swapped in, so twice that on the disk for a moment.
+resume_interval: 500
 prefetch: 3             # batches prepared ahead by a thread (openpi's transforms are CPU work)
 seed: 0
 
 # -- Output ------------------------------------------------------------------------------------------------------------------------------
-# <output_root>/<run name>/{config.json, metrics.jsonl, summary.json, checkpoints/<step>/{params, meta.json}}. `runs` is a link to the scratch disk.
+# <output_root>/<run name>/{config.json, metrics.jsonl, summary.json, checkpoints/<step>/{params, meta.json}, resume/}. `runs` is a link to the scratch disk.
 output_root: runs/sft

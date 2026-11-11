@@ -2,7 +2,7 @@
 
 `python -m scripts.sft --model <pi05 | pi0_fast>` fine-tunes a VLA on the demonstrations of `docs/demos.md` (the same as expo-ft's). The result is a
 checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/algos/demos.py` (data), `src/algos/sft.py` (loop, checkpoints),
-`scripts/sft.py` (command line). **Status: written and tested on a tiny model on the CPU; no run on the cluster yet** (section 8).
+`scripts/sft.py` (command line). **Status: written and tested on a tiny model on the CPU; no run on the cluster yet** (section 9).
 
 ## 1. Commands
 
@@ -14,6 +14,7 @@ checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/alg
 | full fine-tuning on an A100 80 GB | `sbatch jobs/job_sft_full.sh pi05` |
 | another rank | `sbatch jobs/job_sft_lora.sh pi05 --model-set vlm.lora_rank=8 --model-set action_head.lora_rank=16` |
 | shorter run, smaller micro-batch | `sbatch jobs/job_sft_lora.sh pi05 --set steps=1500 --set micro_batch_size=8` |
+| continue a run that stopped | `sbatch jobs/job_sft_lora.sh pi05 --resume <run name>` (or `job_sft_full.sh`): see section 6 |
 | follow a run | `tail -f runs/sft/<run>/metrics.jsonl` (or `logs/slurm/sft_lora_<jobid>.out`) |
 
 `--set KEY=VALUE` overrides a key of `configs/algo/sft.yaml`; `--model-set KEY=VALUE` a key of the model YAML (`<component>.<key>`, the
@@ -77,8 +78,9 @@ so full fine-tuning needs roughly 54 GB (pi0.5) or 47 GB (pi0-FAST) before the a
 
 | File | Content |
 |---|---|
-| `config.json` | the algorithm settings and the model YAML as run (overrides included) |
-| `metrics.jsonl` | one JSON line per event: `start` (parameter counts, sizes), `first_step` (seconds including the compilation, memory), `train` (every `log_interval`: loss, gradient norm, learning rate, seconds per step, memory), `eval`, `checkpoint`, `done` |
+| `config.json` | the algorithm settings and the model YAML as run (overrides included); read back by `--resume` |
+| `metrics.jsonl` | one JSON line per event: `start` (parameter counts, sizes), `first_step` (seconds including the compilation, memory), `train` (every `log_interval`: loss, gradient norm, learning rate, seconds per step, memory), `eval` (with `eval_s`), `checkpoint` (with `save_s` and `size_mib`), `resume_snapshot` (same), `resume`, `done` or `stopped`; every line has `elapsed_s` |
+| `resume/` | the training state to resume from (section 6), replaced at each snapshot |
 | `checkpoints/<step>/` | `params` (orbax: the trainable parameters in bfloat16) and `meta.json` (step, model, overrides, demos, settings) |
 | `summary.json` | final loss, checkpoint list, duration |
 
@@ -87,7 +89,33 @@ the policy's own chunks (`plan`, sampled as at deployment) against the demonstra
 gripper. For pi0-FAST the line also has `decode`: the failures of the FAST decoder, the chunks without an end token and the token-string lengths
 (`OpenPIPolicy.decode_stats`); a chunk that could not be decoded is counted and left out of the errors. This is not the success rate, which only the env gives.
 
-## 6. Loading a checkpoint
+## 6. Resume
+
+A run can be continued after a time limit, a failure or a preemption: `--resume <run name>` (a folder name under `runs/sft`, or a path), with the same job script. Nothing else
+has to be repeated: the model, its overrides, the demonstrations and the settings come from the run's `config.json`, so only `--set` is accepted next to `--resume`.
+
+What is written, in `<run>/resume/` (the checkpoints cannot do it: they are bfloat16 and hold no optimiser state):
+
+- the trainable parameters **in float32**, the whole **AdamW state** and the step. Size: about 3 times the float32 trainable parameters, i.e. 5.5 to 5.6 GB with LoRA and 35 to 40 GB for
+  full fine-tuning. It is written aside and swapped in when complete, so the disk holds twice that for a moment, and a crash while writing leaves the previous snapshot usable;
+- when: every `resume_interval` steps (500 in the YAML, 1000 in the full job; 0 = never), at the last step (so that `--set steps=<larger>` can train further), and **when the job gets a
+  SIGTERM**.
+
+**The SIGTERM**: Slurm sends it before the time limit (`--signal=B:TERM@300` in the LoRA job, `@600` in the full one, whose snapshot is longer to write); the job scripts forward it to Python,
+which finishes its current step, writes a snapshot and ends with the status 0 and the line `stopped at step N ... continue with ...`. A job killed without warning (node failure, `scancel -9`)
+resumes from the last periodic snapshot.
+
+**Same run**: the batch of step `s` comes from a permutation seeded by `seed` (the batches already done are skipped, not prepared) and its noise from `fold_in(key(seed), s)`, so a resumed run
+trains on what an uninterrupted one would have. The test compares the parameters and the optimiser state after 4 steps done in one go and as 2 + 2: equal (up to 1e-5, the GPU kernels are not
+bit-reproducible). The checkpoints of the steps already passed are kept; those the resume repeats are written again.
+
+**What may change on resume**: `steps` (only with a constant learning rate, `lr = lr_end`, since a decay depends on the total), `log_interval`, `eval_interval`, `eval_samples`, `save_interval`,
+`resume_interval`, `prefetch`. **What may not**: the demonstrations (and their number), `batch_size`, `micro_batch_size`, the optimiser and its rates, `seed`, the prompt, the model YAML: the
+resume is refused with the list of the differences. A run already at its `steps` is refused too (raise `steps`).
+
+Not done: restoring on several devices, and a resume after the demonstrations changed (the number of training rows must be the same).
+
+## 7. Loading a checkpoint
 
 ```python
 from src.models import load_model
@@ -97,9 +125,9 @@ meta = load_checkpoint(policy, "runs/sft/<run>/checkpoints/1200")
 ```
 
 `load_checkpoint` puts the trained parameters into the policy (`set_state`: nothing recompiles) and returns `meta.json`. It refuses a checkpoint with a parameter the policy lacks or
-of another shape (another rank), naming the first ones. There is no resume of a stopped run: it is run again.
+of another shape (another rank), naming the first ones. A stopped run is continued with `--resume` (section 6).
 
-## 7. Differences from the SFT of expo-ft
+## 8. Differences from the SFT of expo-ft
 
 | | expo-ft | here |
 |---|---|---|
@@ -109,17 +137,20 @@ of another shape (another rank), naming the first ones. There is no resume of a 
 | pi0-FAST | not run | 10-step chunks, absolute targets (openpi's pipeline for this checkpoint) |
 | steps | `num_train_steps: 4001` (4001 iterations) | `steps: 4000` updates |
 | evaluation | none during the run | loss and own-chunk error on a fixed set, FAST decoding statistics |
-| resume, FSDP, wandb | yes (openpi's) | no |
+| resume | yes (openpi's) | yes (section 6) |
+| FSDP, wandb | yes (openpi's) | no |
 
-## 8. Checked and not checked
+## 9. Checked and not checked
 
 Checked (`tests/test_sft_demos.py`, `tests/test_sft.py`, CPU): the chunks (last action repeated, never across episodes), the options of the data and of the command line, the refusal of broken
 demonstrations, the loop on a tiny pi0.5 (micro-batches, accumulation, only the trainable part moves, the log, the checkpoints), the loading of a checkpoint into a fresh policy and the refusal of one
-that does not fit. The vision tower of that tiny model is frozen (its optimiser state does not fit the test machine).
+that does not fit, the resume (2 + 2 steps end in the state of 4 in one go, the refusals, the SIGTERM stop, a crash while swapping snapshots). The vision tower of that tiny model is frozen (its optimiser state does not fit the test machine).
 
 **Not checked, to be seen in the first runs:**
 
 - the whole thing on the real models and the GPUs: memory (LoRA on the L40S, full on the A100), seconds per step, the best micro-batch;
 - pi0-FAST training on real FAST tokens: the path through the real tokenizer (the tests use a stub) has only been exercised by `scripts/fast_tokens.py` for the lengths;
 - that the 4000 steps and the learning rate give a policy as good as expo-ft's SFT (success rate in the env: this is the RL's evaluation, not this file's);
+- the time to write a resume snapshot and its size on the real models (`resume_snapshot` lines: `save_s`, `size_mib`), above all the 35 to 40 GB of the full fine-tuning against the 10 minutes of the SIGTERM warning;
 - the bfloat16 checkpoint of a full fine-tuning (about 6.7 GB for pi0.5) against the disk: 20 of them for `save_interval: 200`.
+

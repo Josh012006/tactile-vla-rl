@@ -15,11 +15,20 @@ optimisation on the batch.
 
 Checkpoints hold the TRAINABLE parameters only, in bfloat16 (what the policy runs with): a LoRA checkpoint is small, and `load_checkpoint`
 puts it on top of a freshly loaded policy built with the same model YAML (and the same overrides: the rank is part of the structure).
-There is no resume: a run that stops is run again.
+A run can be RESUMED (section "Resume" below): every `resume_interval` steps, at the last step and when the job is told to stop (SIGTERM), the
+full training state is written to <run>/resume/, and `--resume <run>` continues from it with the same data order and the same noise.
 
 The evaluation inside the run (`eval_interval`) is not the success rate, which only the env gives: it is the loss on a fixed set of samples
 (training ones, and held-out ones with `val_episodes`) and the error of the policy's own chunks against the demonstration's, with, for
 pi0-FAST, what the generated token strings were like (`OpenPIPolicy.decode_stats`).
+
+Resume. The snapshot holds what the checkpoints do not: the trainable parameters in float32 (the bfloat16 checkpoints are rounded), the optimiser
+state (AdamW moments, step counts) and the step. Everything else is a function of the step: the batch of step s comes from a permutation seeded by
+`seed` (the batches already done are skipped without being prepared) and its noise from `fold_in(key(seed), s)`, so a resumed run sees what an
+uninterrupted one would have seen (up to the non-determinism of the GPU kernels). A snapshot is about 3 times the float32 trainable parameters
+(5.5 GB with LoRA, 35 to 40 GB for full fine-tuning), written aside and swapped in once complete, so the disk holds two of them for a moment.
+What may change on resume: `steps` (only when the learning rate is constant, lr = lr_end: a decay depends on the total), the intervals, `eval_samples`,
+`prefetch`. Everything that shapes the optimisation or the data may not (FROZEN_ON_RESUME), nor the model YAML.
 """
 from __future__ import annotations
 
@@ -27,6 +36,8 @@ import dataclasses
 import functools
 import json
 import queue
+import shutil
+import signal
 import threading
 import time
 from pathlib import Path
@@ -65,6 +76,7 @@ class SFTConfig:
     eval_interval: int = 200
     eval_samples: int = 16
     save_interval: int = 200
+    resume_interval: int = 0
     prefetch: int = 3
     seed: int = 0
     output_root: str = "runs/sft"
@@ -78,15 +90,20 @@ class SFTConfig:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}")
         if self.batch_size % self.micro_batch_size:
             raise ValueError(f"batch_size ({self.batch_size}) must be a multiple of micro_batch_size ({self.micro_batch_size})")
-        if self.warmup_steps < 0 or self.num_demos < 0 or self.val_episodes < 0:
-            raise ValueError("warmup_steps, num_demos and val_episodes must be >= 0")
+        if self.warmup_steps < 0 or self.num_demos < 0 or self.val_episodes < 0 or self.resume_interval < 0:
+            raise ValueError("warmup_steps, num_demos, val_episodes and resume_interval must be >= 0")
         if self.lr <= 0 or self.lr_end < 0:
             raise ValueError("lr must be > 0 and lr_end >= 0")
 
 
 def load_config(path: Optional[Path] = None, overrides: Optional[Mapping[str, Any]] = None) -> SFTConfig:
     """configs/algo/sft.yaml with `overrides` (the CLI's `--set key=value`) applied. An unknown key is an error, never ignored."""
-    raw = yaml.safe_load(Path(path or CONFIG_PATH).read_text()) or {}
+    return config_from_dict(yaml.safe_load(Path(path or CONFIG_PATH).read_text()) or {}, overrides)
+
+
+def config_from_dict(raw: Mapping[str, Any], overrides: Optional[Mapping[str, Any]] = None) -> SFTConfig:
+    """An SFTConfig from a dict of its keys (the YAML, or the `sft` block of a run's config.json) and overrides."""
+    raw = dict(raw)
     raw.update(overrides or {})
     fields = {f.name for f in dataclasses.fields(SFTConfig)}
     unknown = sorted(set(raw) - fields)
@@ -99,9 +116,12 @@ def load_config(path: Optional[Path] = None, overrides: Optional[Mapping[str, An
 
 
 # -- state: trainable (float32) and frozen (bfloat16) parts ---------------------------------------------------------------------------
-def tree_cast(tree, dtype):
+def tree_cast(tree, dtype, copy: bool = False):
+    """The tree with every leaf in `dtype`. copy=True gives new buffers even when the dtype already matches (the training state is donated to the
+    optimiser step, so it must not share buffers with the policy's own state)."""
     import jax
-    return jax.tree.map(lambda x: x.astype(dtype), tree)
+    import jax.numpy as jnp
+    return jax.tree.map((lambda x: jnp.array(x, dtype=dtype, copy=True)) if copy else (lambda x: x.astype(dtype)), tree)
 
 
 def split_state(policy):
@@ -165,9 +185,85 @@ def load_checkpoint(policy, directory) -> dict:
     return meta
 
 
+# -- resume ---------------------------------------------------------------------------------------------------------------------------
+RESUME_DIR = "resume"
+# What may not differ between a run and its resume: it would change the optimisation or the data. (`steps` is checked apart.)
+FROZEN_ON_RESUME = ("demos", "num_demos", "val_episodes", "prompt", "batch_size", "micro_batch_size", "lr", "lr_end", "warmup_steps", "weight_decay",
+                    "b1", "b2", "eps", "clip_grad_norm", "seed")
+
+
+def check_resume_compatible(saved: Mapping[str, Any], cfg: SFTConfig, saved_model: Optional[Any] = None, model: Optional[Any] = None) -> None:
+    """Refuse a resume whose settings (or model YAML) differ from the run's in what shapes the optimisation. `saved` is the `sft` block of config.json."""
+    now = dataclasses.asdict(cfg)
+    now["demos"], saved = list(now["demos"]), {**saved, "demos": list(saved.get("demos", ()))}
+    diff = [f"{k}: {saved.get(k)!r} in the run, {now[k]!r} now" for k in FROZEN_ON_RESUME if saved.get(k) != now[k]]
+    if saved.get("steps") != now["steps"] and saved.get("lr") != saved.get("lr_end"):
+        diff.append(f"steps: {saved.get('steps')} in the run, {now['steps']} now, and the learning rate decays (lr != lr_end): the schedule depends on the total")
+    if saved_model is not None and model is not None and json.loads(json.dumps(saved_model, default=str)) != json.loads(json.dumps(model, default=str)):
+        diff.append("the model YAML (and its overrides) differs from the run's")
+    if diff:
+        raise ValueError("cannot resume: " + "; ".join(diff))
+
+
+def find_resume(run_dir: Path) -> Optional[Tuple[Path, dict]]:
+    """The newest COMPLETE snapshot of a run (meta.json is written last), or None. A crash while one is being swapped in leaves the other behind."""
+    found = []
+    for name in (RESUME_DIR, RESUME_DIR + ".new", RESUME_DIR + ".old"):
+        meta_path = Path(run_dir) / name / META_FILE
+        if meta_path.exists():
+            found.append((json.loads(meta_path.read_text()), Path(run_dir) / name))
+    if not found:
+        return None
+    meta, directory = max(found, key=lambda item: item[0]["step"])
+    return directory, meta
+
+
+def save_resume(run_dir: Path, step: int, trainable, opt_state, n_rows: int) -> int:
+    """Write the training state at `step` to <run_dir>/resume, aside first and swapped in once complete. Returns its size in MiB."""
+    import jax
+    import orbax.checkpoint as ocp
+    run_dir = Path(run_dir).resolve()
+    new, cur, old = (run_dir / (RESUME_DIR + s) for s in (".new", "", ".old"))
+    if new.exists():
+        shutil.rmtree(new)
+    new.mkdir(parents=True)
+    leaves = jax.tree.leaves((trainable, opt_state))
+    ocp.PyTreeCheckpointer().save(new / PARAMS_DIR, {f"{i:06d}": leaf for i, leaf in enumerate(leaves)})
+    (new / META_FILE).write_text(json.dumps({"step": step, "n_rows": n_rows, "n_leaves": len(leaves)}))
+    if old.exists():
+        shutil.rmtree(old)
+    if cur.exists():
+        cur.rename(old)
+    new.rename(cur)
+    if old.exists():
+        shutil.rmtree(old)
+    return round(sum(f.stat().st_size for f in cur.rglob("*") if f.is_file()) / 2**20)
+
+
+def load_resume(directory: Path, meta: Mapping[str, Any], trainable, opt_state, n_rows: int):
+    """(trainable, opt_state) of a snapshot, in the structure of the ones given (freshly built from the same model and settings)."""
+    import jax
+    import jax.numpy as jnp
+    import orbax.checkpoint as ocp
+    if meta["n_rows"] != n_rows:
+        raise ValueError(f"the snapshot was taken with {meta['n_rows']} training rows, there are {n_rows} now: the demonstrations changed")
+    saved = ocp.PyTreeCheckpointer().restore(Path(directory).resolve() / PARAMS_DIR)
+    leaves, treedef = jax.tree.flatten((trainable, opt_state))
+    if len(leaves) != meta["n_leaves"] or len(saved) != len(leaves):
+        raise ValueError(f"the snapshot holds {len(saved)} arrays, the training state has {len(leaves)}: another model or optimiser")
+    restored = []
+    for i, leaf in enumerate(leaves):
+        value = saved[f"{i:06d}"]
+        if tuple(value.shape) != tuple(leaf.shape):
+            raise ValueError(f"array {i}: {tuple(value.shape)} in the snapshot, {tuple(leaf.shape)} in the training state")
+        restored.append(jnp.asarray(value).astype(leaf.dtype))
+    return jax.tree.unflatten(treedef, restored)
+
+
 # -- data feed -----------------------------------------------------------------------------------------------------------------------
-def row_batches(n_rows: int, batch_size: int, steps: int, seed: int) -> Iterator[np.ndarray]:
-    """`steps` batches of `batch_size` distinct rows: a new random permutation per epoch, the incomplete tail of an epoch is dropped."""
+def row_batches(n_rows: int, batch_size: int, steps: int, seed: int, skip: int = 0) -> Iterator[np.ndarray]:
+    """Batches `skip + 1` to `steps` of the sequence of `batch_size` distinct rows: a new random permutation per epoch, the incomplete tail of an epoch is
+    dropped. The `skip` first ones are walked over, not given (a resumed run does not prepare the batches it already trained on)."""
     if n_rows < batch_size:
         raise ValueError(f"{n_rows} training steps but batch_size {batch_size}")
     rng = np.random.default_rng(seed)
@@ -178,7 +274,8 @@ def row_batches(n_rows: int, batch_size: int, steps: int, seed: int) -> Iterator
             if produced == steps:
                 return
             produced += 1
-            yield order[i:i + batch_size]
+            if produced > skip:
+                yield order[i:i + batch_size]
 
 
 def prefetch(iterator: Iterator, depth: int) -> Iterator:
@@ -277,9 +374,12 @@ class MetricsLog:
 
 
 # -- the run ---------------------------------------------------------------------------------------------------------------------------
-def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig, run_dir: Path, meta: Optional[Mapping[str, Any]] = None) -> dict:
-    """Run the SFT of `policy` on `train_set`. Writes <run_dir>/config.json, metrics.jsonl and checkpoints/<step>/. Returns a summary
-    (final loss, checkpoints, time). `policy` ends with the final weights (`set_state`)."""
+def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig, run_dir: Path, meta: Optional[Mapping[str, Any]] = None,
+          resume: bool = False) -> dict:
+    """Run the SFT of `policy` on `train_set`. Writes <run_dir>/config.json, metrics.jsonl, checkpoints/<step>/ and resume/. Returns a summary
+    (final loss, checkpoints, time, `stopped` when a SIGTERM ended it early). `policy` ends with the final weights (`set_state`).
+    resume=True continues the run of <run_dir> from its newest complete snapshot (ValueError if there is none, or if the settings differ in
+    what shapes the optimisation, see FROZEN_ON_RESUME); `policy` must be freshly loaded from the same model YAML."""
     import flax.nnx as nnx
     import jax
     import jax.numpy as jnp
@@ -288,21 +388,35 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
     if train_set.horizon != policy.info.action_horizon:
         raise ValueError(f"the demonstrations are cut in chunks of {train_set.horizon} steps, the model's action_horizon is {policy.info.action_horizon}")
     run_dir = Path(run_dir)
-    (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     meta = {**(meta or {}), "model": policy.info.name, "family": policy.info.family, "action_horizon": policy.info.action_horizon}
+    snapshot_found = find_resume(run_dir) if resume else None
+    if resume:
+        if snapshot_found is None:
+            raise ValueError(f"{run_dir} has no complete resume snapshot (resume_interval was 0 and the run was not stopped by a SIGTERM?)")
+        saved_cfg = json.loads((run_dir / "config.json").read_text())
+        check_resume_compatible(saved_cfg["sft"], cfg, saved_cfg.get("model_cfg"), meta.get("model_cfg"))
+        if snapshot_found[1]["step"] >= cfg.steps:
+            raise ValueError(f"the run is already at step {snapshot_found[1]['step']} (steps = {cfg.steps}): give a larger `steps` to train further")
+    (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text(json.dumps({"sft": dataclasses.asdict(cfg), **meta}, indent=2, default=str))
     log = MetricsLog(run_dir / "metrics.jsonl")
 
     trainable, frozen = split_state(policy)
-    trainable = tree_cast(trainable, jnp.float32)
+    trainable = tree_cast(trainable, jnp.float32, copy=True)
     n_trainable = sum(int(np.prod(x.shape)) for x in jax.tree.leaves(trainable))
     n_frozen = sum(int(np.prod(x.shape)) for x in jax.tree.leaves(frozen))
     tx, schedule = make_optimizer(cfg)
     opt_state = tx.init(trainable)
+    start_step = 0
+    if snapshot_found is not None:
+        start_step = snapshot_found[1]["step"]
+        trainable, opt_state = load_resume(snapshot_found[0], snapshot_found[1], trainable, opt_state, len(train_set))
     n_micro = cfg.batch_size // cfg.micro_batch_size
     log.write(event="start", run_dir=str(run_dir), trainable_m=round(n_trainable / 1e6, 1), frozen_m=round(n_frozen / 1e6, 1),
               train_steps=len(train_set), val_steps=len(val_set) if val_set else 0, batch_size=cfg.batch_size,
               micro_batch_size=cfg.micro_batch_size, memory_mib=device_memory_mib())
+    if resume:
+        log.write(event="resume", from_step=start_step, snapshot=str(snapshot_found[0]), target_steps=cfg.steps)
 
     @jax.jit
     def grad_fn(trainable, frozen, rng, observation, actions):
@@ -342,17 +456,31 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
 
     def checkpoint(step: int) -> str:
         path = run_dir / "checkpoints" / str(step)
+        if path.exists():                                   # saved by the attempt this one resumed: same step, same content
+            shutil.rmtree(path)
         t_save = time.monotonic()
         save_checkpoint(path, trainable, {**meta, "step": step, "sft": dataclasses.asdict(cfg)})
         size_mib = round(sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 2**20)
         log.write(event="checkpoint", step=step, path=str(path), save_s=round(time.monotonic() - t_save, 1), size_mib=size_mib)
         return str(path)
 
+    def snapshot(step: int) -> None:
+        t_snap = time.monotonic()
+        size_mib = save_resume(run_dir, step, trainable, opt_state, len(train_set))
+        log.write(event="resume_snapshot", step=step, save_s=round(time.monotonic() - t_snap, 1), size_mib=size_mib)
+
+    # A SIGTERM (Slurm's warning before the time limit, `--signal=B:TERM@...` forwarded by the job script) ends the run after the current step, with a snapshot.
+    stop = threading.Event()
+    try:
+        previous_handler = signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    except ValueError:                                      # not the main thread: nothing to catch
+        previous_handler = None
     base_key = jax.random.key(cfg.seed)
     feed = prefetch((micro_batches(policy, train_set, rows, cfg.micro_batch_size)
-                     for rows in row_batches(len(train_set), cfg.batch_size, cfg.steps, cfg.seed)), cfg.prefetch)
+                     for rows in row_batches(len(train_set), cfg.batch_size, cfg.steps, cfg.seed, skip=start_step)), cfg.prefetch)
     t_start, t_window, losses, grad_norms, checkpoints, last_loss = time.monotonic(), time.monotonic(), [], [], [], float("nan")
-    for step, micros in enumerate(feed, start=1):
+    stopped, last_snapshot = False, start_step
+    for step, micros in enumerate(feed, start=start_step + 1):
         total, step_losses = None, []
         for i, (observation, actions) in enumerate(micros):
             loss, grads = grad_fn(trainable, frozen, jax.random.fold_in(base_key, step * n_micro + i), observation, actions)
@@ -361,7 +489,7 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
         trainable, opt_state, grad_norm = apply_fn(trainable, opt_state, total)
         losses.append(jnp.mean(jnp.stack(step_losses)))
         grad_norms.append(grad_norm)
-        if step == 1:
+        if step == start_step + 1:
             jax.block_until_ready(trainable)
             log.write(event="first_step", seconds=round(time.monotonic() - t_start, 1), note="includes the compilation", memory_mib=device_memory_mib())
             t_window = time.monotonic()
@@ -375,9 +503,21 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
             evaluate(step)
         if step % cfg.save_interval == 0 or step == cfg.steps:
             checkpoints.append(checkpoint(step))
+        if cfg.resume_interval and (step % cfg.resume_interval == 0 or step == cfg.steps):
+            snapshot(step)
+            last_snapshot = step
+        if stop.is_set() and step < cfg.steps:
+            if last_snapshot != step:
+                snapshot(step)
+            stopped = True
+            feed.close()
+            break
+    if previous_handler is not None:
+        signal.signal(signal.SIGTERM, previous_handler)
     policy.set_state(deployed_state(trainable, frozen))
-    summary = {"steps": cfg.steps, "final_loss": last_loss, "checkpoints": checkpoints, "seconds": round(time.monotonic() - t_start, 1)}
-    log.write(event="done", **summary)
+    summary = {"steps": cfg.steps, "final_loss": last_loss, "checkpoints": checkpoints, "seconds": round(time.monotonic() - t_start, 1),
+               "stopped": stopped, "last_step": step if cfg.steps > start_step else start_step}
+    log.write(event="stopped" if stopped else "done", **summary)
     log.close()
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     return summary

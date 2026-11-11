@@ -26,6 +26,9 @@ from test_openpi_policy import H, build  # noqa: E402
 from test_sft_demos import write_demo  # noqa: E402
 
 PROMPT = "insert the peg"
+META = {"model_name": "tiny", "model_cfg": {"name": "tiny"}}
+COMMON = {"demos": ["x"], "batch_size": 4, "micro_batch_size": 2, "lr": 1e-3, "lr_end": 1e-3, "log_interval": 2, "eval_interval": 100, "eval_samples": 2,
+          "save_interval": 2, "resume_interval": 2, "prefetch": 1}
 
 
 def vision_frozen_policy(seed_offset=0):
@@ -50,9 +53,9 @@ def run(sets, tmp_path_factory):
     trainable0, frozen0 = sft.split_state(policy)
     before = {k: np.asarray(v) for k, v in tu.flatten_dict(policy.state.to_pure_dict()).items()}
     cfg = sft.load_config(overrides={"demos": ["x"], "steps": 4, "batch_size": 4, "micro_batch_size": 2, "lr": 1e-3, "lr_end": 1e-3, "log_interval": 2,
-                                     "eval_interval": 2, "eval_samples": 2, "save_interval": 2, "prefetch": 1})
+                                     "eval_interval": 2, "eval_samples": 2, "save_interval": 2, "resume_interval": 2, "prefetch": 1})
     run_dir = tmp_path_factory.mktemp("run") / "r"
-    summary = sft.train(policy, train_set, val_set, cfg, run_dir, {"model_name": "tiny"})
+    summary = sft.train(policy, train_set, val_set, cfg, run_dir, META)
     return policy, run_dir, summary, before, (trainable0, frozen0)
 
 
@@ -119,3 +122,84 @@ def test_the_chunks_of_the_demonstrations_and_the_models_horizon_must_agree(sets
     other = demos.DemoSet(train_set.episodes, horizon=H + 1)
     with pytest.raises(ValueError, match="action_horizon"):
         sft.train(vision_frozen_policy(), other, None, sft.load_config(overrides={"demos": ["x"]}), tmp_path / "r")
+
+
+# -- resume ---------------------------------------------------------------------------------------------------------------------------------
+def snapshot_leaves(run_dir):
+    import orbax.checkpoint as ocp
+    directory, meta = sft.find_resume(run_dir)
+    saved = ocp.PyTreeCheckpointer().restore(directory.resolve() / sft.PARAMS_DIR)
+    return meta, [np.asarray(saved[k]) for k in sorted(saved)]
+
+
+@pytest.fixture(scope="module")
+def resumed(sets, tmp_path_factory):
+    """The run of `run` (4 steps in one go) done in two parts: 2 steps, then a resume to 4."""
+    train_set, val_set = sets
+    run_dir = tmp_path_factory.mktemp("resumed") / "r"
+    first = sft.train(vision_frozen_policy(), train_set, val_set, sft.load_config(overrides={**COMMON, "steps": 2}), run_dir, META)
+    second = sft.train(vision_frozen_policy(), train_set, val_set, sft.load_config(overrides={**COMMON, "steps": 4}), run_dir, META, resume=True)
+    return run_dir, first, second
+
+
+def test_a_resumed_run_ends_in_the_same_state_as_an_uninterrupted_one(run, resumed):
+    """The parameters (float32) and the whole optimiser state after step 4 are the same whether the run was cut at step 2 or not."""
+    _, run_dir_a, *_ = run
+    run_dir_b, first, second = resumed
+    meta_a, leaves_a = snapshot_leaves(run_dir_a)
+    meta_b, leaves_b = snapshot_leaves(run_dir_b)
+    assert meta_a["step"] == meta_b["step"] == 4 and len(leaves_a) == len(leaves_b) > 10
+    for a, b in zip(leaves_a, leaves_b):
+        assert a.shape == b.shape and np.allclose(a, b, rtol=1e-5, atol=1e-7)
+    assert first["last_step"] == 2 and second["last_step"] == 4 and not second["stopped"]
+
+
+def test_the_log_of_a_resume_continues_the_numbering(resumed):
+    run_dir, *_ = resumed
+    lines = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    resume = [line for line in lines if line["event"] == "resume"]
+    assert len(resume) == 1 and resume[0]["from_step"] == 2 and resume[0]["target_steps"] == 4
+    assert [line["step"] for line in lines if line["event"] == "train"] == [2, 4]                     # the first part logged at its last step 2, the second at 4 (log every 2 steps)
+    assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["2", "4"]
+    assert sft.find_resume(run_dir)[1]["step"] == 4
+
+
+def test_a_resume_that_would_change_the_optimisation_or_has_nothing_to_resume_is_refused(resumed, sets, tmp_path):
+    run_dir, *_ = resumed
+    train_set, val_set = sets
+    with pytest.raises(ValueError, match="no complete resume snapshot"):
+        sft.train(vision_frozen_policy(), train_set, val_set, sft.load_config(overrides={**COMMON, "steps": 4}), tmp_path / "empty", META, resume=True)
+    with pytest.raises(ValueError, match="already at step 4"):
+        sft.train(vision_frozen_policy(), train_set, val_set, sft.load_config(overrides=COMMON | {"steps": 4}), run_dir, META, resume=True)
+    with pytest.raises(ValueError, match=r"lr: 0.001 in the run"):
+        sft.train(vision_frozen_policy(), train_set, val_set, sft.load_config(overrides={**COMMON, "steps": 6, "lr": 5e-4, "lr_end": 1e-3}), run_dir, META, resume=True)
+    other = demos.DemoSet(train_set.episodes[:1], horizon=H)
+    with pytest.raises(ValueError, match="demonstrations changed"):
+        sft.train(vision_frozen_policy(), other, None, sft.load_config(overrides={**COMMON, "steps": 6, "batch_size": 4}), run_dir, META, resume=True)
+
+
+def test_a_sigterm_stops_the_run_after_the_current_step_with_a_snapshot(sets, tmp_path):
+    import os
+    import signal
+    import threading
+    import time
+    train_set, val_set = sets
+    run_dir = tmp_path / "r"
+
+    def terminate_after_the_first_step():
+        log = run_dir / "metrics.jsonl"
+        for _ in range(6000):
+            if log.exists() and "first_step" in log.read_text():
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            time.sleep(0.05)
+
+    threading.Thread(target=terminate_after_the_first_step, daemon=True).start()
+    cfg = sft.load_config(overrides={**COMMON, "steps": 12, "resume_interval": 0, "save_interval": 100})
+    summary = sft.train(vision_frozen_policy(), train_set, val_set, cfg, run_dir, META)
+    assert summary["stopped"] and 1 <= summary["last_step"] < 12
+    directory, meta = sft.find_resume(run_dir)
+    assert meta["step"] == summary["last_step"]                                         # a snapshot was written although resume_interval is 0
+    events = [json.loads(line)["event"] for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    assert events[-1] == "stopped" and "resume_snapshot" in events
+    assert signal.getsignal(signal.SIGTERM) is not None
