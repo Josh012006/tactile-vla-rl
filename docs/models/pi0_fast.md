@@ -20,6 +20,7 @@ weights loaded, no GPU needed). What is a consequence drawn from those facts rat
 | Input | 2 camera images (224×224) + a black third image, joint state (7) + gripper (1) written as text tokens, a language prompt |
 | Output | a chunk of **10** steps × 8 values (7 joint targets + gripper), **absolute** targets, decoded from tokens |
 | Decoding | token by token, greedy by default (temperature 0), at most 256 steps, stops at the end-of-sequence token |
+| Measured on our demonstrations | at most **62** tokens per chunk (limit 180) and at most **16** generated tokens (limit 256): the limits are not a constraint. FAST is lossy: **0.011 rad** mean error on the joints, and **3 chunks out of 8 913** fail to decode (section 5) |
 | Training loss | next-token cross entropy, on the action tokens only |
 | Default LoRA | rank **16** on the VLM (`gemma_2b_lora`); there is no second component |
 | openpi config used for data and norm stats | `pi0_fast_droid_jointpos_polaris` |
@@ -76,7 +77,8 @@ Not read by the baseline: `extra/tactile` (2, 7, 4), `extra/ft_force`, `extra/gr
    The prompt is **lower-cased**, stripped, `_` replaced by a space.
 4. **Token budget**: `max_token_len = 180` for the prefix text **plus** the action tokens (the config of the checkpoint sets it; the openpi
    default is 250). A longer sequence is **truncated** with a warning: a chunk that needs more tokens is cut and cannot be decoded
-   correctly. Image tokens (3 × 256 = 768) come on top.
+   correctly. Image tokens (3 × 256 = 768) come on top. **Measured on our demonstrations: at most 62 text tokens** (section 5), so 180 leaves a
+   factor of about 3.
 
 ## 4. Action space
 
@@ -113,7 +115,34 @@ If `Action: ` is not found in the output, **the chunk is all zeros** (openpi's `
 - The temperature is **not exposed in our YAML**: with the default 0 the S samples of `plan(..., num_samples=S)` are identical. The wrapper
   repeats the row S times because this model has no `num_samples` argument.
 - Cost: one prefill over 768 image tokens + the prefix, then one Gemma 2B forward per generated token, so the cost grows with the number
-  of action tokens (up to 256), unlike pi0.5 where it is a fixed 10 expert passes.
+  of action tokens (at most 256 by the limit, at most 16 on our demonstrations), unlike pi0.5 where it is a fixed 10 expert passes.
+
+### Measured on the FORGE demonstrations
+
+`python -m scripts.fast_tokens` (2026-11-11, `HF_HUB_OFFLINE=1`, CPU, about a minute): every step of every demonstration gives a chunk of the next 10
+actions (the last steps repeat the final action, as the LeRobot loader does). The chunk goes through the transforms of the openpi config
+(`DroidInputs`, `DeltaActions`, quantile normalisation with the DROID statistics of the checkpoint) and the FAST tokenizer; the tokens are decoded back
+after the truncation at `max_token_len`, and the result goes through `AbsoluteActions`. Report: `reports/fast_tokens.json`.
+
+| Folder | Demos | Chunks | Tokens per chunk, mean / p99 / max | Longest prefix | Longest postfix | Above 180 | Joint error (rad), mean / p99 / max | Gripper error, max |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `ForgePegInsert_Robotiq_scripted` | 50 | 2422 | 56.4 / 60 / 62 | 46 | 16 | 0 | 0.0112 / 0.0211 / 0.0299 | 0.0058 |
+| `ForgePegInsert_Robotiq_noisy` | 50 | 2485 | 56.4 / 60 / 62 | 46 | 16 | 0 | 0.0113 / 0.0216 / 0.0463 | 0.5001 (decode failures, below) |
+| `ForgePegInsert_Robotiq_teleop` | 50 | 4006 | 56.2 / 59 / 60 | 46 | 14 | 0 | 0.0112 / 0.0163 / 0.0204 | 0.0058 |
+
+- **The limits are not a constraint.** The longest sequence is 62 tokens (limit `max_token_len = 180`) and the longest postfix 16 (limit
+  `max_decoding_steps = 256`): no chunk of the 8 913 is truncated. The smallest `max_token_len` that covers all of them is 62, 80 with a 20 % margin.
+  `configs/model/pi0_fast.yaml` keeps 180, the value of the checkpoint's config: a smaller value would only shorten the padding, and it was not tested.
+  `action_horizon = 10` is kept.
+- **FAST is lossy.** Decoding the tokens of a demonstration gives back the chunk with a **mean error of 0.011 rad** on the worst joint of each chunk
+  (p99 0.016 to 0.022, max 0.020 to 0.046), the same for the three folders. The gripper is reproduced to 0.006. Whether this matters for the insertion
+  is **not measured** (it is an error on the targets of a whole chunk, followed by the next replanning).
+- **A few chunks do not decode.** The FAST decoder printed `cannot reshape array of size 76 into shape (8)` three times: 3 chunks out of 8 913 (0.03 %),
+  all in the noisy folder, each with only 5 to 7 FAST tokens (the shortest sequences). The decoder then returns an all-zero chunk, and zeros in the normalised
+  space are not a zero action: they un-normalise to the middle of the DROID statistics, consistent with the gripper error of 0.5 in that folder. A policy under
+  RL can write such token strings too: the algorithm must detect a chunk that failed to decode (and not execute it blindly).
+- Not covered by these numbers: the chunks a **policy** writes (they may be longer than the demonstrations' and may fail to decode more often), and
+  the tokens of other horizons (`--horizon`, repeatable).
 
 ## 6. Where the LoRA is, and what is trained
 
@@ -171,15 +200,16 @@ train the released weights. openpi's own LoRA recipe for this family is `pi0_fas
 
 - The likelihood of a chunk is **exact**: the product of the probabilities of its tokens, so policy-gradient style updates and importance ratios are
   directly available, which is not the case for the flow-matching pi0.5.
-- A chunk is a **discrete** object: the log-probability sums over a variable number of tokens (up to 256), so a long chunk weighs more than a short one
-  unless the algorithm normalises it.
+- A chunk is a **discrete** object: the log-probability sums over a variable number of tokens (at most 16 on our demonstrations, 256 by the limit), so a
+  long chunk weighs more than a short one unless the algorithm normalises it.
 - Decoding at temperature 0 is deterministic: for exploration the algorithm must sample (temperature > 0), which our YAML does not expose yet.
-- If the sequence exceeds `max_token_len`, the chunk is truncated and the zero-chunk fallback can occur: monitor it.
+- A chunk can fail to decode (3 of 8 913 demonstration chunks did; a policy can produce more) and the fallback is an all-zero chunk in normalised space,
+  not a hold: count these failures and do not execute them. Truncation at `max_token_len` did not occur on the demonstrations.
 
 ## 11. Not checked
 
-- The number of FAST tokens per chunk on FORGE demonstrations (it sets whether `max_token_len = 180` is enough: not measured here).
-- How often a decoded sequence fails to give a valid chunk on FORGE.
+- The tokens and the decoding failures of chunks written by a **policy** (section 5 measures the demonstrations only).
+- Whether the FAST reconstruction error (0.011 rad on average) limits the success rate of the insertion.
 - Memory use and step time, LoRA versus full fine-tuning, on our GPUs.
 - The training recipe and the data of the PolaRiS checkpoint (released by Physical Intelligence, not in this repo).
 - The effect of the rank on the success rate (no experiment yet).
