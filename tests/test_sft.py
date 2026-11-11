@@ -230,3 +230,20 @@ def test_a_sigterm_stops_the_run_after_the_current_step_with_a_snapshot(sets, tm
     events = [json.loads(line)["event"] for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert events[-1] == "stopped" and "resume_snapshot" in events
     assert signal.getsignal(signal.SIGTERM) is not None
+
+
+def test_a_failing_run_writes_an_error_line_with_the_reason_and_raises(sets, tmp_path, monkeypatch):
+    """The first probes of the full fine-tuning died without a word in metrics.jsonl: the reason (an out-of-memory above all) must be in it."""
+    train_set, val_set = sets
+
+    def out_of_memory(*args, **kwargs):
+        raise RuntimeError("RESOURCE_EXHAUSTED: Out of memory while trying to allocate 13412358144 bytes")
+
+    monkeypatch.setattr(sft, "evaluate_chunks", out_of_memory)
+    cfg = sft.load_config(overrides={**COMMON, "steps": 2, "eval_interval": 1, "save_interval": 100, "resume_interval": 0})
+    run_dir = tmp_path / "r"
+    with pytest.raises(RuntimeError, match="RESOURCE_EXHAUSTED"):
+        sft.train(vision_frozen_policy(), train_set, val_set, cfg, run_dir, META)
+    events = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    assert events[-1]["event"] == "error" and "RESOURCE_EXHAUSTED" in events[-1]["error"] and "RuntimeError" in events[-1]["error"]
+    assert "done" not in [e["event"] for e in events] and not (run_dir / "summary.json").exists()

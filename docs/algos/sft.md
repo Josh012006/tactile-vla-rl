@@ -2,7 +2,7 @@
 
 `python -m scripts.sft --model <pi05 | pi0_fast>` fine-tunes a VLA on the demonstrations of `docs/demos.md` (the same as expo-ft's). The result is a
 checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/algos/demos.py` (data), `src/algos/sft.py` (loop, checkpoints), `src/algos/tracking.py` (wandb),
-`scripts/sft.py` (command line). **Status: written and tested on a tiny model on the CPU; no run on the cluster yet** (section 9).
+`scripts/sft.py` (command line). **Status: tested on a tiny model on the CPU; probed 30 steps on the cluster (LoRA pi0.5 complete, the other three ended early: section 4)** (section 9).
 
 ## 1. Commands
 
@@ -69,9 +69,28 @@ added to the policy's transforms, not only to the SFT.)
 | starting point | the checkpoint plus a small random LoRA (openpi's normal(0.01) init for both matrices: not exactly the base function) | exactly the checkpoint |
 | checkpoint | the trainable part only | the whole model |
 
-The experiments use LoRA, as in expo-ft. Memory is **not measured** for either mode. A float32 model with gradients and AdamW state is about 16 bytes per parameter,
-so full fine-tuning needs roughly 54 GB (pi0.5) or 47 GB (pi0-FAST) before the activations, which is why it is on the 80 GB card; LoRA on the L40S is a first guess. The
-`first_step` and `train` lines of `metrics.jsonl` carry `memory_mib` (JAX's in-use and peak bytes): that is the measurement, from the first job.
+The experiments use LoRA, as in expo-ft. Measured by four 30-step probes (2026-11-11; batch 64, one checkpoint and one evaluation; the code of that day had no resume and no buffer donation):
+
+| | pi0.5 LoRA (L40S) | pi0-FAST LoRA (L40S) | pi0.5 full (A100 80 GB) | pi0-FAST full (A100 80 GB) |
+|---|---|---|---|---|
+| trainable parameters | 467.0 M | 442.7 M | 3353.4 M | 2923.3 M |
+| micro-batch | 16 | 16 | 8 | 8 |
+| memory once loaded (`in_use`) | 11.8 GiB | 10.7 GiB | 44.2 GiB | 38.5 GiB |
+| memory peak after 30 steps | 23.9 GiB (of 45) | 22.2 GiB (of 45) | none: ended at the first step | none: ended at the first step |
+| first step (compilation) | 108 s | 87 s | | |
+| seconds per step (batch 64) | 7.7, then 8.7 | 7.8, then 8.7 | | |
+| evaluation (16 + 16 chunks) | 34 s (first, compilation included) | not reached | | |
+| checkpoint | 698 MiB, 2.5 s | | | |
+
+- **LoRA**: the memory is comfortable (peak about half of the card), the cost is **8.7 s per step**, so 4000 steps are about **9.7 h**, about 10 h with the evaluations and saves (the LoRA job asks for 14 h). The step is
+  compute-bound: a larger micro-batch would not make it faster, 16 stays. 20 checkpoints of 698 MiB (size at step 30) are 14 GB. The two models cost the same per step.
+  After 30 steps the loss went 1.56 -> 0.16 (pi0.5, flow matching) and 1.22 -> 0.41 (pi0-FAST, tokens), and pi0.5's own chunks were 0.052 rad (mean over the 7 joints) from the demonstration's, 16/16 valid.
+- **Full**: both runs ended after their `start` line, i.e. at the first step, with no reason in `metrics.jsonl` (the logs of the jobs hold it; this was the old code, which wrote none). The memory
+  explains it: once loaded, the state is the float32 parameters + the two AdamW moments + the policy's own bfloat16 copy = 44.2 GiB (pi0.5), and the old accumulation then held three float32 copies of the
+  gradients at once (12.5 GiB each) = 81.7 GiB > the 79.6 GiB of the card. **Fix: the buffers of the accumulation and of the update are donated** (two copies at most): about 44.2 + 2 x 12.5 + activations (a few GiB) = 72 to 73 GiB
+  for pi0.5, about 38.5 + 2 x 10.9 + activations = 62 to 64 GiB for pi0-FAST. A smaller `micro_batch_size` would not have helped: it only changes the activations. **Not measured since the fix**; the run now writes an `error` line (exception, memory) to
+  `metrics.jsonl` if it fails again. If pi0.5 still does not fit: free the policy's duplicate of the parameters, or keep the first AdamW moment in bfloat16 (6 GiB less; a change of the optimiser, so a decision).
+- The first `eval` of the pi0-FAST LoRA probe was never written: the run stopped after its step-30 `train` line, reason unknown (this too is in the job's log; an `error` line would now say it).
 
 ## 5. What a run writes
 
@@ -80,7 +99,7 @@ so full fine-tuning needs roughly 54 GB (pi0.5) or 47 GB (pi0-FAST) before the a
 | File | Content |
 |---|---|
 | `config.json` | the algorithm settings and the model YAML as run (overrides included); read back by `--resume` |
-| `metrics.jsonl` | one JSON line per event: `start` (parameter counts, sizes), `first_step` (seconds including the compilation, memory), `train` (every `log_interval`: loss, gradient norm, learning rate, seconds per step, memory), `eval` (with `eval_s`), `checkpoint` (with `save_s` and `size_mib`), `resume_snapshot` (same), `resume`, `done` or `stopped`; every line has `elapsed_s` |
+| `metrics.jsonl` | one JSON line per event: `start` (parameter counts, sizes), `error` (the exception and the memory, when the run fails), `first_step` (seconds including the compilation, memory), `train` (every `log_interval`: loss, gradient norm, learning rate, seconds per step, memory), `eval` (with `eval_s`), `checkpoint` (with `save_s` and `size_mib`), `resume_snapshot` (same), `resume`, `done` or `stopped`; every line has `elapsed_s` |
 | `wandb_id.txt` | the id of the wandb run of this training (section 5b); `--resume` reads it to continue the same run |
 | `wandb/` | the local files of wandb (the whole run when it is offline) |
 | `resume/` | the training state to resume from (section 6), replaced at each snapshot |
@@ -169,7 +188,7 @@ that does not fit, the resume (2 + 2 steps end in the state of 4 in one go, the 
 **Not checked, to be seen in the first runs:**
 
 - wandb ONLINE from a compute node (the tests are offline or fake);
-- the whole thing on the real models and the GPUs: memory (LoRA on the L40S, full on the A100), seconds per step, the best micro-batch;
+- full fine-tuning on the A100 after the donation fix (section 4): memory and seconds per step; and the first evaluation of pi0-FAST, which a probe did not reach;
 - pi0-FAST training on real FAST tokens: the path through the real tokenizer (the tests use a stub) has only been exercised by `scripts/fast_tokens.py` for the lengths;
 - that the 4000 steps and the learning rate give a policy as good as expo-ft's SFT (success rate in the env: this is the RL's evaluation, not this file's);
 - the time to write a resume snapshot and its size on the real models (`resume_snapshot` lines: `save_s`, `size_mib`), above all the 35 to 40 GB of the full fine-tuning against the 10 minutes of the SIGTERM warning;

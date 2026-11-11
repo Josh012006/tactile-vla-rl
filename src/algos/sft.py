@@ -386,11 +386,11 @@ class MetricsLog:
                 print(f"[wandb] logging stopped: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
                 self.sink = None
 
-    def close(self) -> None:
+    def close(self, exit_code: int = 0) -> None:
         self.file.close()
         if self.sink is not None:
             try:
-                self.sink.close()
+                self.sink.close(exit_code)
             except Exception as error:                      # noqa: BLE001
                 print(f"[wandb] closing failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
 
@@ -401,12 +401,8 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
     """Run the SFT of `policy` on `train_set`. Writes <run_dir>/config.json, metrics.jsonl, checkpoints/<step>/ and resume/. Returns a summary
     (final loss, checkpoints, time, `stopped` when a SIGTERM ended it early). `policy` ends with the final weights (`set_state`).
     resume=True continues the run of <run_dir> from its newest complete snapshot (ValueError if there is none, or if the settings differ in
-    what shapes the optimisation, see FROZEN_ON_RESUME); `policy` must be freshly loaded from the same model YAML."""
-    import flax.nnx as nnx
-    import jax
-    import jax.numpy as jnp
-    import optax
-
+    what shapes the optimisation, see FROZEN_ON_RESUME); `policy` must be freshly loaded from the same model YAML.
+    A run that fails writes an `error` line (exception, memory) to metrics.jsonl before the exception goes on."""
     if train_set.horizon != policy.info.action_horizon:
         raise ValueError(f"the demonstrations are cut in chunks of {train_set.horizon} steps, the model's action_horizon is {policy.info.action_horizon}")
     run_dir = Path(run_dir)
@@ -426,6 +422,22 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
     sink = tracking.start_tracking(run_dir, resume, wandb_project, run_dir.name, cfg.wandb_mode, {"sft": dataclasses.asdict(cfg), **meta},
                                    tags=[str(meta.get("model_name", meta["model"])), str(meta.get("mode", ""))])
     log = MetricsLog(run_dir / "metrics.jsonl", sink)
+    try:
+        return _run(policy, train_set, val_set, cfg, run_dir, meta, resume, snapshot_found, log)
+    except BaseException as error:
+        # The reason of a failure (an out-of-memory above all) in metrics.jsonl and in wandb, not only in the job's log.
+        log.write(event="error", error=f"{type(error).__name__}: {str(error)[:600]}", memory_mib=device_memory_mib())
+        log.close(exit_code=1)
+        raise
+
+
+def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig, run_dir: Path, meta: Mapping[str, Any], resume: bool, snapshot_found,
+         log: MetricsLog) -> dict:
+    """The body of `train`, once the run is validated and its log is open."""
+    import flax.nnx as nnx
+    import jax
+    import jax.numpy as jnp
+    import optax
 
     trainable, frozen = split_state(policy)
     trainable = tree_cast(trainable, jnp.float32, copy=True)
@@ -449,11 +461,13 @@ def train(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig
         loss_of = lambda t: policy.loss(nnx.State.merge(t, frozen), rng, observation, actions, train=True)     # noqa: E731
         return jax.value_and_grad(loss_of)(trainable)
 
-    @jax.jit
+    # The buffers are donated: with full fine-tuning a float32 copy of the gradients is 12.5 GiB (pi0.5), and without donation the accumulated sum, the new
+    # gradients and their sum all exist at once (3 copies: the first probe of the full runs died at its first step, 44 GiB of state + 37.5 GiB).
+    @functools.partial(jax.jit, donate_argnums=(0, 1))
     def add_fn(total, grads):
         return jax.tree.map(jnp.add, total, grads)
 
-    @functools.partial(jax.jit, donate_argnums=(0, 1))
+    @functools.partial(jax.jit, donate_argnums=(0, 1, 2))
     def apply_fn(trainable, opt_state, grads):
         grads = jax.tree.map(lambda g: g / n_micro, grads)
         updates, opt_state = tx.update(grads, opt_state, trainable)

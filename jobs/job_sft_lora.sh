@@ -11,14 +11,14 @@
 #   python -m scripts.sft --model <model> --dry-run                         # reads the demonstrations, loads no model
 #   wandb login                                                             # once; the job logs to wandb (--set wandb_mode=offline | disabled to change)
 # Output: runs/sft/<run name>/ (metrics.jsonl, wandb_id.txt, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out
-# Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (5.5 GB with LoRA) and stops cleanly.
+# Time: 4000 steps are about 10 h on an L40S (8.7 s per step, measured), hence 14 h. Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (5.5 GB with LoRA) and stops cleanly.
 #
 #SBATCH --job-name=sft_lora
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+#SBATCH --time=14:00:00
 #SBATCH --signal=B:TERM@300
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --no-requeue
