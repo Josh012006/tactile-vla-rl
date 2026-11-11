@@ -92,7 +92,8 @@ Not read by the baseline: `extra/tactile` (2, 7, 4), `extra/ft_force`, `extra/gr
 | Chunk length in time | 10 steps; at the environment's 15 Hz control rate that is about 0.67 s. How many steps are executed before planning again is a choice of the algorithm |
 
 In the YAML: `output_semantics: absolute_targets`. This is the **opposite** of pi0.5 (`offsets_from_chunk_start_state`): adding the chunk-start
-state again here would add it twice. It was checked on 2026-11-10 with `scripts/probe_vla` (5 chunks of a FORGE rollout all look absolute).
+state again here would add it twice. It was checked with `scripts/probe_vla` on a FORGE rollout (2026-11-10: 5 chunks; 2026-11-11: 15 chunks out of 15 look absolute, mean |chunk − state| 0.109 rad
+for the first chunk).
 `chunk_to_targets` passes the 8 columns through; `targets_to_chunk` (training) is the identity.
 
 ## 5. Generation: autoregressive decoding of FAST tokens
@@ -157,6 +158,37 @@ For a pi0-FAST `OpenPIPolicy` (`src/models/openpi_policy.py`), every `plan` deco
 `python -m scripts.probe_vla --model pi0_fast` resets the counters before its FORGE rollout and prints them at the end (one episode is about 15 chunks: it
 shows the order of magnitude of the base model, not a rate). The SFT and the RL log the same numbers with every evaluation and every update.
 
+### First probe of the base model on a FORGE rollout
+
+`scripts/probe_vla --model pi0_fast` (2026-11-11, L40S, config `pi0_fast_droid_jointpos_polaris`, LoRA rank 16, **no fine-tuning**, observation from the
+environment, prompt "Insert the peg into the socket.", 150 steps, replanning every 10 steps = 15 chunks). One episode: it checks the plumbing and gives orders of
+magnitude, it is not a performance or a rate.
+
+| What | Measured |
+|---|---|
+| Parameters | 2951.2 M total, 442.7 M trainable, 27.9 M LoRA (as in section 6.2) |
+| Prompt | 44 tokens used out of 180 (task + state, before the action tokens) |
+| Interface | `plan` and openpi's `Policy.infer` on the same key: `max_abs_diff` 0.0 |
+| Output semantics | 15 chunks out of 15 absolute (YAML: `absolute_targets`) |
+| Inference time per call | about 465 ms (median 466, max 848); the first call compiles for 29 s; model load 39 s |
+| GPU memory (JAX) | 5.7 GiB for the parameters (bfloat16), 7.8 GiB at the peak of inference; the whole process takes 8.6 GiB, and the environment server 6.6 GiB |
+| Written token strings | 15 chunks, **0 not decoded**, 0 without end token, **mean 22.4 and max 42 tokens** (end token included; limits 180 for the sequence, 256 for decoding) |
+| Tracking | joint tracking error of the controller: mean 0.072 rad, max 0.228 rad |
+| Task | no success, as expected without fine-tuning: the peg ends 188 mm from the socket in xy (6 mm at the start), 178 mm above it, never within 2.5 mm |
+
+What this says:
+
+- **Plumbing is right**: the weights load, the observation reaches the model as intended (the second exterior camera is black, the state is normalised, the
+  prompt uses 44 tokens), the batched path equals openpi's own, the chunks are absolute and the controller follows them.
+- **The model has to be fine-tuned**: DROID and PolaRiS contain no FORGE insertion, and the robot drifts away from the socket. This is the starting point of
+  the SFT, not a defect.
+- **The strings the model writes are longer than the demonstrations'**: 22 tokens on average (42 at most) against at most 16 for the demonstrations
+  (same definition: from "Action: " to the end token). A zero-shot policy produces chunks with more movement than our slow scripted ones. This is still far from
+  the limits (prefix 44 + 42 = 86 tokens against 180; 42 against 256 decoding steps), and 0 chunks out of 15 failed to decode, in line with the 3 out of 8 913 of the
+  demonstrations. With 15 chunks this is an order of magnitude, not a failure rate: `decode_stats` keeps counting during the SFT and the RL.
+- **Cost**: about 0.47 s per call on an L40S (autoregressive decoding); a 150-step episode replanned every 10 steps spends about 7 s in the model. At inference
+  the model uses 7.8 GiB of the 46 GiB of the card.
+
 ## 6. Where the LoRA is, and what is trained
 
 ### 6.1 The LoRA of openpi (not modified by us)
@@ -184,7 +216,7 @@ Without LoRA, nothing is frozen.
 | false | everything (full fine-tuning) | **2923.3 M** | 2923.3 M |
 
 With LoRA the embedding table (526.6 M) is frozen along with the rest of Gemma. Full fine-tuning needs its own job on an A100 80 GB, LoRA runs on an
-L40S; memory was not measured here.
+L40S. Measured for inference (one environment, batch 1): section 5, "First probe". The training memory of either mode is not measured yet.
 
 ## 7. Loading the weights
 
@@ -223,6 +255,6 @@ train the released weights. openpi's own LoRA recipe for this family is `pi0_fas
 
 - The tokens and the decoding failures of chunks written by a **fine-tuned** policy: they are counted by `decode_stats` during the SFT and the RL, not known in advance.
 - Whether the FAST reconstruction error (0.011 rad on average) limits the success rate of the insertion.
-- Memory use and step time, LoRA versus full fine-tuning, on our GPUs.
+- Memory use and step time **of training**, LoRA versus full fine-tuning, on our GPUs (inference is measured: section 5, "First probe").
 - The training recipe and the data of the PolaRiS checkpoint (released by Physical Intelligence, not in this repo).
 - The effect of the rank on the success rate (no experiment yet).
