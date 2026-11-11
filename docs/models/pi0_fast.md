@@ -1,7 +1,7 @@
 # pi0-FAST (autoregressive over FAST action tokens), DROID joint-position weights (PolaRiS)
 
 Reference sheet for the `pi0_fast` model of `tactile-vla-rl`: what goes in, what comes out, what the network is made of, how it is
-fine-tuned (full or LoRA), and what is parameterised in `configs/model/pi0_fast.yaml`. It is the counterpart of `docs/model/pi05.md`;
+fine-tuned (full or LoRA), and what is parameterised in `configs/model/pi0_fast.yaml`. It is the counterpart of `docs/models/pi05.md`;
 the two models differ in how they produce actions, not in the vision-language backbone.
 
 Everything below was read in the pinned openpi fork (`third_party/openpi`, commit `f7cfe2d2`, the same commit as pi0.5: pi0-FAST is part of
@@ -140,9 +140,22 @@ after the truncation at `max_token_len`, and the result goes through `AbsoluteAc
 - **A few chunks do not decode.** The FAST decoder printed `cannot reshape array of size 76 into shape (8)` three times: 3 chunks out of 8 913 (0.03 %),
   all in the noisy folder, each with only 5 to 7 FAST tokens (the shortest sequences). The decoder then returns an all-zero chunk, and zeros in the normalised
   space are not a zero action: they un-normalise to the middle of the DROID statistics, consistent with the gripper error of 0.5 in that folder. A policy under
-  RL can write such token strings too: the algorithm must detect a chunk that failed to decode (and not execute it blindly).
+  RL can write such token strings too, so `OpenPIPolicy` counts them (below): the algorithm must not execute a chunk that failed to decode.
 - Not covered by these numbers: the chunks a **policy** writes (they may be longer than the demonstrations' and may fail to decode more often), and
-  the tokens of other horizons (`--horizon`, repeatable).
+  the tokens of other horizons (`--horizon`, repeatable). That rate depends on the weights, so it cannot be settled before training: it is **measured by
+  the policy itself** at every call (next paragraph).
+
+### Counting the failures of a policy
+
+For a pi0-FAST `OpenPIPolicy` (`src/models/openpi_policy.py`), every `plan` decodes the generated token strings once more to check them and records:
+
+| Attribute | Content |
+|---|---|
+| `last_valid` | `(N, S)` bool of the last `plan`: `False` = the chunk could not be decoded (the all-zero fallback). The algorithm must not execute it |
+| `decode_stats.summary()` | cumulative since `decode_stats.reset()`: `chunks`, `failed` and `failed_rate`, `no_eos` (no end token within 256 steps), `tokens_mean`, `tokens_max` |
+
+`python -m scripts.probe_vla --model pi0_fast` resets the counters before its FORGE rollout and prints them at the end (one episode is about 15 chunks: it
+shows the order of magnitude of the base model, not a rate). The SFT and the RL log the same numbers with every evaluation and every update.
 
 ## 6. Where the LoRA is, and what is trained
 
@@ -208,7 +221,7 @@ train the released weights. openpi's own LoRA recipe for this family is `pi0_fas
 
 ## 11. Not checked
 
-- The tokens and the decoding failures of chunks written by a **policy** (section 5 measures the demonstrations only).
+- The tokens and the decoding failures of chunks written by a **fine-tuned** policy: they are counted by `decode_stats` during the SFT and the RL, not known in advance.
 - Whether the FAST reconstruction error (0.011 rad on average) limits the success rate of the insertion.
 - Memory use and step time, LoRA versus full fine-tuning, on our GPUs.
 - The training recipe and the data of the PolaRiS checkpoint (released by Physical Intelligence, not in this repo).

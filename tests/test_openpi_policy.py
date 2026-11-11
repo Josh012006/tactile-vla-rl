@@ -182,3 +182,49 @@ def test_with_an_injection_registered_the_touch_data_path_is_complete(pol, monke
 
 def test_model_info_comes_from_the_yaml(pol):
     assert pol.info == ModelInfo(name="tiny", family="pi05", action_horizon=H, action_dim=8, output_semantics="offsets_from_chunk_start_state")
+
+
+# -- pi0-FAST: what the generated token strings were like ---------------------------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class FakeExtract(transforms.DataTransformFn):
+    """Stands for openpi's ExtractFASTActions: it holds a tokenizer and turns the generated tokens into a chunk."""
+    tokenizer: object
+    action_horizon: int = H
+    action_dim: int = 8
+
+    def __call__(self, data):
+        return {**data, "actions": self.tokenizer.extract_actions(np.asarray(data["actions"]).astype(np.int32), H, 8)}
+
+
+class FakeFast:
+    """A string decodes when it holds a token above 100; otherwise the all-zero fallback of openpi's FAST decoder."""
+
+    def extract_actions(self, tokens, horizon, dim):
+        return np.ones((horizon, dim), np.float32) if np.any(tokens > 100) else np.zeros((horizon, dim), np.float32)
+
+
+def test_pi0_fast_counts_the_token_strings_it_writes_and_marks_the_chunks_it_could_not_decode(pol):
+    def stub_sampler(state, rng, observation, num_samples):
+        rows = observation.state.shape[0] * num_samples
+        tokens = np.zeros((rows, 256), np.float32)
+        for r in range(rows):
+            tokens[r, :4] = [200, 5, 6, 1] if r % 2 == 0 else [5, 6, 7, 8]       # even rows: decodable, ends with EOS; odd rows: neither
+        return jnp.asarray(tokens)
+
+    shell = types.SimpleNamespace(_model=pol.policy._model, _sample_kwargs={}, _input_transform=pol.policy._input_transform,     # noqa: SLF001
+                                  _output_transform=transforms.compose([FakeExtract(FakeFast())]))
+    fast = OpenPIPolicy(shell, pol.train_cfg, {**pol.cfg, "family": "pi0_fast"})
+    fast._sample = stub_sampler                                                          # noqa: SLF001
+    fast.plan(env_obs(3), "p", num_samples=2)                                            # 6 chunks, padded to 8 rows: the padding is not counted
+    s = fast.decode_stats.summary()
+    assert s["chunks"] == 6 and s["failed"] == 3 and s["no_eos"] == 3
+    assert s["tokens_max"] == 256 and s["tokens_mean"] == (3 * 4 + 3 * 256) / 6
+    assert fast.last_valid.shape == (3, 2) and fast.last_valid.tolist() == [[True, False]] * 3        # (environment, sample)
+    fast.decode_stats.reset()
+    assert fast.decode_stats.summary()["chunks"] == 0
+    fast.plan(env_obs(1), "p")                                                           # 1 chunk: row 0, decodable
+    assert fast.decode_stats.summary()["chunks"] == 1 and fast.last_valid.tolist() == [[True]]
+
+
+def test_a_flow_matching_model_has_no_token_statistics(pol):
+    assert pol._fast is None and pol.last_valid is None and pol.decode_stats.summary()["chunks"] == 0      # noqa: SLF001

@@ -315,7 +315,10 @@ def main(argv=None) -> int:
                 fl.append(video.compose_frame(res.obs, e, t, plans[e], progress_sample(res.obs, e), bool(res.success[e])))
 
         model.seed(a.seed)
+        model.decode_stats.reset()                       # pi0-FAST: count the token strings of the rollout only (the checks above also called plan)
         report["rollout"] = run_rollout(env, model, a.steps, a.replan, seed=a.seed, on_step=on_step if frames else None)
+        if getattr(model, "_fast", None) is not None:
+            report["decode_stats"] = model.decode_stats.summary()
         report["videos"] = [video.write_video(fl, out_dir / f"probe_{tag}_env{e}.mp4", a.fps) for e, fl in frames.items()]
         report["memory"]["after_rollout"] = gpu_memory()
         env.close()
@@ -370,6 +373,11 @@ def print_summary(r: dict, path: Path) -> None:
         print(f"   inference wall time per call (ms): first {walls[0]}, median {float(np.median(walls)):.0f}, max {max(walls)}")
         votes = [p["looks_like"] for p in ro["plans"]]
         print(f"   {len(votes)} plans, indicator: {votes.count('offsets')} offsets / {votes.count('absolute')} absolute (YAML: {ro['semantics_used']})")
+    ds = r.get("decode_stats")
+    if ds:
+        print(f"-- FAST token strings written by the model during the rollout: {ds['chunks']} chunks, {ds['failed']} could not be decoded "
+              f"({100 * ds['failed_rate']:.1f} %), {ds['no_eos']} without end token, tokens per chunk mean {ds['tokens_mean']:.1f} max {ds['tokens_max']} "
+              f"(limits: max_token_len {r['openpi_model']['max_token_len']}, decoding 256)")
     for v in r.get("videos", []):
         print(f"video: {v}")
     if r.get("observation_file"):

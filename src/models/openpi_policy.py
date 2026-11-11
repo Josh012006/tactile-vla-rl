@@ -21,8 +21,9 @@ jax.random.key(0), and so does this class by default.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import time
-from typing import Dict, List, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -32,6 +33,42 @@ from src.models.settings import ModelSettings, parse_model_settings
 from src.touch.injection import build_injection
 
 FAMILIES_WITH_NATIVE_SAMPLES = ("pi05", "pi0")        # Pi0.sample_actions(num_samples=...) of the pinned fork; Pi0FAST has no such argument
+FAST_EOS_TOKEN = 1                                    # PaliGemma's end-of-sequence id, what Pi0FAST.sample_actions stops on
+
+
+@dataclasses.dataclass
+class DecodeStats:
+    """pi0-FAST only: what the generated token strings were like, summed over the calls of `plan` since the last `reset()`.
+    A policy writes its own token strings (unlike the demonstrations measured by scripts/fast_tokens.py): one that cannot be decoded
+    gives openpi's fallback, an all-zero chunk in normalised space, which is NOT a hold and must not be executed (`OpenPIPolicy.last_valid`)."""
+    chunks: int = 0
+    failed: int = 0           # the FAST decoder returned an all-zero chunk: the tokens could not be decoded
+    no_eos: int = 0           # no end token within the decoding limit (256): the string was cut
+    tokens_sum: int = 0       # generated tokens, the end token included (the decoding limit when there is none)
+    tokens_max: int = 0
+
+    def add(self, tokens: int, no_eos: bool, failed: bool) -> None:
+        self.chunks += 1
+        self.failed += int(failed)
+        self.no_eos += int(no_eos)
+        self.tokens_sum += tokens
+        self.tokens_max = max(self.tokens_max, tokens)
+
+    def reset(self) -> None:
+        self.chunks = self.failed = self.no_eos = self.tokens_sum = self.tokens_max = 0
+
+    def summary(self) -> dict:
+        n = max(self.chunks, 1)
+        return {"chunks": self.chunks, "failed": self.failed, "failed_rate": self.failed / n, "no_eos": self.no_eos,
+                "no_eos_rate": self.no_eos / n, "tokens_mean": self.tokens_sum / n, "tokens_max": self.tokens_max}
+
+
+def fast_extractor(policy):
+    """openpi's `ExtractFASTActions` in the policy's output transforms (it holds the FAST tokenizer), or None when there is none."""
+    for transform in getattr(getattr(policy, "_output_transform", None), "transforms", ()):
+        if hasattr(transform, "tokenizer") and hasattr(transform.tokenizer, "extract_actions"):
+            return transform
+    return None
 
 
 class OpenPIPolicy(VLAPolicy):
@@ -48,6 +85,9 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         # a component that asks for touch needs an injection (src/touch/injection): none is written yet, so this raises rather than ignore it
         self.injections = {name: build_injection(name, spec) for name, spec in self.touch.items()}
         self._native_samples = self.info.family in FAMILIES_WITH_NATIVE_SAMPLES
+        self.decode_stats = DecodeStats()                    # pi0-FAST: what the generated tokens were like (cumulative, reset() to restart)
+        self.last_valid: Optional[np.ndarray] = None         # pi0-FAST: (N, S) bool of the last `plan`: False = the chunk could not be decoded
+        self._fast = None if self._native_samples else fast_extractor(policy)
         self._graphdef, self._state = nnx.split(policy._model)                      # noqa: SLF001
         graphdef, kwargs, native = self._graphdef, dict(policy._sample_kwargs), self._native_samples   # noqa: SLF001
 
@@ -117,6 +157,8 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         out = np.asarray(self._sample(self._state, key, observation, num_samples=static_s))   # asarray waits for the device
         infer_ms = 1e3 * (time.monotonic() - t0)
         state = np.asarray(batch["state"])
+        if self._fast is not None:
+            self._record_decoding(out, n * s, n, s)
         chunks = []
         for i in range(n):
             for k in range(s):
@@ -125,6 +167,19 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
                 res = self.policy._output_transform({"state": state[src], "actions": out[j]})  # noqa: SLF001
                 chunks.append(np.asarray(res["actions"], dtype=np.float32))
         return np.stack(chunks).reshape(n, s, *chunks[0].shape), infer_ms
+
+    def _record_decoding(self, tokens: np.ndarray, rows: int, n: int, s: int) -> None:
+        """Count the token strings of the first `rows` rows of `tokens` (the padding rows are not chunks) and set `last_valid`."""
+        ex = self._fast
+        valid = np.ones(rows, bool)
+        for j in range(rows):
+            row = np.asarray(tokens[j])
+            eos = np.flatnonzero(row == FAST_EOS_TOKEN)
+            length = int(eos[0]) + 1 if len(eos) else len(row)
+            decoded = np.asarray(ex.tokenizer.extract_actions(row.astype(np.int32), ex.action_horizon, ex.action_dim))
+            valid[j] = bool(np.any(decoded))                 # a real chunk is never exactly zero in normalised space
+            self.decode_stats.add(length, no_eos=not len(eos), failed=not valid[j])
+        self.last_valid = valid.reshape(n, s)
 
     # -- training hooks ------------------------------------------------------------------------------------------------------
     def training_batch(self, obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], target_actions: np.ndarray):
