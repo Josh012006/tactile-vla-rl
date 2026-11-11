@@ -1,0 +1,48 @@
+# Supervised fine-tuning (SFT) of a VLA on the FORGE PegInsert demonstrations. The ALGORITHM side only: the model is chosen on the
+# command line (configs/model/<name>.yaml, LoRA or full fine-tuning), the demonstrations here or on the command line.
+#
+# Read by:  python -m scripts.sft --model pi0_fast [--full] [--demos FOLDER ...] [--set KEY=VALUE ...] [--model-set KEY=VALUE ...]
+# Jobs:     sbatch jobs/job_sft_lora.sh <model> ...   (L40S)        sbatch jobs/job_sft_full.sh <model> ...   (A100 80 GB)
+#
+# The defaults are the ones of the SFT of expo-ft (pi0.5, LoRA): constant learning rate 2.5e-5, no EMA, batch 64, checkpoints every 200
+# steps (the RL started from the step-1200 / 1400 ones). expo-ft counted 4001 loop iterations; here `steps` is the number of updates.
+
+# -- Data ---------------------------------------------------------------------------------------------------------------------------
+# Folders of ep_*.npz (docs/demos.md), relative to the repo root. `demos` is a link to expo-ft's demonstrations. One SFT per demonstration
+# type, as in expo-ft: scripted (clean), noisy, teleop. Several folders are trained on together.
+demos:
+  - demos/isaaclab/ForgePegInsert_Robotiq_scripted
+num_demos: 0            # the first N episodes of each folder (0 = all 50); expo-ft's SFT used all of them
+val_episodes: 0         # the last V episodes of each folder are held out of the training and give a validation loss (0 = none)
+prompt: "Insert the peg into the socket."       # used when an .npz has no `prompt`
+
+# -- Optimisation ---------------------------------------------------------------------------------------------------------------------
+steps: 4000
+batch_size: 64          # rows per update
+# Rows per forward/backward pass: the gradients of batch_size / micro_batch_size passes are summed, so this only sets the memory, not the
+# optimisation. LoRA on an L40S (46 GB): 16 is the first guess; full fine-tuning on an A100 80 GB (AdamW state in float32): the job sets 8.
+# Neither is measured yet: the first_step and train lines of metrics.jsonl give memory_mib.
+micro_batch_size: 16
+lr: 2.5e-5              # peak; with lr_end = lr and no warmup the rate is constant (expo-ft's), like openpi's CosineDecaySchedule(decay_lr = peak_lr)
+lr_end: 2.5e-5          # reached at the last step by a cosine decay from lr
+warmup_steps: 0
+weight_decay: 1.0e-10   # openpi's AdamW defaults below
+b1: 0.9
+b2: 0.95
+eps: 1.0e-8
+clip_grad_norm: 1.0
+
+# -- Logging, evaluation, checkpoints ---------------------------------------------------------------------------------------------
+log_interval: 50        # a `train` line in metrics.jsonl: mean loss and gradient norm over the window, learning rate, seconds per step, memory
+# `eval` line: loss on a FIXED set of eval_samples rows (training ones, and held-out ones with val_episodes), and the error of the policy's own
+# chunks against the demonstration's; for pi0-FAST also the generated token strings (failures of the decoder, lengths).
+# Not the success rate: only the environment gives it.
+eval_interval: 200
+eval_samples: 16        # keep it a multiple of micro_batch_size (another batch shape is another compilation)
+save_interval: 200      # a checkpoint holds the trainable parameters in bfloat16: small with LoRA (SigLIP is trained too), the whole model without
+prefetch: 3             # batches prepared ahead by a thread (openpi's transforms are CPU work)
+seed: 0
+
+# -- Output ------------------------------------------------------------------------------------------------------------------------------
+# <output_root>/<run name>/{config.json, metrics.jsonl, summary.json, checkpoints/<step>/{params, meta.json}}. `runs` is a link to the scratch disk.
+output_root: runs/sft

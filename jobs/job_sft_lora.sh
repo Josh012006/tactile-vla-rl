@@ -1,0 +1,37 @@
+#!/bin/bash
+# SFT with LoRA (the model YAML's: openpi's own LoRA) of pi0.5 or pi0-FAST on the FORGE demonstrations, on an L40S (46 GB).
+#   sbatch jobs/job_sft_lora.sh pi0_fast                                    # the demonstrations of configs/algo/sft.yaml (scripted)
+#   sbatch jobs/job_sft_lora.sh pi05 --demos demos/isaaclab/ForgePegInsert_Robotiq_noisy --run-name pi05_noisy
+#   sbatch jobs/job_sft_lora.sh pi05 --set steps=1500 --set micro_batch_size=8 --model-set vlm.lora_rank=8
+# Everything after the model name goes to `python -m scripts.sft` (see its --help; --set overrides configs/algo/sft.yaml, --model-set the model YAML).
+# Full fine-tuning does not fit here: jobs/job_sft_full.sh (A100 80 GB).
+# Before the first run, on the login node (internet needed, the job itself runs offline):
+#   uv sync --group vla && source .venv/bin/activate && python -m scripts.fetch_models
+#   python -m scripts.sft --model <model> --dry-run                         # reads the demonstrations, loads no model
+# Output: runs/sft/<run name>/ (metrics.jsonl, checkpoints/<step>/), logs/slurm/sft_lora_<jobid>.out
+#
+#SBATCH --job-name=sft_lora
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:l40s:1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=64G
+#SBATCH --time=12:00:00
+#SBATCH --signal=B:TERM@300
+#SBATCH --output=logs/slurm/%x_%j.out
+#SBATCH --no-requeue
+
+set -u
+MODEL="${1:-}"
+[ -z "$MODEL" ] || [[ "$MODEL" == --* ]] && { echo "usage: sbatch jobs/job_sft_lora.sh <model: pi05 | pi0_fast> [scripts.sft options]" >&2; exit 1; }
+shift
+cd "${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}" || exit 1
+mkdir -p logs/slurm runs/sft
+nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
+
+source .venv/bin/activate
+export XLA_PYTHON_CLIENT_PREALLOCATE=false      # allocate what is used (the default preallocates 75 % of the GPU and hides the real size)
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1  # everything was fetched by scripts.fetch_models: a missing file fails instead of downloading
+python -m scripts.sft --model "$MODEL" "$@"
+status=$?
+nvidia-smi --query-gpu=memory.used --format=csv,noheader | sed 's/^/GPU memory still in use at the end: /'
+exit $status

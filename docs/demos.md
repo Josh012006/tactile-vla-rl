@@ -15,6 +15,8 @@ An `ep_NNNN_seedS.npz` contains `exterior_image`, `wrist_image`, `joint_position
 taxels. To check what the existing demonstrations contain:
 `python -c "import numpy as np; print(np.load('<file>.npz').files)"`.
 
+The SFT reads these `.npz` files directly (touch included): `docs/algos/sft.md`.
+
 ## The server must be set up for these tools
 
 One environment, an episode that ends after 5 consecutive "inserted" steps (the demonstration rule: the script stops recording at the same
