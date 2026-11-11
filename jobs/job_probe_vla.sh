@@ -3,10 +3,14 @@
 #   sbatch jobs/job_probe_vla.sh                                  # pi05 (expo-ft loading, LoRA), pi05 without LoRA, pi0_fast; Isaac Lab env server (1 env)
 #   PROBE_MODELS="pi05" sbatch --export=ALL jobs/job_probe_vla.sh   # a model name; `pi05:nolora` = `--use-lora false` (the exact base function)
 #   PROBE_SYNTHETIC=1 sbatch --export=ALL jobs/job_probe_vla.sh   # no env server: fake observation (shapes, timing, VRAM only)
-#   PROBE_STEPS=60 PROBE_REPLAN=8 sbatch --export=ALL jobs/job_probe_vla.sh
+#   PROBE_OBS=reports/obs_<tag>.npz PROBE_MODELS="pi05 pi05:nolora" sbatch --export=ALL jobs/job_probe_vla.sh   # replay one saved observation, no env server
+#   PROBE_STEPS=150 PROBE_REPLAN=8 sbatch --export=ALL jobs/job_probe_vla.sh      # a full episode (the task's max_steps is 150)
+#   PROBE_NO_VIDEO=1 ...                                                          # do not record the rollout video
 # Before the first run, on the login node (internet needed, the job itself runs offline):
 #   uv sync --group vla && source .venv/bin/activate && python -m src.models.fetch
-# Output: logs/slurm/probe_vla_<jobid>.out, reports/probe_<model>_<time>.json and the two camera images of the observation.
+# Output: logs/slurm/probe_vla_<jobid>.out, reports/probe_<model>_<time>.json, the two camera images and the observation (obs_<tag>.npz) of the
+# first step and, for a rollout, reports/probe_<tag>_env0.mp4 (exterior | wrist + peg-socket distance). Compare two models on the same
+# observation with `python -m src.models.compare reports/probe_A.json reports/probe_B.json`.
 #
 #SBATCH --job-name=probe_vla
 #SBATCH --ntasks=1
@@ -28,7 +32,7 @@ SERVER_PID=""
 cleanup() { [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null; }
 trap cleanup EXIT
 
-if [ -z "${PROBE_SYNTHETIC:-}" ]; then
+if [ -z "${PROBE_SYNTHETIC:-}" ] && [ -z "${PROBE_OBS:-}" ]; then
     # 1. the env server, in its own venv, one environment (a probe, not a benchmark). Its VRAM is counted in the GPU total, not in the JAX numbers.
     SERVER_LOG="logs/slurm/probe_vla_server_${SLURM_JOB_ID:-local}.log"
     bash jobs/env_server.sh --set num_envs=1 --set server_port="$PORT" > "$SERVER_LOG" 2>&1 &
@@ -42,9 +46,12 @@ if [ -z "${PROBE_SYNTHETIC:-}" ]; then
     grep -q "\[env_server\] ready" "$SERVER_LOG" || { echo "ERROR: the env server did not become ready in 30 min"; tail -30 "$SERVER_LOG"; exit 1; }
     nvidia-smi --query-gpu=memory.used --format=csv,noheader | sed 's/^/GPU memory used with the env server alone: /'
     EXTRA=(--port "$PORT")
+elif [ -n "${PROBE_OBS:-}" ]; then
+    EXTRA=(--obs-file "$PROBE_OBS")
 else
     EXTRA=(--synthetic)
 fi
+[ -n "${PROBE_NO_VIDEO:-}" ] && EXTRA+=(--no-video)
 
 # 2. the models, one process each (a model that is deleted does not give its memory back to the next one), in the learner venv
 source .venv/bin/activate

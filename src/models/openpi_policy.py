@@ -1,0 +1,147 @@
+"""pi0.5 / pi0 / pi0-FAST through openpi, behind src/models/interface.py. Needs the `vla` dependency group (jax, openpi).
+
+    policy = OpenPIPolicy.load(cfg)             # or src.models.load_model("pi05"); loading itself: src/models/loading.py
+    plan = policy.plan(obs, prompt, num_samples=8)
+
+What this adds to the `Policy` of openpi, which is built for ONE observation at a time and freezes the weights it was created with:
+
+  * batched sampling over N environments (and S samples each). The per-row transforms of openpi (normalisation, resize, tokens) are
+    applied row by row, then the rows are stacked. pi0.5 / pi0 draw the S samples inside `sample_actions` (`num_samples`: the prefix
+    is computed once, the noise is independent); pi0-FAST has no such argument, its rows are repeated. The batch is padded to the next
+    power of two (padded_batch_size) so that a varying number of environments does not recompile the model at every step.
+  * the weights are an ARGUMENT of the jitted sampler, not frozen into it: `set_state(new_state)` after a training step is enough,
+    nothing is recompiled. (openpi's `Policy` builds its sampler with `nnx_utils.module_jit`, which freezes the module's state when the
+    policy is created: after a training step it would keep sampling from the old weights.)
+  * the training hooks an algorithm needs: `training_batch` (env observations + env-space target chunks -> what `compute_loss`
+    takes, through the SAME input transforms as inference, the offsets of `output_semantics` included), `loss`, `trainable_filter`.
+
+The random stream is the policy's own (`seed`): the same seed and the same inputs give the same chunks. openpi's Policy starts from
+jax.random.key(0), and so does this class by default.
+"""
+from __future__ import annotations
+
+import copy
+import time
+from typing import Dict, List, Sequence, Union
+
+import numpy as np
+
+from src.envs import protocol as P
+from src.models.interface import ModelInfo, VLAPolicy, num_envs_of, padded_batch_size, rows_of, targets_to_chunk
+
+FAMILIES_WITH_NATIVE_SAMPLES = ("pi05", "pi0")        # Pi0.sample_actions(num_samples=...) of the pinned fork; Pi0FAST has no such argument
+
+
+class OpenPIPolicy(VLAPolicy):
+    def __init__(self, policy, train_cfg, cfg: dict, seed: int = 0):
+        """`policy`: an openpi `Policy` (its transforms, norm stats and model are used); `train_cfg`: the openpi TrainConfig it was built
+        from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAML."""
+        import flax.nnx as nnx
+        import jax
+
+        self.policy, self.train_cfg, self.cfg = policy, train_cfg, cfg
+        self.info = ModelInfo.from_cfg(cfg)
+        self._native_samples = self.info.family in FAMILIES_WITH_NATIVE_SAMPLES
+        self._graphdef, self._state = nnx.split(policy._model)                      # noqa: SLF001
+        graphdef, kwargs, native = self._graphdef, dict(policy._sample_kwargs), self._native_samples   # noqa: SLF001
+
+        def sample(state, rng, observation, num_samples):
+            model = nnx.merge(graphdef, state)
+            return model.sample_actions(rng, observation, num_samples=num_samples, **kwargs) if native else model.sample_actions(rng, observation, **kwargs)
+
+        self._sample = jax.jit(sample, static_argnames=("num_samples",))
+        self.seed(seed)
+
+    @classmethod
+    def load(cls, cfg: dict, seed: int = 0) -> "OpenPIPolicy":
+        from src.models.loading import load_policy
+        policy, train_cfg = load_policy(cfg)
+        return cls(policy, train_cfg, cfg, seed)
+
+    # -- randomness, weights ----------------------------------------------------------------------------------------------
+    def seed(self, seed: int) -> None:
+        import jax
+        self._key = jax.random.key(seed)
+
+    @property
+    def graphdef(self):
+        return self._graphdef
+
+    @property
+    def state(self):
+        """The current weights (an nnx.State), the ones `plan` samples with."""
+        return self._state
+
+    def set_state(self, state) -> None:
+        """Sample from these weights from now on (same structure and shapes as `state`: no recompilation)."""
+        import jax
+        if jax.tree.structure(state) != jax.tree.structure(self._state):
+            raise ValueError("set_state: the state does not have the structure of the model's")
+        self._state = state
+
+    @property
+    def trainable_filter(self):
+        """nnx filter of the parameters a training step updates: openpi's freeze filter of the config (use_lora / lora_rank of the YAML)."""
+        import flax.nnx as nnx
+        return nnx.All(nnx.Param, nnx.Not(self.train_cfg.freeze_filter))
+
+    # -- inference ---------------------------------------------------------------------------------------------------------
+    def _stack(self, items: List[dict]):
+        import jax
+        import jax.numpy as jnp
+        from openpi.models import model as _model
+        batch = jax.tree.map(lambda *xs: jnp.asarray(np.stack(xs)), *items)
+        return batch, _model.Observation.from_dict(copy.copy(batch))
+
+    def raw_chunks(self, rows: List[dict], num_samples: int):
+        import jax
+        n, s = len(rows), num_samples
+        transformed = [self.policy._input_transform(copy.deepcopy(r)) for r in rows]          # noqa: SLF001  one per environment
+        if self._native_samples:
+            source = list(range(n))                                                           # S samples drawn inside the model
+            static_s = s
+        else:
+            source = [i for i in range(n) for _ in range(s)]                                  # FAST: one row per sample
+            static_s = 1
+        padded = padded_batch_size(len(source))
+        source = source + [source[-1]] * (padded - len(source))
+        batch, observation = self._stack([transformed[i] for i in source])
+        self._key, key = jax.random.split(self._key)
+        t0 = time.monotonic()
+        out = np.asarray(self._sample(self._state, key, observation, num_samples=static_s))   # asarray waits for the device
+        infer_ms = 1e3 * (time.monotonic() - t0)
+        state = np.asarray(batch["state"])
+        chunks = []
+        for i in range(n):
+            for k in range(s):
+                j = i * s + k                                      # row of `out`, (environment, sample) major, in both layouts
+                src = i if self._native_samples else j             # the batch row that carries this environment's state
+                res = self.policy._output_transform({"state": state[src], "actions": out[j]})  # noqa: SLF001
+                chunks.append(np.asarray(res["actions"], dtype=np.float32))
+        return np.stack(chunks).reshape(n, s, *chunks[0].shape), infer_ms
+
+    # -- training hooks ------------------------------------------------------------------------------------------------------
+    def training_batch(self, obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], target_actions: np.ndarray):
+        """(Observation, actions) for `loss`, from the env's observations and the env-space target chunks (N, H, 8): absolute joint
+        targets + gripper, e.g. a demonstration chunk. The targets are put in the model's own space (`output_semantics`) and go through
+        the same input transforms as at inference, plus the normalisation of the actions."""
+        import jax
+        import jax.numpy as jnp
+        n, h = num_envs_of(obs), self.info.action_horizon
+        target = np.asarray(target_actions, dtype=np.float32)
+        if target.shape != (n, h, P.ACTION_DIM):
+            raise ValueError(f"target_actions must be ({n}, {h}, {P.ACTION_DIM}) (N, action_horizon, 8), got {target.shape}")
+        q = np.asarray(obs[P.JOINT_POSITION], dtype=np.float32)
+        items = []
+        for i, row in enumerate(rows_of(obs, prompt)):
+            row["actions"] = targets_to_chunk(target[i], q[i], self.info.output_semantics)
+            items.append(self.policy._input_transform(row))                                    # noqa: SLF001
+        batch, observation = self._stack(items)
+        return observation, jnp.asarray(batch["actions"])
+
+    def loss(self, state, rng, observation, actions, *, train: bool = True):
+        """Mean training loss of the model with weights `state` (an nnx.State: differentiable with respect to it). Flow matching for
+        pi0.5 / pi0, next-token cross entropy for pi0-FAST. `train=True` switches on openpi's image augmentation."""
+        import flax.nnx as nnx
+        import jax.numpy as jnp
+        return jnp.mean(nnx.merge(self._graphdef, state).compute_loss(rng, observation, actions, train=train))
