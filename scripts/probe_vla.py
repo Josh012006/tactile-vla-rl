@@ -1,13 +1,16 @@
 """Probe the VLA models: what they receive, what they return, what they cost in GPU memory, and a short rollout on FORGE.
+A measuring tool, not part of the model code: the model lives in src/models, the rollout and its video in src/eval.
 
-    python -m src.models.probe --model pi05     --port 8102          # env server running (jobs/env_server.sh, num_envs=1)
-    python -m src.models.probe --model pi0_fast --port 8102
-    python -m src.models.probe --model pi0_fast --synthetic          # no env server: fake observation (shapes, timing, VRAM only)
-    python -m src.models.probe --model pi05 --obs-file reports/obs_<tag>.npz   # no env server: replay a saved observation
+    python -m scripts.probe_vla --model pi05     --port 8102          # env server running (jobs/env_server.sh, num_envs=1)
+    python -m scripts.probe_vla --model pi0_fast --port 8102
+    python -m scripts.probe_vla --model pi0_fast --synthetic          # no env server: fake observation (shapes, timing, VRAM only)
+    python -m scripts.probe_vla --model pi05 --obs-file reports/obs_<tag>.npz   # no env server: replay a saved observation
+    python -m scripts.probe_vla --model pi05 --no-lora                # the exact base function (use_lora=false in every component)
+    python -m scripts.probe_vla --model pi05 --set action_head.lora_rank=8     # any key of the model YAML: <component>.<key>=<value>
 
 Run it through jobs/job_probe_vla.sh. One model per process (a model that is deleted does not give its memory back to the next one
 in the same process, so the numbers of the second would be wrong). openpi is imported inside the functions that need it: this file
-imports without JAX, so its logic is tested on CPU (tests/test_probe.py).
+imports without JAX, so its logic is tested on CPU (tests/test_probe_vla.py).
 
 What is reported (JSON in reports/probe_<model>_<time>.json and printed):
   * the observation the model receives (openpi's DROID format: the env's keys + `prompt`) and what is left of it after openpi's own
@@ -21,11 +24,12 @@ What is reported (JSON in reports/probe_<model>_<time>.json and printed):
   * timing of the first inference (includes the compilation) and of the following ones;
   * the check of the common interface (src/models/interface.py + openpi_policy.py) on the real model: the batched path
     (`OpenPIPolicy.plan`) and openpi's own `Policy.infer` return the same chunk for the same observation and the same random key;
-  * a rollout of one episode per environment on the FORGE server, driven through that interface: the chunk is executed `--replan`
-    steps at a time, then the model is called again from the new observation. It records the task progress (peg-socket xy / z distance, contact force: src/models/
-    rollout_media.py) and a video (exterior | wrist cameras + that text) reports/probe_<tag>_env<k>.mp4;
+  * a rollout of one episode per environment on the FORGE server (src/eval/rollout.py), driven through that interface: the chunk is
+    executed `--replan` steps at a time, then the model is called again from the new observation. It records the task progress
+    (peg-socket xy / z distance, contact force: src/eval/progress.py) and a video (exterior | wrist cameras + that text)
+    reports/probe_<tag>_env<k>.mp4;
   * the first observation, saved as reports/obs_<tag>.npz and replayable with --obs-file: two models (LoRA or not, ...) can then be
-    compared on exactly the same input with `python -m src.models.compare`.
+    compared on exactly the same input with `python -m scripts.compare_reports`.
 """
 from __future__ import annotations
 
@@ -38,25 +42,20 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
+import yaml
 
 from src.envs import protocol as P
-from src.models import rollout_media as media
-from src.models.interface import (SEMANTICS, ROOT, VLAPolicy, apply_overrides, chunk_to_targets, load_model_cfg, take,  # noqa: F401  (re-exported)
-                                  to_openpi_obs)
+from src.eval import video
+from src.eval.progress import XY_INSERTED_MM, progress_sample
+from src.eval.rollout import looks_like, run_rollout
+from src.models.interface import ROOT, apply_overrides, load_model_cfg, to_openpi_obs
+from src.models.settings import describe as describe_settings
+from src.models.settings import parse_model_settings
 
 MIB = 2 ** 20
-
-
-# -- what the probe adds to src/models/interface.py (pure numpy) -------------------------------------------------------------------
-def looks_like(raw_chunk: np.ndarray, q_plan: np.ndarray) -> dict:
-    """Indicator only: is the raw chunk closer to zero (offsets) or to the current joint state (absolute targets)?"""
-    raw = np.asarray(raw_chunk, dtype=np.float64)[:, :7]
-    q = np.asarray(q_plan, dtype=np.float64)[:7]
-    d_off, d_abs = float(np.abs(raw).mean()), float(np.abs(raw - q).mean())
-    return {"mean_abs_raw": d_off, "mean_abs_raw_minus_state": d_abs, "looks_like": "offsets" if d_off < d_abs else "absolute"}
 
 
 def describe(x) -> dict:
@@ -65,64 +64,6 @@ def describe(x) -> dict:
     if a.size and a.dtype.kind in "fiu":
         d.update(min=float(a.min()), max=float(a.max()), mean=float(a.astype(np.float64).mean()))
     return d
-
-
-# -- rollout ----------------------------------------------------------------------------------------------------------------------
-def run_rollout(env, policy: VLAPolicy, steps: int, replan: int, seed: int = 0,
-                on_step: Optional[Callable[[int, object, List[int]], None]] = None) -> dict:
-    """One round (one episode per environment) driven by `policy` (src/models/interface.py: one batched call for the environments that
-    need a new chunk). `env` is a VectorEnvClient. A chunk is executed `replan` steps, then the model is called again from the new
-    observation. Stops at `steps` steps or when every episode has ended. auto_reset is off: nothing starts by itself.
-    `on_step(t, res, plans_per_env)` is called after the reset (t = 0) and after every step: used to record the video."""
-    n, prompt = env.num_envs, env.spec.prompt
-    semantics = policy.info.output_semantics
-    replan = max(1, min(int(replan), policy.info.action_horizon))
-    res = env.reset(seed=seed, round=0)
-    actions = np.zeros((n, P.ACTION_DIM), np.float32)         # rows of environments that ended are ignored by the server (not acting)
-    chunk: List[Optional[np.ndarray]] = [None] * n
-    used = [0] * n
-    ended = np.zeros(n, bool)
-    plans: List[dict] = []
-    track = [[] for _ in range(n)]              # |target - joint state after the step| (rad, max over the 7 joints), per step
-    first_q = np.array(res.obs[P.JOINT_POSITION], dtype=np.float32)
-    n_plans = [0] * n
-    progress = [[{"t": 0, **media.progress_sample(res.obs, e)}] for e in range(n)]
-    if on_step:
-        on_step(0, res, n_plans)
-    t = 0
-    while t < steps and not res.all_done:
-        need = [e for e in range(n) if not ended[e] and (chunk[e] is None or used[e] >= replan)]
-        if need:
-            t_call = time.monotonic()
-            plan = policy.plan(take(res.obs, need), prompt)
-            wall_ms = 1e3 * (time.monotonic() - t_call)           # includes the conversions around the model call
-            for k, e in enumerate(need):
-                q_plan = np.asarray(res.obs[P.JOINT_POSITION][e], dtype=np.float32)
-                raw = plan.raw[k, 0]
-                chunk[e], used[e] = plan.targets[k, 0], 0
-                n_plans[e] += 1
-                plans.append({"step": t, "env": e, "batch": len(need), "raw_shape": list(raw.shape), "q_plan": q_plan.tolist(),
-                              "raw_first": raw[0].tolist(), "raw_last": raw[-1].tolist(),
-                              "infer_ms": plan.infer_ms, "wall_ms": round(wall_ms, 1), **looks_like(raw, q_plan)})
-        for e in range(n):
-            if not ended[e]:
-                actions[e] = chunk[e][used[e]]
-                used[e] += 1
-        res = env.step(actions, auto_reset=False)
-        for e in range(n):
-            if not ended[e]:
-                track[e].append(float(np.abs(actions[e, :7] - res.obs[P.JOINT_POSITION][e][:7]).max()))
-                progress[e].append({"t": t + 1, **media.progress_sample(res.obs, e)})
-        ended |= res.done
-        t += 1
-        if on_step:
-            on_step(t, res, n_plans)
-    per_env = [{"env": e, "success": bool(res.success[e]), "terminated": bool(res.terminated[e]), "truncated": bool(res.truncated[e]),
-                "steps": len(track[e]), "tracking_err_max_rad": max(track[e]) if track[e] else None,
-                "tracking_err_mean_rad": float(np.mean(track[e])) if track[e] else None,
-                "joint_motion_rad": float(np.abs(np.asarray(res.obs[P.JOINT_POSITION][e]) - first_q[e]).max()),
-                "progress": media.progress_summary(progress[e], bool(res.success[e])), "progress_series": progress[e]} for e in range(n)]
-    return {"steps_run": t, "replan": replan, "semantics_used": semantics, "all_done": bool(res.all_done), "envs": per_env, "plans": plans}
 
 
 # -- GPU memory ---------------------------------------------------------------------------------------------------------------------
@@ -212,7 +153,7 @@ def load_obs(path) -> dict:
 
 
 def obs_sha256(obs: dict) -> str:
-    """Same observation <=> same hash (keys, dtypes, shapes, bytes, prompt): what `src.models.compare` checks before comparing two models."""
+    """Same observation <=> same hash (keys, dtypes, shapes, bytes, prompt): what `scripts.compare_reports` checks before comparing two models."""
     h = hashlib.sha256()
     for k in sorted(obs):
         v = obs[k]
@@ -245,6 +186,17 @@ def interface_check(model, row: dict, seed: int = 7) -> dict:
             "max_abs_diff": float(np.abs(ref - got).max()) if ref.shape == got.shape else None}
 
 
+def parse_sets(items: List[str]) -> Dict[str, object]:
+    """`--set vlm.use_lora=false --set action_head.lora_rank=8` -> {"vlm.use_lora": False, "action_head.lora_rank": 8} (values read as YAML)."""
+    out: Dict[str, object] = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"--set expects COMPONENT.KEY=VALUE, got {item!r}")
+        out[key.strip()] = yaml.safe_load(value)
+    return out
+
+
 def synthetic_obs(prompt: str) -> dict:
     rng = np.random.default_rng(0)
     return {"observation/exterior_image_1_left": rng.integers(0, 255, (224, 224, 3), dtype=np.uint8),
@@ -272,9 +224,10 @@ def main(argv=None) -> int:
     ap.add_argument("--replan", type=int, default=8, help="chunk steps executed before the model is called again")
     ap.add_argument("--warm", type=int, default=3, help="extra inferences after the first one, to time and to see the peak memory")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--use-lora", choices=["true", "false"], default=None, help="override `use_lora` of the model YAML (false: the exact base function)")
-    ap.add_argument("--lora-rank-vlm", type=int, default=None, help="override lora_rank.vlm of the model YAML")
-    ap.add_argument("--lora-rank-action-head", type=int, default=None, help="override lora_rank.action_head of the model YAML")
+    ap.add_argument("--set", action="append", default=[], metavar="COMPONENT.KEY=VALUE",
+                    help="override a key of the model YAML, e.g. vlm.use_lora=false, action_head.lora_rank=8 (repeatable). "
+                         "No LoRA anywhere = the exact base function")
+    ap.add_argument("--no-lora", action="store_true", help="shortcut: use_lora=false for every component of the model (the exact base function)")
     ap.add_argument("--synthetic", action="store_true", help="no env server: a fake observation, no rollout (shapes, timing, VRAM)")
     ap.add_argument("--obs-file", default=None, help="no env server: replay an observation saved by an earlier run (reports/obs_<tag>.npz), no rollout")
     ap.add_argument("--no-video", action="store_true", help="do not record the rollout video")
@@ -285,13 +238,17 @@ def main(argv=None) -> int:
 
     if a.synthetic and a.obs_file:
         ap.error("--synthetic and --obs-file are exclusive")
-    cfg = apply_overrides(load_model_cfg(a.model), None if a.use_lora is None else a.use_lora == "true", a.lora_rank_vlm, a.lora_rank_action_head)
-    from src.models.openpi_config import parse_lora_settings
-    lora = parse_lora_settings(cfg)
+    cfg = load_model_cfg(a.model)
+    overrides = parse_sets(a.set)
+    if a.no_lora:
+        overrides = {**{f"{c}.use_lora": False for c in parse_model_settings(cfg).components}, **overrides}
+    cfg = apply_overrides(cfg, overrides)
+    settings = parse_model_settings(cfg)
     out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    tag = f"{a.model}{'' if lora.use_lora else '_nolora'}_{time.strftime('%Y%m%d_%H%M%S')}"
-    report: dict = {"model": a.model, "yaml": cfg, "lora": dataclasses.asdict(lora), "memory": {"before_load": gpu_memory()}}
+    tag = f"{a.model}{'' if settings.any_lora else '_nolora'}_{time.strftime('%Y%m%d_%H%M%S')}"
+    report: dict = {"model": a.model, "yaml": cfg, "settings": dataclasses.asdict(settings), "settings_text": describe_settings(settings),
+                           "memory": {"before_load": gpu_memory()}}
     try:
         import jax
         report["device"] = str(jax.local_devices()[0])
@@ -355,11 +312,11 @@ def main(argv=None) -> int:
 
         def on_step(t, res, plans):
             for e, fl in frames.items():
-                fl.append(media.compose_frame(res.obs, e, t, plans[e], media.progress_sample(res.obs, e), bool(res.success[e])))
+                fl.append(video.compose_frame(res.obs, e, t, plans[e], progress_sample(res.obs, e), bool(res.success[e])))
 
         model.seed(a.seed)
         report["rollout"] = run_rollout(env, model, a.steps, a.replan, seed=a.seed, on_step=on_step if frames else None)
-        report["videos"] = [media.write_video(fl, out_dir / f"probe_{tag}_env{e}.mp4", a.fps) for e, fl in frames.items()]
+        report["videos"] = [video.write_video(fl, out_dir / f"probe_{tag}_env{e}.mp4", a.fps) for e, fl in frames.items()]
         report["memory"]["after_rollout"] = gpu_memory()
         env.close()
 
@@ -374,7 +331,7 @@ def print_summary(r: dict, path: Path) -> None:
     print(f"\n=== {r['model']}  ({r['device']})   observation: {r['observation_source']}   sha256 {r['observation_sha256'][:12]}")
     print(f"openpi config {r['yaml']['openpi_config']}  checkpoint {r['yaml']['checkpoint']}")
     print(f"model: {r['openpi_model']}   load {r['load_s']} s   mode: {r['load_mode']}")
-    print(f"lora settings: {r['lora']}   parameters (M): {r['trainable']}")
+    print(f"settings: {r['settings_text']}   parameters (M): {r['trainable']}")
     print("-- observation sent to the model")
     for k, v in r["observation_sent"].items():
         print(f"   {k:42s} {v}")
@@ -407,7 +364,7 @@ def print_summary(r: dict, path: Path) -> None:
             g = e["progress"]
             if g.get("samples"):
                 print(f"   env {e['env']} peg-socket: xy {g['xy_mm_start']:.1f} -> {g['xy_mm_end']:.1f} mm (min {g['xy_mm_min']:.1f} at step {g['step_of_xy_min']}), "
-                      f"z {g['z_mm_start']:.1f} -> {g['z_mm_end']:.1f} mm (min {g['z_mm_min']:.1f}), steps within {media.XY_INSERTED_MM} mm xy: "
+                      f"z {g['z_mm_start']:.1f} -> {g['z_mm_end']:.1f} mm (min {g['z_mm_min']:.1f}), steps within {XY_INSERTED_MM} mm xy: "
                       f"{g['steps_xy_within_tolerance']}, max force {g['force_n_max']:.1f} N")
         walls = [p["wall_ms"] for p in ro["plans"]]
         print(f"   inference wall time per call (ms): first {walls[0]}, median {float(np.median(walls)):.0f}, max {max(walls)}")
@@ -422,3 +379,4 @@ def print_summary(r: dict, path: Path) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

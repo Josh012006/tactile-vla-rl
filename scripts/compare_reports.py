@@ -1,6 +1,6 @@
-"""Compare the first action chunk of two probe reports made on the SAME observation (`--obs-file`).
+"""Compare the first action chunk of two probe reports (scripts/probe_vla.py) made on the SAME observation (`--obs-file`).
 
-    python -m src.models.compare reports/probe_pi05_<time>.json reports/probe_pi05_nolora_<time>.json
+    python -m scripts.compare_reports reports/probe_pi05_<time>.json reports/probe_pi05_nolora_<time>.json
 
 The first inference of a fresh process always draws the same flow-matching / sampling noise (openpi's Policy starts from key(0)), so two
 reports on the same observation differ only through the model (LoRA or not, another loader, another checkpoint) and the numerics of the
@@ -30,9 +30,13 @@ def compare_chunks(a_rows, b_rows) -> dict:
 
 
 def label(r: dict) -> str:
-    lora = r.get("lora") or {}
-    kind = "no LoRA" if not lora.get("use_lora", True) else f"LoRA r{lora.get('vlm_rank')}/{lora.get('action_head_rank')}"
-    return f"{r['model']} ({kind}, load: {r.get('load_mode')})"
+    """`settings_text` of the report (what was loaded: LoRA per component, touch); reports from before the per-component settings carry `lora`."""
+    if "settings_text" in r:
+        what = r["settings_text"]
+    else:
+        lora = r.get("lora") or {}
+        what = "no LoRA" if not lora.get("use_lora", True) else f"LoRA r{lora.get('vlm_rank')}/{lora.get('action_head_rank')}"
+    return f"{r['model']} ({what}, load: {r.get('load_mode')})"
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -58,3 +62,4 @@ def main(argv: List[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

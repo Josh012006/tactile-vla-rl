@@ -1,7 +1,7 @@
 """Download everything the VLA models need, ONCE, on a node that has internet (the login node), so that the jobs run offline.
 
-    source .venv/bin/activate && python -m src.models.fetch            # every configs/model/*.yaml
-    python -m src.models.fetch --model pi0_fast
+    source .venv/bin/activate && python -m scripts.fetch_models            # every configs/model/*.yaml
+    python -m scripts.fetch_models --model pi0_fast
 
 For each model YAML: the checkpoint (params + assets with the norm stats) into openpi's cache (OPENPI_DATA_HOME, default
 ~/.cache/openpi) and, for the tokenizers openpi loads at runtime, the PaliGemma sentencepiece model (gs://big_vision) and, for
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 FAST_TOKENIZER = "physical-intelligence/fast"
 # openpi-assets is a PUBLIC bucket. Without gsutil, openpi falls back to gcsfs, which looks for Google credentials (a long hang on a
 # cluster node without any) unless it is told to read anonymously.
@@ -61,3 +61,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

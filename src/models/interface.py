@@ -6,11 +6,12 @@ the rollout code and their tests do not need the `vla` dependency group.
     plan = policy.plan(res.obs, env.spec.prompt)                  # Plan: targets (N, 1, H, 8) = what to send to env.step, one chunk per env
     actions = plan.targets[:, 0, t]                               # (N, 8): 7 ABSOLUTE joint-position targets + gripper command
 
-What the model receives is the env's observation dict itself (src/envs/protocol.py keys), N environments at once. The model reads the
-keys it needs and ignores the others: the images, the joint state and the gripper today. `extra/tactile` and the force keys are in the
-dict and are ignored until a touch config tells a model to read them (configs/touch, later): the same env stream then feeds the
-baseline and the tactile runs, only the config differs. Adding a touch input means extending `to_openpi_obs` (what the model is
-given) and the openpi input transform (openpi's DroidInputs builds the state from joints + gripper only): nothing in the algorithms.
+What the model receives is the env's observation dict itself (src/envs/protocol.py keys), N environments at once. The model reads
+the keys it needs and ignores the others: the images, the joint state and the gripper. Touch (`extra/tactile`, `extra/ft_force`,
+`extra/gripper_effort`) is in the dict and stays out of the model unless the model YAML switches it on for a component (`vlm.use_tactile`,
+`action_head.use_force`, ...: src/models/settings.py). When it does, `rows_of` adds the component's touch vector to every row
+(`touch/<component>`, built by src/touch/features.py), and how the component uses it is src/touch/injection/. So the same env stream
+feeds the baseline and the tactile runs, only the YAML differs, and the algorithms do not change.
 
 What comes out is always in the ENV's action space (absolute joint targets + gripper), whatever the model returns natively: the
 YAML's `output_semantics` says how to read the model's chunk (`chunk_to_targets`), and the inverse (`targets_to_chunk`) turns
@@ -28,37 +29,44 @@ A policy is one of:
 from __future__ import annotations
 
 import abc
+import copy
 import dataclasses
 import math
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import yaml
 
 from src.envs import protocol as P
+from src.models.settings import BLOCK_FIELDS, COMPONENTS, parse_model_settings
+from src.touch.features import TouchSpec
 
 ROOT = Path(__file__).resolve().parents[2]
 SEMANTICS = ("offsets_from_chunk_start_state", "absolute_targets")
+TOUCH_ROW_PREFIX = "touch/"           # a row carries the touch vector of component C under "touch/C" (only for components that use touch)
 
 
 # -- model YAML ---------------------------------------------------------------------------------------------------------------
 def load_model_cfg(name: str) -> dict:
+    """configs/model/<name>.yaml, validated (output semantics, per-component settings)."""
     cfg = yaml.safe_load((ROOT / "configs" / "model" / f"{name}.yaml").read_text())
     if cfg["output_semantics"] not in SEMANTICS:
         raise ValueError(f"configs/model/{name}.yaml: output_semantics must be one of {SEMANTICS}, got {cfg['output_semantics']!r}")
+    parse_model_settings(cfg)
     return cfg
 
 
-def apply_overrides(cfg: dict, use_lora: Optional[bool] = None, lora_rank_vlm: Optional[int] = None,
-                    lora_rank_action_head: Optional[int] = None) -> dict:
-    """A copy of the model config with the LoRA keys overridden (command-line flags of the probe, the algorithms' own configs)."""
-    cfg = dict(cfg)
-    if use_lora is not None:
-        cfg["use_lora"] = use_lora
-    for key, val in (("vlm", lora_rank_vlm), ("action_head", lora_rank_action_head)):
-        if val is not None:
-            cfg["lora_rank"] = {**(cfg.get("lora_rank") or {}), key: val}
+def apply_overrides(cfg: dict, overrides: Optional[Mapping[str, Any]] = None) -> dict:
+    """A validated copy of the model config with `overrides` applied: keys `<component>.<key>`, e.g.
+    {"vlm.use_lora": False, "action_head.lora_rank": 8, "action_head.use_tactile": True} (the probe's `--set`, an algorithm's own config)."""
+    cfg = copy.deepcopy(dict(cfg))
+    for key, value in (overrides or {}).items():
+        component, _, field = key.partition(".")
+        if component not in COMPONENTS or field not in BLOCK_FIELDS:
+            raise ValueError(f"override {key!r}: expected <component>.<key>, component in {list(COMPONENTS)}, key in {list(BLOCK_FIELDS)}")
+        cfg[component] = {**(cfg.get(component) or {}), field: value}
+    parse_model_settings(cfg)
     return cfg
 
 
@@ -102,13 +110,21 @@ def num_envs_of(obs: Dict[str, np.ndarray]) -> int:
     return int(np.asarray(obs[P.JOINT_POSITION]).shape[0])
 
 
-def rows_of(obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]]) -> List[dict]:
-    """One model observation per environment. `prompt`: one string for all the environments, or one per environment."""
+def rows_of(obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], touch: Optional[Mapping[str, TouchSpec]] = None) -> List[dict]:
+    """One model observation per environment. `prompt`: one string for all the environments, or one per environment.
+    `touch`: component name -> TouchSpec; each ENABLED spec adds its vector to every row under `touch/<component>` (KeyError when the
+    observation lacks a signal it needs, see src/touch/features.py). Without it, or with all specs off, a row is the task alone."""
     n = num_envs_of(obs)
     prompts = [prompt] * n if isinstance(prompt, str) else list(prompt)
     if len(prompts) != n:
         raise ValueError(f"{len(prompts)} prompts for {n} environments")
-    return [to_openpi_obs(obs, e, prompts[e]) for e in range(n)]
+    rows = [to_openpi_obs(obs, e, prompts[e]) for e in range(n)]
+    for name, spec in (touch or {}).items():
+        if spec.enabled:
+            features = spec.build_batch(obs)
+            for e, row in enumerate(rows):
+                row[TOUCH_ROW_PREFIX + name] = features[e]
+    return rows
 
 
 def take(obs: Dict[str, np.ndarray], idx: Sequence[int]) -> Dict[str, np.ndarray]:
@@ -170,10 +186,11 @@ class VLAPolicy(abc.ABC):
     """Batched policy over the env's observation dict. Subclasses implement `raw_chunks`; the conversion to env actions is here."""
 
     info: ModelInfo
+    touch: Mapping[str, TouchSpec] = {}        # component -> TouchSpec of the components that use touch (set by the subclass from its YAML)
 
     @abc.abstractmethod
     def raw_chunks(self, rows: List[dict], num_samples: int) -> Tuple[np.ndarray, float]:
-        """`rows`: one openpi-format observation per environment (`to_openpi_obs`). Returns the model's own chunks (N, S, H, D >= 8)
+        """`rows`: one openpi-format observation per environment (`rows_of`: `to_openpi_obs` + the touch vectors). Returns the model's own chunks (N, S, H, D >= 8)
         in the order [environment][sample], and the model time in ms."""
 
     def seed(self, seed: int) -> None:
@@ -182,7 +199,7 @@ class VLAPolicy(abc.ABC):
     def plan(self, obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], num_samples: int = 1) -> Plan:
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
-        rows = rows_of(obs, prompt)
+        rows = rows_of(obs, prompt, self.touch)
         n, h = len(rows), self.info.action_horizon
         raw, infer_ms = self.raw_chunks(rows, num_samples)
         raw = np.asarray(raw, dtype=np.float32)

@@ -1,16 +1,20 @@
 """Build an openpi policy from a configs/model/<model>.yaml. Needs the `vla` dependency group (jax, openpi); nothing else in src imports it.
 
-The YAML names an openpi TrainConfig (`openpi_config`: data pipeline, norm stats, weights), whose Gemma variants are then set by the
-LoRA keys of the YAML (`use_lora`, `lora_rank`: see src/models/openpi_config.py). Two ways to load the weights (`load:`):
+The YAML names an openpi TrainConfig (`openpi_config`: data pipeline, norm stats), whose Gemma variants are then set by the per-component
+LoRA keys of the YAML (`vlm.use_lora`, `vlm.lora_rank`, `action_head.*`: src/models/settings.py, src/models/openpi_config.py). The
+WEIGHTS are always those of the YAML's `checkpoint`, never those the openpi config happens to name: one source of truth. (Today the two
+agree for pi0.5 and for pi0-FAST PolaRiS; the replacement protects a YAML that is changed to another checkpoint from loading the old one.)
+Two ways to load them (`load:`):
 
   strict        openpi's own `create_trained_policy`: the checkpoint's `params/` must have EXACTLY the structure of the model. Only possible
-                without LoRA (`use_lora: false`): pi0-FAST (checkpoint trained with this very config).
+                without LoRA anywhere (`use_lora: false` in every component).
 
-  weight_loader the way expo-ft loads pi0.5 (expo_ft/agents/vla/pi05.py: `_load_weights_and_validate` + `pi05_init_train_state`):
-                the TrainConfig's `weight_loader` (CheckpointWeightLoader) returns the checkpoint weights MERGED with the model's own
-                initialisation for every parameter whose name matches `.*lora.*`. This is what makes a LoRA model loadable from a
-                checkpoint that has no LoRA tensors (pi05_droid_jointpos). The strict path cannot do that: it fails with
-                "symmetric difference of key sets: {'lora_a', 'lora_b'}". Works without LoRA too (nothing is missing).
+  weight_loader the way expo-ft loads pi0.5 (expo_ft/agents/vla/pi05.py: `_load_weights_and_validate` + `pi05_init_train_state`), and
+                the way openpi's own LoRA recipe for pi0-FAST does (`pi0_fast_libero_low_mem_finetune`: `CheckpointWeightLoader(...)`
+                with a LoRA variant): a CheckpointWeightLoader on the YAML's checkpoint returns the checkpoint weights MERGED with the
+                model's own initialisation for every parameter whose name matches `.*lora.*`. This is what makes a LoRA model loadable
+                from a checkpoint that has no LoRA tensors (pi05_droid_jointpos, pi0-FAST polaris). The strict path cannot do that: it
+                fails with "symmetric difference of key sets: {'lora_a', 'lora_b'}". Works without LoRA too (nothing is missing).
 
                 Same loading as expo-ft, with a lower peak in memory (see `build_params_like_expo_ft`).
 
@@ -20,6 +24,7 @@ LoRA keys of the YAML (`use_lora`, `lora_rank`: see src/models/openpi_config.py)
 """
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 
 GCS_ANON = {"token": "anon"}
@@ -27,7 +32,7 @@ GCS_ANON = {"token": "anon"}
 
 def _download(uri: str) -> pathlib.Path:
     import openpi.shared.download as download
-    return download.maybe_download(uri, gs=GCS_ANON)       # already fetched by src.models.fetch: a cache hit, no network
+    return download.maybe_download(uri, gs=GCS_ANON)       # already fetched by scripts.fetch_models: a cache hit, no network
 
 
 def init_lora_params(model_cfg, key):
@@ -107,22 +112,31 @@ def _policy_from(train_cfg, model, checkpoint_dir: pathlib.Path):
     )
 
 
-def load_policy(model_cfg: dict):
-    """(policy, openpi TrainConfig actually used: Gemma variants and freeze filter as set by the YAML)."""
-    from src.models.openpi_config import apply_lora_settings, parse_lora_settings
+def with_yaml_weights(train_cfg, checkpoint_dir: pathlib.Path):
+    """The TrainConfig whose weight loader reads the `params/` of `checkpoint_dir` (the YAML's checkpoint, already downloaded)."""
+    from openpi.training import weight_loaders
 
-    settings = parse_lora_settings(model_cfg)
+    return dataclasses.replace(train_cfg, weight_loader=weight_loaders.CheckpointWeightLoader(str(checkpoint_dir / "params")))
+
+
+def load_policy(model_cfg: dict):
+    """(policy, openpi TrainConfig actually used: Gemma variants, freeze filter and weight loader as set by the YAML)."""
+    from src.models.openpi_config import apply_settings
+    from src.models.settings import parse_model_settings
+
+    settings = parse_model_settings(model_cfg)
     mode = model_cfg.get("load", "strict")
     if mode not in ("strict", "weight_loader"):
         raise ValueError(f"load: must be 'strict' or 'weight_loader', got {mode!r}")
-    if mode == "strict" and settings.use_lora:
+    if mode == "strict" and settings.any_lora:
         raise ValueError("load: strict cannot load a LoRA model from a checkpoint without LoRA tensors: use `load: weight_loader` "
-                         "(or `use_lora: false`)")
+                         "(or `use_lora: false` in every component)")
     from openpi.policies import policy_config
     from openpi.training import config as _config
 
-    train_cfg = apply_lora_settings(_config.get_config(model_cfg["openpi_config"]), settings)
+    train_cfg = apply_settings(_config.get_config(model_cfg["openpi_config"]), settings)
     checkpoint = _download(model_cfg["checkpoint"])
     if mode == "strict":
         return policy_config.create_trained_policy(train_cfg, checkpoint), train_cfg
+    train_cfg = with_yaml_weights(train_cfg, checkpoint)
     return _policy_from(train_cfg, build_params_like_expo_ft(train_cfg), checkpoint), train_cfg

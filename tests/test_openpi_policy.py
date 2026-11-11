@@ -1,7 +1,7 @@
 """src/models/openpi_policy.py on CPU, with a tiny pi0.5 (gemma `dummy` variants) and openpi's own DroidInputs / DroidOutputs / padding.
 The prompt tokenizer (it downloads PaliGemma's) and the DROID normalisation (it needs the checkpoint's norm stats) are replaced by stubs:
 what is tested is the plumbing of the batched path (order of environments and samples, padding, state per row, weights as an argument,
-training batch), not the real transforms, which are openpi's and run on the cluster (`python -m src.models.probe` prints the
+training batch), not the real transforms, which are openpi's and run on the cluster (`python -m scripts.probe_vla` prints the
 check of this path against openpi's own `Policy.infer` on the real model).
 
 Needs the `vla` dependency group (skipped otherwise). The SigLIP tower of openpi is not downsized by any variant: a few minutes of
@@ -76,7 +76,7 @@ def pol():
 
 def test_the_batched_path_gives_the_chunk_of_openpis_own_policy_for_the_same_key(pol):
     """N = 1, S = 1: the same transforms, the same sampler, the same random key: the same chunk."""
-    from src.models import probe
+    from scripts import probe_vla as probe
     row = probe.to_openpi_obs(env_obs(1), 0, "insert the peg")
     check = probe.interface_check(pol, row, seed=7)
     assert check["shape_reference"] == check["shape_batched"] == [H, 8]
@@ -146,6 +146,38 @@ def test_the_training_batch_puts_the_targets_in_the_models_own_space_and_pads_th
 def test_the_trainable_filter_selects_parameters(pol):
     trainable = nnx.state(pol.graphdef and nnx.merge(pol.graphdef, pol.state), pol.trainable_filter)
     assert len(jax.tree.leaves(trainable)) > 0
+
+
+def test_touch_is_off_unless_the_yaml_switches_it_on(pol):
+    assert pol.touch and not any(spec.enabled for spec in pol.touch.values()) and pol.settings.required_obs_keys == ()
+    assert set(pol.injections.values()) == {None}
+
+
+def test_a_component_that_asks_for_touch_stops_until_an_injection_exists(pol):
+    """Prepared, not silent: use_tactile on the action head parses, and the model refuses to be built without an injection for it."""
+    with pytest.raises(NotImplementedError, match="action_head"):
+        OpenPIPolicy(pol.policy, pol.train_cfg, {**pol.cfg, "action_head": {"use_tactile": True}})
+    with pytest.raises(NotImplementedError, match="vlm"):
+        OpenPIPolicy(pol.policy, pol.train_cfg, {**pol.cfg, "vlm": {"use_force": True}})
+
+
+def test_with_an_injection_registered_the_touch_data_path_is_complete(pol, monkeypatch):
+    """What adding a touch method will not have to change: the vectors reach the rows of `plan` and of `training_batch`, per component."""
+    from src.touch import injection
+    monkeypatch.setitem(injection.INJECTIONS, "action_head", lambda spec: ("stub", spec.dim))
+    touched = OpenPIPolicy(pol.policy, pol.train_cfg, {**pol.cfg, "action_head": {"use_tactile": True, "use_force": True}}, seed=3)
+    assert touched.injections == {"vlm": None, "action_head": ("stub", 60)} and touched.settings.required_obs_keys == (P.FT_FORCE, P.GRIPPER_EFFORT, P.TACTILE)
+    obs = env_obs(2)
+    with pytest.raises(KeyError, match="tactile|ft_force"):                                    # the env stream must carry the signals
+        touched.plan(obs, "p")
+    obs.update({P.FT_FORCE: np.ones((2, 3), np.float32), P.GRIPPER_EFFORT: np.ones(2, np.float32), P.TACTILE: np.ones((2, 2, 7, 4), np.float32)})
+    from src.models.interface import rows_of
+    assert rows_of(obs, "p", touched.touch)[1]["touch/action_head"].shape == (60,)
+    plan = touched.plan(obs, "p")                                                              # (the stub injection changes nothing: it is not applied)
+    assert plan.targets.shape == (2, 1, H, P.ACTION_DIM)
+    target = np.zeros((2, H, 8), np.float32)
+    observation, actions = touched.training_batch(obs, "p", target)
+    assert actions.shape == (2, H, MODEL_DIM)
 
 
 def test_model_info_comes_from_the_yaml(pol):

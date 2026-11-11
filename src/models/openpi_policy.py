@@ -28,6 +28,8 @@ import numpy as np
 
 from src.envs import protocol as P
 from src.models.interface import ModelInfo, VLAPolicy, num_envs_of, padded_batch_size, rows_of, targets_to_chunk
+from src.models.settings import ModelSettings, parse_model_settings
+from src.touch.injection import build_injection
 
 FAMILIES_WITH_NATIVE_SAMPLES = ("pi05", "pi0")        # Pi0.sample_actions(num_samples=...) of the pinned fork; Pi0FAST has no such argument
 
@@ -35,12 +37,16 @@ FAMILIES_WITH_NATIVE_SAMPLES = ("pi05", "pi0")        # Pi0.sample_actions(num_s
 class OpenPIPolicy(VLAPolicy):
     def __init__(self, policy, train_cfg, cfg: dict, seed: int = 0):
         """`policy`: an openpi `Policy` (its transforms, norm stats and model are used); `train_cfg`: the openpi TrainConfig it was built
-        from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAML."""
+from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAML (its touch switches are read here)."""
         import flax.nnx as nnx
         import jax
 
         self.policy, self.train_cfg, self.cfg = policy, train_cfg, cfg
         self.info = ModelInfo.from_cfg(cfg)
+        self.settings: ModelSettings = parse_model_settings(cfg)
+        self.touch = self.settings.touch_specs                                       # rows_of adds the vectors of the enabled ones
+        # a component that asks for touch needs an injection (src/touch/injection): none is written yet, so this raises rather than ignore it
+        self.injections = {name: build_injection(name, spec) for name, spec in self.touch.items()}
         self._native_samples = self.info.family in FAMILIES_WITH_NATIVE_SAMPLES
         self._graphdef, self._state = nnx.split(policy._model)                      # noqa: SLF001
         graphdef, kwargs, native = self._graphdef, dict(policy._sample_kwargs), self._native_samples   # noqa: SLF001
@@ -81,7 +87,7 @@ class OpenPIPolicy(VLAPolicy):
 
     @property
     def trainable_filter(self):
-        """nnx filter of the parameters a training step updates: openpi's freeze filter of the config (use_lora / lora_rank of the YAML)."""
+        """nnx filter of the parameters a training step updates: openpi's freeze filter of the config (the `use_lora` / `lora_rank` of the YAML's vlm and action_head blocks)."""
         import flax.nnx as nnx
         return nnx.All(nnx.Param, nnx.Not(self.train_cfg.freeze_filter))
 
@@ -133,7 +139,7 @@ class OpenPIPolicy(VLAPolicy):
             raise ValueError(f"target_actions must be ({n}, {h}, {P.ACTION_DIM}) (N, action_horizon, 8), got {target.shape}")
         q = np.asarray(obs[P.JOINT_POSITION], dtype=np.float32)
         items = []
-        for i, row in enumerate(rows_of(obs, prompt)):
+        for i, row in enumerate(rows_of(obs, prompt, self.touch)):
             row["actions"] = targets_to_chunk(target[i], q[i], self.info.output_semantics)
             items.append(self.policy._input_transform(row))                                    # noqa: SLF001
         batch, observation = self._stack(items)

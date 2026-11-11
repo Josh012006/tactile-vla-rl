@@ -1,16 +1,16 @@
 #!/bin/bash
 # Probe the VLA models on an L40S: what they receive, what they return, what they cost in VRAM, plus a short FORGE rollout.
-#   sbatch jobs/job_probe_vla.sh                                  # pi05 (expo-ft loading, LoRA), pi05 without LoRA, pi0_fast; Isaac Lab env server (1 env)
-#   PROBE_MODELS="pi05" sbatch --export=ALL jobs/job_probe_vla.sh   # a model name; `pi05:nolora` = `--use-lora false` (the exact base function)
+#   sbatch jobs/job_probe_vla.sh                                  # pi05 (expo-ft loading, LoRA), pi05 without LoRA, pi0_fast (LoRA), pi0_fast without LoRA; Isaac Lab env server (1 env)
+#   PROBE_MODELS="pi05" sbatch --export=ALL jobs/job_probe_vla.sh   # a model name; `pi05:nolora` = `--no-lora` (use_lora=false in every component: the exact base function)
 #   PROBE_SYNTHETIC=1 sbatch --export=ALL jobs/job_probe_vla.sh   # no env server: fake observation (shapes, timing, VRAM only)
 #   PROBE_OBS=reports/obs_<tag>.npz PROBE_MODELS="pi05 pi05:nolora" sbatch --export=ALL jobs/job_probe_vla.sh   # replay one saved observation, no env server
 #   PROBE_STEPS=150 PROBE_REPLAN=8 sbatch --export=ALL jobs/job_probe_vla.sh      # a full episode (the task's max_steps is 150)
 #   PROBE_NO_VIDEO=1 ...                                                          # do not record the rollout video
 # Before the first run, on the login node (internet needed, the job itself runs offline):
-#   uv sync --group vla && source .venv/bin/activate && python -m src.models.fetch
+#   uv sync --group vla && source .venv/bin/activate && python -m scripts.fetch_models
 # Output: logs/slurm/probe_vla_<jobid>.out, reports/probe_<model>_<time>.json, the two camera images and the observation (obs_<tag>.npz) of the
 # first step and, for a rollout, reports/probe_<tag>_env0.mp4 (exterior | wrist + peg-socket distance). Compare two models on the same
-# observation with `python -m src.models.compare reports/probe_A.json reports/probe_B.json`.
+# observation with `python -m scripts.compare_reports reports/probe_A.json reports/probe_B.json`.
 #
 #SBATCH --job-name=probe_vla
 #SBATCH --ntasks=1
@@ -24,7 +24,7 @@
 set -u
 cd "${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}" || exit 1
 mkdir -p logs/slurm reports
-MODELS="${PROBE_MODELS:-pi05 pi05:nolora pi0_fast}"
+MODELS="${PROBE_MODELS:-pi05 pi05:nolora pi0_fast pi0_fast:nolora}"
 PORT="${PROBE_PORT:-8102}"
 nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
 
@@ -56,12 +56,12 @@ fi
 # 2. the models, one process each (a model that is deleted does not give its memory back to the next one), in the learner venv
 source .venv/bin/activate
 export XLA_PYTHON_CLIENT_PREALLOCATE=false      # allocate what is used (the default preallocates 75 % of the GPU and hides the real size)
-export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1  # everything was fetched by src.models.fetch: a missing file fails instead of downloading
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1  # everything was fetched by scripts.fetch_models: a missing file fails instead of downloading
 status=0
 for m in $MODELS; do
     echo; echo "################ $m"
     name="${m%%:*}"; flags=()
-    [ "$m" != "$name" ] && [ "${m#*:}" = "nolora" ] && flags=(--use-lora false)
-    python -m src.models.probe --model "$name" ${flags[@]+"${flags[@]}"} "${EXTRA[@]}" --steps "${PROBE_STEPS:-40}" --replan "${PROBE_REPLAN:-8}" || status=1
+    [ "$m" != "$name" ] && [ "${m#*:}" = "nolora" ] && flags=(--no-lora)
+    python -m scripts.probe_vla --model "$name" ${flags[@]+"${flags[@]}"} "${EXTRA[@]}" --steps "${PROBE_STEPS:-40}" --replan "${PROBE_REPLAN:-8}" || status=1
 done
 exit $status

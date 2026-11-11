@@ -1,5 +1,5 @@
-# pi0.5 (flow matching, action expert), DROID joint-position weights. MODEL side only: the task, the algorithm and the use of
-# touch have their own files (configs/{task,algo,touch}).
+# pi0.5 (flow matching, action expert), DROID joint-position weights. MODEL side only: the task and the algorithm have their own files
+# (configs/{task,algo}); touch is switched on per component in the blocks below.
 #
 # Code: the openpi fork Josh012006/openpi (branch expo_ft), submodule third_party/openpi, pinned by the commit that git records for
 # the submodule (f7cfe2d2e29abdc73ccb9ef0495990f3fc076234 when this file was written): the SAME commit as in expo-ft.
@@ -7,27 +7,42 @@ name: pi05
 family: pi05
 
 # Name of a TrainConfig in third_party/openpi/src/openpi/training/config.py (tests/test_models_pin.py checks that it exists). It provides
-# the data pipeline, the DROID norm stats and the weights (pi05_droid_jointpos); its Gemma variants are OVERRIDDEN by use_lora / lora_rank
-# below (src/models/openpi_config.py), so its "lora" in the name only says that it is the config expo-ft evaluated and fine-tuned.
+# the data pipeline and the DROID norm stats; its Gemma variants are OVERRIDDEN by the LoRA keys below (src/models/openpi_config.py), and its
+# weights by `checkpoint` (src/models/loading.py), so the "lora" in its name only says that it is the config expo-ft evaluated and fine-tuned.
 openpi_config: expo_pi05_droid_lora_finetune_sft_joint_state
 checkpoint: gs://openpi-assets/checkpoints/pi05_droid_jointpos          # params/ and assets/ (norm stats) live there
 
-# LoRA, as openpi has it (nothing re-implemented):
-#   use_lora: true  -> the Gemma weights are frozen and LoRA matrices are trained (openpi's freeze filter: the SigLIP vision tower and the
-#                      action projections stay trainable too). false -> no LoRA, everything is trained (full fine-tuning). Default: true.
-#   lora_rank       -> openpi's defaults: 16 for the VLM (gemma_2b_lora), 32 for the action expert (gemma_300m_lora). Another rank changes the
-#                      model structure: the same value must be used wherever a checkpoint trained with it is loaded.
-use_lora: true
-lora_rank:
-  vlm: 16
-  action_head: 32
+# ---- the components of the model: one block each, same keys (src/models/settings.py) ------------------------------------------------
+#   use_lora      LoRA on this component's Gemma weights, as openpi has it (the weights are frozen, LoRA matrices are trained; openpi's freeze
+#                 filter leaves the SigLIP vision tower and the action projections trainable too). false: no LoRA (trained in full if trained).
+#                 The two components are independent. Default true.
+#   lora_rank     openpi's defaults: 16 for the VLM (gemma_2b_lora), 32 for the action expert (gemma_300m_lora). Another rank changes the model
+#                 structure: use the same value wherever a checkpoint trained with it is loaded.
+#   use_tactile   the 56 taxels (extra/tactile) are given to this component.            Default false.
+#   use_force     the force signals (extra/ft_force, extra/gripper_effort) are given to it.   Default false.
+#   force_mode    measured | proxy. `proxy` (force estimated instead of read, arXiv 2610.23849) is routed but not implemented.
+# Touch is OFF everywhere: this is the task-only baseline. Turning it on needs a robot with the signals (robotiq_2f85_tsf for the taxels)
+# and an injection for the component (src/touch/injection: none is written yet, a component that asks for touch stops with an error that
+# says so). Command-line / algorithm overrides use the same names: vlm.use_lora=false, action_head.use_tactile=true, ...
+vlm:                           # PaliGemma's Gemma 2B (+ SigLIP)
+  use_lora: true
+  lora_rank: 16
+  use_tactile: false
+  use_force: false
+  force_mode: measured
+action_head:                   # the action expert (Gemma 300M)
+  use_lora: true
+  lora_rank: 32
+  use_tactile: false
+  use_force: false
+  force_mode: measured
 
 # How the weights are loaded (src/models/loading.py). The checkpoint has NO LoRA tensors, so openpi's strict loading fails with LoRA
-# ("symmetric difference of key sets: {'lora_a', 'lora_b'}"). expo-ft loads through the config's weight_loader, which keeps the checkpoint
-# weights and takes the LoRA parameters from the model's own initialisation: `load: weight_loader` does the same. openpi initialises
-# lora_a AND lora_b with normal(0.01) whereas the LoRA paper (Hu et al. 2021) starts from B = 0: a freshly initialised LoRA model is the
-# base model plus a random perturbation, not exactly the base function (its size is being measured). `use_lora: false` is the exact base
-# function (`python -m src.models.probe --model pi05 --use-lora false`).
+# ("symmetric difference of key sets: {'lora_a', 'lora_b'}"). expo-ft loads through a weight_loader, which keeps the checkpoint weights
+# and takes the LoRA parameters from the model's own initialisation: `load: weight_loader` does the same. openpi initialises lora_a AND
+# lora_b with normal(0.01) whereas the LoRA paper (Hu et al. 2021) starts from B = 0: a freshly initialised LoRA model is the base model
+# plus a small random perturbation (1 % of the chunk on real observations, 2026-11-10), not exactly the base function. No LoRA in any
+# component is the exact base function (`python -m scripts.probe_vla --model pi05 --no-lora`).
 load: weight_loader
 
 action_dim: 8                  # 7 joints + gripper; the model itself works on 32 (padded), 8 are read

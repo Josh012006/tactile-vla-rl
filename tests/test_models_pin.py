@@ -49,8 +49,8 @@ def test_model_yaml_is_complete_and_names_an_existing_openpi_config(path):
     assert cfg["openpi_config"] in train_config_names(), f"{path.name}: openpi has no TrainConfig {cfg['openpi_config']!r} at the pinned commit"
     assert str(cfg["checkpoint"]).startswith("gs://openpi-assets/"), path.name
     assert cfg.get("load", "strict") in ("strict", "weight_loader"), f"{path.name}: `load` must be strict | weight_loader (src/models/loading.py)"
-    from src.models.openpi_config import parse_lora_settings                  # use_lora / lora_rank (standard library only)
-    parse_lora_settings(cfg)
+    from src.models.settings import parse_model_settings                      # the vlm / action_head blocks (no JAX)
+    parse_model_settings(cfg)
 
 
 def test_there_is_at_least_one_model_yaml():

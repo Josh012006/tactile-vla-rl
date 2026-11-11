@@ -105,16 +105,58 @@ def test_a_model_without_lora_loads_through_the_same_path(tiny):
 
 
 def test_load_key_is_validated():
+    no_lora = {"vlm": {"use_lora": False}, "action_head": {"use_lora": False}}
     with pytest.raises(ValueError, match="load:"):
-        loading.load_policy({"family": "pi05", "use_lora": False, "load": "magic", "openpi_config": "pi05_droid", "checkpoint": "gs://openpi-assets/x"})
+        loading.load_policy({"family": "pi05", **no_lora, "load": "magic", "openpi_config": "pi05_droid", "checkpoint": "gs://openpi-assets/x"})
     with pytest.raises(ValueError, match="strict"):                      # a LoRA model cannot be loaded strictly
-        loading.load_policy({"family": "pi05", "use_lora": True, "load": "strict", "openpi_config": "pi05_droid", "checkpoint": "gs://openpi-assets/x"})
+        loading.load_policy({"family": "pi05", "load": "strict", "openpi_config": "pi05_droid", "checkpoint": "gs://openpi-assets/x"})
+    with pytest.raises(ValueError, match="strict"):                      # ... in ANY component
+        loading.load_policy({"family": "pi05", "vlm": {"use_lora": False}, "load": "strict", "openpi_config": "pi05_droid", "checkpoint": "gs://openpi-assets/x"})
+    with pytest.raises(ValueError, match="one block per component"):     # the old global keys are refused before anything is downloaded
+        loading.load_policy({"family": "pi05", "use_lora": False, "load": "weight_loader", "openpi_config": "pi05_droid", "checkpoint": "gs://openpi-assets/x"})
 
 
 def test_the_probe_counts_total_trainable_and_lora_parameters(tiny):
-    from src.models import probe
+    from scripts import probe_vla as probe
     train_cfg, _, _ = tiny
     model = loading.build_params_like_expo_ft(train_cfg)
     counts = probe.trainable_counts(types.SimpleNamespace(_model=model), types.SimpleNamespace(freeze_filter=train_cfg.model.get_freeze_filter()))
     assert "error" not in counts, counts
     assert counts["total_m"] > counts["trainable_m"] > counts["lora_m"] > 0       # the SigLIP tower is trainable too (openpi's filter)
+
+
+# -- the weights are the YAML's checkpoint, also for pi0-FAST ---------------------------------------------------------------------------
+def test_the_weight_loader_reads_the_yamls_checkpoint_not_the_one_the_openpi_config_names(tmp_path):
+    """One source of truth for the weights: whatever loader the openpi config carries, `with_yaml_weights` reads the YAML's checkpoint."""
+    @dataclasses.dataclass(frozen=True)
+    class Cfg:
+        weight_loader: object
+
+    got = loading.with_yaml_weights(Cfg(weight_loaders.CheckpointWeightLoader("gs://somewhere/else/params")), tmp_path / "ckpt")
+    assert isinstance(got.weight_loader, weight_loaders.CheckpointWeightLoader) and got.weight_loader.params_path == str(tmp_path / "ckpt" / "params")
+
+
+def test_pi0_fast_with_lora_is_structurally_loadable_from_its_checkpoint_without_lora():
+    """pi0-FAST through the real openpi config: the checkpoint (here: the abstract structure of the model WITHOUT LoRA, which is what the
+    released checkpoint has) merged by openpi's CheckpointWeightLoader gives exactly the structure of the LoRA model, the LoRA tensors
+    being the only ones to come from the model. Abstract (eval_shape): nothing is allocated, nothing is downloaded. What only the cluster
+    can show is the real file: scripts/probe_vla.py on the job."""
+    import openpi.shared.array_typing as at
+    from openpi.training import config as _config
+    from openpi.training.weight_loaders import _merge_params           # noqa: PLC2701
+
+    from src.models.openpi_config import apply_settings
+    from src.models.settings import parse_model_settings
+
+    cfg = {"family": "pi0_fast"}
+    lora = apply_settings(_config.get_config("pi0_fast_droid_jointpos_polaris"), parse_model_settings(cfg))
+    plain = apply_settings(_config.get_config("pi0_fast_droid_jointpos_polaris"), parse_model_settings({**cfg, "vlm": {"use_lora": False}}))
+    key = jax.random.key(0)
+    expected = nnx.state(nnx.eval_shape(lora.model.create, key)).to_pure_dict()
+    checkpoint = nnx.state(nnx.eval_shape(plain.model.create, key)).to_pure_dict()           # what the released checkpoint holds
+    merged = _merge_params(checkpoint, expected, missing_regex=".*lora.*")
+    at.check_pytree_equality(expected=expected, got=merged, check_shapes=True, check_dtypes=False)
+    missing = {k for k in tu.flatten_dict(expected) if k not in tu.flatten_dict(checkpoint)}
+    assert missing and all(any("lora" in part for part in k) for k in missing)               # only LoRA tensors come from the model
+    with pytest.raises(ValueError):                                                         # and the strict structure check would have failed
+        at.check_pytree_equality(expected=expected, got=checkpoint, check_shapes=True, check_dtypes=False)

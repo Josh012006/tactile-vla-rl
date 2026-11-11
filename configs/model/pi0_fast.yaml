@@ -1,5 +1,5 @@
 # pi0-FAST (autoregressive: the action chunk is a sequence of FAST tokens, decoded back into actions), DROID joint-position
-# weights. MODEL side only (see configs/model/pi05.yaml).
+# weights. MODEL side only (see configs/model/pi05.yaml, which documents the keys of the component blocks).
 #
 # Code: the SAME fork and the SAME pinned commit as pi05: pi0-FAST is part of openpi (models/pi0_fast.py, gemma_fast.py, the FAST
 # tokenizer in models/tokenizer.py), there is no second repository to fork.
@@ -8,26 +8,38 @@ family: pi0_fast
 
 # The only joint-POSITION pi0-FAST that openpi defines is the PolaRiS one (src/openpi/training/misc/polaris_config.py): DROID
 # (90 %) co-trained with the PolaRiS simulation data (10 %). `pi0_fast_droid` is joint VELOCITY and does not fit absolute joint
-# targets. tests/test_models_pin.py checks that this config exists in the pinned fork.
+# targets. tests/test_models_pin.py checks that this config exists in the pinned fork. It provides the data pipeline (and norm stats); the
+# weights are the `checkpoint` below (this config's own weight loader names the same one; src/models/loading.py uses the YAML's anyway).
 openpi_config: pi0_fast_droid_jointpos_polaris
 checkpoint: gs://openpi-assets/checkpoints/polaris/pi0_fast_droid_jointpos_polaris      # params/ and assets/ (norm stats)
+
+# ---- the components: only the vlm (pi0-FAST has no action expert, an `action_head` block is refused) ------------------------------
+# LoRA is openpi's own for this model (gemma_fast.py: `gemma_2b_lora`, rank 16; openpi/training/config.py: `pi0_fast_libero_low_mem_finetune`
+# trains exactly this, from a checkpoint without LoRA tensors, through a CheckpointWeightLoader: the loading below). Its freeze filter
+# (Pi0FASTConfig.get_freeze_filter) freezes the Gemma weights that are not LoRA when the variant is a LoRA one, and nothing otherwise.
+# The checkpoint is a FULL fine-tune of the VLM: `use_lora: false` is the exact base function and the full fine-tuning.
+vlm:
+  use_lora: true
+  lora_rank: 16
+  use_tactile: false
+  use_force: false
+  force_mode: measured
+
+# weight_loader: the checkpoint weights + the LoRA parameters from the model's own initialisation (normal(0.01) for lora_a AND lora_b, as
+# openpi has it). Without LoRA nothing is missing and the result is the checkpoint itself. `strict` is openpi's `create_trained_policy`:
+# only possible when no component uses LoRA.
+load: weight_loader
 
 action_dim: 8                  # 7 joints + gripper (no padding: this model is built with action_dim 8)
 action_horizon: 10
 max_token_len: 180             # maximum length of the prompt + state + action tokens; a chunk that needs more is cut
-# Checked on 2026-11-10 (src.models.fetch: the checkpoint exists; src.models.probe: 5 chunks of a FORGE rollout all look ABSOLUTE).
+# Checked on 2026-11-10 (scripts/fetch_models: the checkpoint exists; scripts/probe_vla: 5 chunks of a FORGE rollout all look ABSOLUTE).
 # This config's data pipeline (RLDS, action space JOINT_POSITION) puts DeltaActions on the inputs AND AbsoluteActions on the outputs, so
 # the policy returns ABSOLUTE targets (the chunk-start state is already added inside), unlike pi05 above: adding the chunk-start state
 # again would add it twice.
 output_semantics: absolute_targets
 
-# LoRA keys (see configs/model/pi05.yaml; pi0-FAST has no action expert, hence no action_head). This checkpoint is a FULL fine-tune of the
-# VLM: false loads it as it is (openpi's strict loading, `load: strict`). true would add LoRA matrices on top (`load: weight_loader`).
-use_lora: false
-lora_rank:
-  vlm: 16
-load: strict
 # The FAST tokenizer is not in the checkpoint: openpi loads `physical-intelligence/fast` from the Hugging Face Hub
 # (trust_remote_code=True) and the PaliGemma tokenizer from gs://big_vision. The submodule does not pin them. Revision of the FAST
-# tokenizer fetched by `python -m src.models.fetch` on 2026-11-10 (a RECORD of what the experiments ran with: nothing enforces it yet):
+# tokenizer fetched by `python -m scripts.fetch_models` on 2026-11-10 (a RECORD of what the experiments ran with: nothing enforces it yet):
 fast_tokenizer_revision: ec4d7aa71691cac0b8bed6942be45684db2110f4
