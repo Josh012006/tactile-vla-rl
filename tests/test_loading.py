@@ -74,6 +74,74 @@ def test_expo_ft_way_keeps_the_checkpoint_weights_and_initialises_the_lora(tiny)
     assert any(np.any(np.asarray(got[k], dtype=np.float32) != 0) for k in lora_keys if "lora_b" in k)
 
 
+def test_a_checkpoint_that_holds_lora_tensors_keeps_them(tiny):
+    """A checkpoint trained with LoRA (an expo-ft SFT step: `params/` holds the base weights AND the trained lora_a / lora_b) must come back
+    as it is: only the LoRA tensors that the checkpoint LACKS are initialised. (A first version initialised every LoRA tensor and so replaced
+    the trained ones by random ones: expo-ft's own step-4000 teleop checkpoint scored 0 % in this repository's evaluation.)"""
+    train_cfg, _, _ = tiny
+    full = jax.tree.map(np.asarray, nnx.state(train_cfg.model.create(jax.random.key(7))).to_pure_dict())      # a LoRA checkpoint, other values than the init of seed 0
+    flat_full = tu.flatten_dict(full, sep="/")
+    lora_keys = {k for k in flat_full if "lora" in k}
+    assert lora_keys
+    train_cfg.weight_loader = weight_loaders.CheckpointWeightLoader("fake/params")
+    weight_loaders._model.restore_params = lambda *a, **k: full                                      # noqa: SLF001 (monkeypatched by the fixture, restored with it)
+    model = loading.build_params_like_expo_ft(train_cfg)
+    got = tu.flatten_dict(nnx.state(model).to_pure_dict(), sep="/")
+    assert set(got) == set(flat_full)
+    for k in lora_keys:
+        assert np.array_equal(np.asarray(got[k], dtype=np.float32), np.asarray(jnp.asarray(flat_full[k]).astype(jnp.bfloat16), dtype=np.float32)), f"{k} was replaced"
+
+
+def test_our_checkpoint_route_and_expo_fts_full_params_route_give_the_same_weights(tiny, monkeypatch, tmp_path):
+    """The two ways an evaluation rebuilds a fine-tuned model, from the SAME trained values, end with the SAME weights:
+    (1) ours: the initial model (base weights + LoRA init) with the TRAINABLE parameters of `<ckpt>/params` laid over it (`sft.load_checkpoint`);
+    (2) expo-ft's: a `params/` that holds every weight, frozen and trained (what `scripts/adopt_expo_ft_checkpoint.py` points at), through `build_params_like_expo_ft`.
+    The trained values are the initial ones plus a perturbation, in float32 as in training; `save_checkpoint` rounds them to bfloat16 (route 1), the loader casts
+    the full params to bfloat16 (route 2): the same rounding, so the weights must be identical, leaf by leaf. (Written to share buffers: the SigLIP tower makes
+    every copy of the model ~1 GB.)"""
+    from openpi.shared import nnx_utils
+
+    from src.algos import sft
+
+    train_cfg, _, _ = tiny
+    trainable_filter = nnx.Any(nnx_utils.PathRegex(".*lora.*"), nnx_utils.PathRegex(".*action_out_proj.*"))    # LoRA + a non-LoRA trained part (SigLIP / projections in the real runs)
+
+    initial = loading.build_params_like_expo_ft(train_cfg)                       # the initial model of the run: base weights + LoRA init (the checkpoint has no LoRA)
+    graphdef, state = nnx.split(initial)
+    del initial
+    trainable = state.filter(trainable_filter)
+    rng = np.random.default_rng(0)
+    trained_flat = {k: np.asarray(v, dtype=np.float32) + 0.05 * rng.standard_normal(v.shape).astype(np.float32)          # float32, as in the training
+                    for k, v in tu.flatten_dict(trainable.to_pure_dict(), sep="/").items()}
+    assert any("lora" in k for k in trained_flat) and any("action_out_proj" in k for k in trained_flat)
+    trained = jax.tree.map(lambda x: x, trainable)
+    trained.replace_by_pure_dict(tu.unflatten_dict(trained_flat, sep="/"))
+
+    # route 1: our checkpoint (trainable only, bfloat16), laid over the initial model by sft.load_checkpoint
+    sft.save_checkpoint(tmp_path / "ckpt", trained, {"step": 4000})
+    holder = types.SimpleNamespace(graphdef=graphdef, state=state)
+    holder.set_state = lambda new: setattr(holder, "state", new)
+    sft.load_checkpoint(holder, tmp_path / "ckpt")
+    ours = tu.flatten_dict(nnx.state(nnx.merge(holder.graphdef, holder.state)).to_pure_dict(), sep="/")
+
+    # route 2: expo-ft's params/: every weight (the frozen ones as they are, the trained ones in float32), restored by the weight loader
+    full = {k: np.asarray(v) for k, v in ours.items()}                           # views of the same buffers
+    full.update(trained_flat)
+    monkeypatch.setattr(weight_loaders._model, "restore_params", lambda *a, **k: tu.unflatten_dict(full, sep="/"))     # noqa: SLF001
+    theirs = tu.flatten_dict(nnx.state(loading.build_params_like_expo_ft(train_cfg)).to_pure_dict(), sep="/")
+
+    assert set(ours) == set(theirs)
+    initial_values = tu.flatten_dict(state.to_pure_dict(), sep="/")
+    differ_from_initial = set()
+    for k in ours:
+        a, b = np.asarray(ours[k]), np.asarray(theirs[k])
+        assert a.dtype == b.dtype == jnp.bfloat16, k
+        assert np.array_equal(a.astype(np.float32), b.astype(np.float32)), f"{k} differs between the two routes"
+        if not np.array_equal(a.astype(np.float32), np.asarray(initial_values[k]).astype(np.float32)):
+            differ_from_initial.add(k)
+    assert differ_from_initial == set(trained_flat)                              # the trained tensors, and only those, are not the initial ones
+
+
 def test_the_lora_only_init_gives_the_same_values_as_a_full_model_init(tiny):
     """What makes the low-memory loading legitimate: the LoRA tensors are those of `create(key)`, as in expo-ft."""
     train_cfg, _, _ = tiny

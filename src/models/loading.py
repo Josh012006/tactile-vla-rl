@@ -55,7 +55,7 @@ def init_lora_params(model_cfg, key):
 
 def build_params_like_expo_ft(train_cfg, seed: int = 0):
     """The model of `train_cfg.model`, weights from `train_cfg.weight_loader`, LoRA parameters (absent from the checkpoint) from the
-    model's own init, every parameter in bfloat16 (as the strict path does). Returns the nnx model.
+    model's own init (and ONLY those: a checkpoint that holds LoRA tensors, e.g. an expo-ft SFT step, keeps its trained ones), every parameter in bfloat16 (as the strict path does). Returns the nnx model.
 
     Memory: expo-ft passes the whole float32 checkpoint through a jit that also creates the model (`pi05_init_train_state.init`), which
     puts ~13 GB of float32 on the device on top of the bfloat16 result (measured: JAX peak 19.4 GB for a model of 6.5 GB). Here the
@@ -79,7 +79,8 @@ def build_params_like_expo_ft(train_cfg, seed: int = 0):
     flat = {k: v for k, v in tu.flatten_dict(loaded).items() if not isinstance(v, jax.ShapeDtypeStruct)}
     flat = {k: np.asarray(v).astype(jnp.bfloat16) for k, v in flat.items()}                      # on the host, before any transfer
     flat = jax.device_put(flat)
-    flat.update(init_lora_params(model_cfg, key))
+    for k, v in init_lora_params(model_cfg, key).items():                  # only the LoRA tensors the checkpoint LACKS: one that it holds (an expo-ft SFT step) is the trained one
+        flat.setdefault(k, v)
 
     state.replace_by_pure_dict(tu.unflatten_dict(flat))
     return nnx.merge(graphdef, state)

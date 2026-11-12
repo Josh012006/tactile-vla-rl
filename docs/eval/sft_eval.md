@@ -25,6 +25,7 @@ have: a resume at the episode, a deterministic policy for both models, several c
 | videos | `--save-videos` (every episode) or, by default, the first `--video-episodes` 5 episodes of each batch: `<output-dir>/videos/<step>/ep_<i>_seed<seed>.mp4`, `--video-dir <dir>` |
 | environments per server (part of the protocol, default 100) | `--envs-per-server K` |
 | most rows of one model call (part of the protocol; default 64 for pi0.5 / pi0, 16 for pi0-FAST: both the largest that fit, section 6.1) | `--model-batch M` |
+| an expo-ft SFT checkpoint through this evaluation (to compare the two SFT pipelines on the same weights, section 6.3) | `python -m scripts.adopt_expo_ft_checkpoint --checkpoint <expo-ft step folder> --name <name>`, then `--run _adopted_<name> --steps 0` |
 | the plot only (no GPU, no server) | `python -m scripts.eval_sft --run <run> --plot-only --title "Teleop demos, pi0.5"` |
 | where the files go | `--output-dir` (data, default `<run>/eval`), `--curve-dir` (curve.json / png / pdf, default the output folder) |
 | what a worker costs, and whether more workers pay off (measured: they do not on one L40S) | `sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 --episodes 4` (section 6) |
@@ -232,6 +233,19 @@ episodes to the full 150 steps and takes longer (pi0.5 at most about 8 min). Two
 - The 41 % of pi0.5 matches expo-ft's evaluation of the same kind of start (teleop SFT, step 1200: 40 %, 100 fixed episodes); nothing in the log points to a fault (every episode ended, the failures all ran the full 150 steps, the successes are spread from 34 to 144 steps).
 - pi0-FAST: about 4.5 % of the chunks could not be decoded in this run (the warnings the tokenizer printed, 109 distinct ones out of 2 427 chunks; the exact count is the `decode` of every episode, and the batch line now prints it). Those chunks are the model's zero action, executed for 5 steps.
   The tokenizer's warnings (printed twice per chunk) are now dropped: the failures are counted instead.
+
+### 6.3 Is a difference with expo-ft the training or the evaluation? (first run: 0 %, a loading bug, fixed; to rerun)
+
+Expo-ft's curve for the teleop pi0.5 SFT (its step 1200, 40 %, was the RL start) reaches **66 % at step 4000**; this repository's teleop SFT (same demos, same noisy normalisation statistics, same optimiser settings: constant 2.5e-5, no EMA, batch 64, LoRA 16/32) gives **41 % at step 4000**
+(12 Nov. 2026, 100 episodes, SE 4.9; the difference is about 3.7 standard errors of a difference). Evaluating expo-ft's own step-4000 weights **with this evaluation** separates the two explanations:
+`python -m scripts.adopt_expo_ft_checkpoint --checkpoint <expo-ft run>/sft/expo_pi05_droid_lora_finetune_sft_joint_state_delta/<dataset>/4000 --name expoft_teleop_4000`, then
+`sbatch --time=00:45:00 jobs/job_eval_sft.sh --run _adopted_expoft_teleop_4000 --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir runs/sft/probing/_cost_expoft_teleop_4000` (its only checkpoint is called step 0).
+About 66 %: the evaluation agrees with expo-ft's and the difference is in the training here (data pipeline, prompt, augmentation, ...). About 41 %: this evaluation differs from expo-ft's (rendering of 100 environments, replan, sampling, ...). Between the two: look at both.
+
+**First run (12 Nov. 2026, job 11676974): 0 / 100, neither answer.** Cause, found the same day: `build_params_like_expo_ft` (src/models/loading.py) initialised EVERY LoRA tensor of the model and put the result over the loaded weights. That is right for a checkpoint without LoRA tensors (pi05_droid_jointpos: the LoRA starts from openpi's init), but an expo-ft SFT step holds the TRAINED lora_a / lora_b: they were replaced by random ones, which gave the base model plus a perturbation (about 0 % on FORGE). Fixed: only the LoRA tensors the checkpoint lacks are initialised
+(`tests/test_loading.py::test_a_checkpoint_that_holds_lora_tensors_keeps_them`). Nothing else is affected: for a checkpoint without LoRA tensors the result is identical to before, so every other evaluation of this repository (step 0, the SFT checkpoints, which load their trained parameters on top of the initial model) stands. The test was run again (job 11677187, 12 Nov. 2026): **60 / 100** (SE 4.9, Wilson 50-69) for expo-ft's step-4000 teleop weights, against 66 % on expo-ft's own curve: the evaluation reproduces expo-ft's. The remaining gap to this repository's own SFT (41 % at step 4000, same evaluation, same starting states) is a difference of the TRAINING, or training noise (one seed per configuration, not measured): the full curve of the run decides (a plateau of about 40 % between steps 2600 and 4000 against expo-ft's 60-70 % points to a systematic difference; scattered points, to noise).
+
+Two ways of rebuilding a fine-tuned model, which must agree: ours (the run's initial model, with the TRAINABLE parameters of `<ckpt>/params` laid over it, `sft.load_checkpoint`) and expo-ft's (a `params/` with every weight, through `build_params_like_expo_ft`). `tests/test_loading.py::test_our_checkpoint_route_and_expo_fts_full_params_route_give_the_same_weights` builds a tiny pi0.5, trains (perturbs) its LoRA and a non-LoRA part in float32, saves them with `save_checkpoint` and as a full `params/`, loads both ways and requires identical bfloat16 weights, leaf by leaf (it fails with the first version of `build_params_like_expo_ft`).
 
 ## 7. What is written
 
