@@ -6,9 +6,9 @@
 #   sbatch jobs/job_sft_full.sh pi05 --resume <run name>               # continue a run that stopped: its own settings are used, none is added here
 # Everything after the model name goes to `python -m scripts.sft` (see its --help). Added here, except with --resume: `--full`, a micro-batch of 8 and
 # a resume snapshot every 1000 steps (40 GB each, see configs/algo/sft.yaml). A later --set wins.
-# Memory (docs/algos/sft.md, section 4): the first probes ran out of memory at the first step, XLA's allocator being capped at 75 % of the card. Now the cap is 0.95, the
-# gradients are accumulated in place and the policy's own copy of the weights is freed: about 67 GiB for pi0.5 (38 state + 2 x 12.5 gradients + activations), 60 GiB for
-# pi0-FAST, of 76 allowed. NOT measured since: a failure writes an `error` line to metrics.jsonl, and `first_step` / `train` carry memory_mib (in_use, peak, limit).
+# Memory (docs/algos/sft.md, section 4): the allocator cap is 0.95 of the card (the first probes died at 75 %). Measured on the A100 with the first corrections: pi0-FAST trains (peak 72 GiB
+# of 75, 7.25 s per step, 4001 steps about 8 h) but its evaluation ran out of memory, and pi0.5 ran out at its first step: about two gradient trees stayed allocated after each step. They are now
+# dropped (NOT measured since: `in_use` after a step should be about the state, 34 GiB for pi0-FAST, 39 for pi0.5). A failure writes an `error` line to metrics.jsonl.
 # Before the first run, on the login node (fetch_models, wandb login): see jobs/job_sft_lora.sh.
 # Output: runs/sft/<run name>/ (a checkpoint holds the whole model in bfloat16: ~6.7 GB for pi0.5, 5.8 GB for pi0-FAST; a save every 200 steps is 20
 # of them: raise save_interval with `--set save_interval=1000` when the disk matters; resume/ holds one snapshot, 35-40 GB, 70-80 GB while it is swapped),

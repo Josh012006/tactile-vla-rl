@@ -489,13 +489,14 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         loss_of = lambda t: policy.loss(nnx.State.merge(t, frozen), rng, observation, actions, train=True)     # noqa: E731
         return jax.value_and_grad(loss_of)(trainable)
 
-    # The buffers are donated: with full fine-tuning a float32 copy of the gradients is 12.5 GiB (pi0.5), and without donation the accumulated sum, the new
-    # gradients and their sum all exist at once (3 copies: the first probe of the full runs died at its first step, 44 GiB of state + 37.5 GiB).
-    @functools.partial(jax.jit, donate_argnums=(0, 1))
+    # Memory of a full fine-tuning (a float32 copy of the gradients is 12.5 GiB for pi0.5): the running sum is donated (it becomes the new sum), and the python
+    # names of the gradient trees are dropped as soon as they are used (`del grads`, `total = None` below). The probes showed about TWO gradient copies still allocated
+    # after each step, and the evaluation then ran out of memory; only the trees that are donated AND reused in an output are given back, so nothing else is donated.
+    @functools.partial(jax.jit, donate_argnums=(0,))
     def add_fn(total, grads):
         return jax.tree.map(jnp.add, total, grads)
 
-    @functools.partial(jax.jit, donate_argnums=(0, 1, 2))
+    @functools.partial(jax.jit, donate_argnums=(0, 1))
     def apply_fn(trainable, opt_state, grads):
         grads = jax.tree.map(lambda g: g / n_micro, grads)
         updates, opt_state = tx.update(grads, opt_state, trainable)
@@ -569,8 +570,10 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         for i, (observation, actions) in enumerate(micros):
             loss, grads = grad_fn(trainable, frozen, jax.random.fold_in(base_key, step * n_micro + i), observation, actions)
             total = grads if total is None else add_fn(total, grads)
+            del grads
             step_losses.append(loss)
         trainable, opt_state, grad_norm = apply_fn(trainable, opt_state, total)
+        total = None                                        # not kept through the evaluation, the checkpoint and the snapshot
         losses.append(jnp.mean(jnp.stack(step_losses)))
         grad_norms.append(grad_norm)
         if step == start_step + 1:

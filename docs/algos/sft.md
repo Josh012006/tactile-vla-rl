@@ -85,14 +85,28 @@ The experiments use LoRA, as in expo-ft. Measured by 30-step probes (2026-11-11,
   **10 h on an L40S** (the LoRA job asks for 14 h, which holds for both). expo-ft's SFT, same model, batch, steps and learning rate, ran on an A100 (`job_forge_sft.sh`) in about 6 h: the same order, so the loop
   is not slower than openpi's. The two models cost the same per step. A larger micro-batch would not speed it up much, 16 stays. After 30 steps the loss went 1.56 -> 0.14 (pi0.5, flow matching) and
   1.22 -> 0.41 (pi0-FAST, tokens), and pi0.5's own chunks were 0.048 rad (mean over the 7 joints) from the demonstration's, 16/16 valid. 20 checkpoints of 698 MiB (the size at step 30) are 14 GB.
-- **The three failures** (the `error` line of `metrics.jsonl` gives them) are the same cause: **XLA's allocator stops at 75 % of the card** (`XLA_PYTHON_CLIENT_MEM_FRACTION`, 0.75 by default even with
-  `PREALLOCATE=false`), and the jobs did not raise it. The two full runs failed with 57.3 GiB (pi0.5) and 59.1 GiB (pi0-FAST) in use, at the first step, which is 75 % of 80 GB once the next buffer is added.
-  The pi0-FAST LoRA run failed in its **evaluation** (allocation of 7.8 GB = the float32 logits of 16 rows x 474 tokens x 257,152 words) with 24 GiB peak: with the cap it also lacked room.
-- **Corrections.** (1) The jobs set `XLA_PYTHON_CLIENT_MEM_FRACTION` (0.9 LoRA, 0.95 full). (2) The evaluation loss is computed 4 rows at a time (`EVAL_MICRO_BATCH`): 2 GB of logits. (3) The accumulation donates its
-  buffers (two float32 copies of the gradients, not three). (4) The policy's own bfloat16 copy of the trainable weights is freed once the float32 copy exists (6.2 GiB for pi0.5 full). (5) `memory_mib` now has the
-  allocator's `limit`. Full fine-tuning of pi0.5 then needs about 38 GiB (state) + 2 x 12.5 GiB (gradients) + a few GiB of activations, **about 67 GiB**, against 0.95 x 80 GB = 76 GiB; pi0-FAST about 60 GiB.
-  **Not measured since**: the full runs have not run with these corrections. A smaller `micro_batch_size` would not have helped: it only changes the activations.
-  If pi0.5 still does not fit: keep the first AdamW moment in bfloat16 (6 GiB less; a change of the optimiser, so a decision).
+- **Round 1 failures** were the allocator's 75 % cap (`XLA_PYTHON_CLIENT_MEM_FRACTION`, 0.75 by default even with `PREALLOCATE=false`): the full runs died at 57 to 59 GiB in use (75 % of 80 GB with the next buffer),
+  and the jobs now raise it (0.9 LoRA, 0.95 full; `memory_mib.limit` shows it: 77,094 MiB on the A100, 41,138 on the L40S).
+
+Round 3 (after the cap was raised, the policy's copy of the weights freed and the evaluation loss cut in 4-row passes), 30 steps, batch 64:
+
+| | pi0-FAST LoRA, L40S | pi0-FAST full, A100 | pi0.5 full, A100 |
+|---|---|---|---|
+| state once loaded | 10.1 GiB | 33.2 GiB | 38.1 GiB (was 44.2: the policy's copy is gone) |
+| after a step (`in_use`) | 14.0 GiB | **55.7 GiB** | |
+| peak | 21.8 GiB (of 40) | **72.1 GiB** (of 75.3) | out of memory at the first step: 75.2 GiB in use of 75.3 |
+| seconds per step | 8.0, then 8.9 | 6.5, then 7.25 (4001 steps: about 8 h) | |
+| first step | 86 s | 77 s | |
+| outcome | complete: evaluation 66 s (16 chunks decoded, 0 failures, 11 tokens each), checkpoint 662 MiB, snapshot 4.0 GiB in 8.7 s | **out of memory in the evaluation** (a 7.8 GB allocation) | |
+
+- **What the numbers say.** The state is what it should be (`in_use` at the start = float32 parameters + the two AdamW moments, 12 bytes per parameter). But **after each step about two gradient trees (2 x 10.9 GiB for pi0-FAST full, 2 x 1.6 GiB
+  for LoRA) stay allocated**, in every probe, old code and new. Within a step the peak is then the state + those 2 + the new gradients (3 trees) + activations: 72 GiB for pi0-FAST full, and for pi0.5 (12.5 GiB per tree) more than the
+  75 GiB the card allows; and the evaluation of pi0-FAST starts from 55 GiB, so its 7.8 GB allocation (the logits of the 16-row prefill of `plan`, 16 x 948 tokens x 257,152 words in bfloat16) fails. The two failures are not a node
+  problem: `in_use` is the process's own allocation and reached its own limit (76,964 of 77,094 MiB for pi0.5), which another job could not cause.
+- **Correction (hypothesis, to be checked by the next probe).** The gradient trees were kept alive by their python names (`grads` of the last micro-batch, `total` after the update: a donated buffer that no output reuses is not given back).
+  They are now dropped as soon as they are used (`del grads`, `total = None`) and only the buffers that an output reuses are donated. **If it is right, `in_use` after a step falls back to about the state** (about 34 GiB for pi0-FAST full,
+  39 GiB for pi0.5, 10 GiB for LoRA), the peak of pi0.5 full is about 39 + 2 x 12.5 + activations = 70 GiB of 75, and the evaluation fits. If `in_use` stays high the cause is elsewhere and the next lever is the first AdamW moment in bfloat16 (6 GiB less; a
+  change of the optimiser, so a decision). Not measured since the correction.
 
 ## 5. What a run writes
 
