@@ -76,6 +76,8 @@ def test_the_run_trains_the_trainable_part_only_and_writes_its_log(run):
     assert all(line["save_s"] >= 0 and line["size_mib"] > 0 for line in lines if line["event"] == "checkpoint")
     assert lines[0]["trainable_m"] > 0 and lines[0]["frozen_m"] > 100                       # SigLIP (frozen) is the bulk of this tiny model
     after = {k: np.asarray(v) for k, v in tu.flatten_dict(policy.state.to_pure_dict()).items()}
+    assert all(x.is_deleted() for x in jax.tree.leaves(trainable0))        # the policy's own copy of the trainable weights was freed during the run (memory)
+    assert not any(x.is_deleted() for x in jax.tree.leaves(policy.state))   # and the policy ends with valid weights
     frozen_keys = {k for k in tu.flatten_dict(frozen0.to_pure_dict())}
     trainable_keys = {k for k in tu.flatten_dict(trainable0.to_pure_dict())}
     assert frozen_keys and trainable_keys and not frozen_keys & trainable_keys

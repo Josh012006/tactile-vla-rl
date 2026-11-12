@@ -11,7 +11,7 @@
 #   python -m scripts.sft --model <model> --dry-run                         # reads the demonstrations, loads no model
 #   wandb login                                                             # once; the job logs to wandb (--set wandb_mode=offline | disabled to change)
 # Output: runs/sft/<run name>/ (metrics.jsonl, wandb_id.txt, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out
-# Time: 4000 steps are about 10 h on an L40S (8.7 s per step, measured), hence 14 h. Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (5.5 GB with LoRA) and stops cleanly.
+# Time: 4000 steps are about 10 h on an L40S (8.7 s per step, measured) and 7 h on an A100 (6.0 s; `sbatch --gres=gpu:a100l:1 jobs/job_sft_lora.sh ...`), hence 14 h. Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (4.5 GiB with LoRA) and stops cleanly.
 #
 #SBATCH --job-name=sft_lora
 #SBATCH --ntasks=1
@@ -33,6 +33,7 @@ nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
 
 source .venv/bin/activate
 export XLA_PYTHON_CLIENT_PREALLOCATE=false      # allocate what is used (the default preallocates 75 % of the GPU and hides the real size)
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9      # XLA's allocator stops at 75 % of the card by default (a failure 'RESOURCE_EXHAUSTED' with 15 of 46 GB in use): 0.9, as openpi recommends
 export WANDB__SERVICE_WAIT=300                  # wandb's helper process can be slow to start on a loaded node
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1  # everything was fetched by scripts.fetch_models: a missing file fails instead of downloading
 # Run in the background and forward the SIGTERM Slurm sends 5 minutes before the time limit (--signal=B:TERM@300): the SFT then writes a resume

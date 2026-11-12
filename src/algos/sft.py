@@ -26,7 +26,7 @@ Resume. The snapshot holds what the checkpoints do not: the trainable parameters
 state (AdamW moments, step counts) and the step. Everything else is a function of the step: the batch of step s comes from a permutation seeded by
 `seed` (the batches already done are skipped without being prepared) and its noise from `fold_in(key(seed), s)`, so a resumed run sees what an
 uninterrupted one would have seen (up to the non-determinism of the GPU kernels). A snapshot is about 3 times the float32 trainable parameters
-(5.5 GB with LoRA, 35 to 40 GB for full fine-tuning), written aside and swapped in once complete, so the disk holds two of them for a moment.
+(4.5 GiB measured with pi0.5 LoRA, 35 to 40 GB estimated for full fine-tuning), written aside and swapped in once complete, so the disk holds two of them for a moment.
 What may change on resume: `steps` (only when the learning rate is constant, lr = lr_end: a decay depends on the total), the intervals, `eval_samples`,
 `prefetch`. Everything that shapes the optimisation or the data may not (FROZEN_ON_RESUME), nor the model YAML.
 
@@ -333,6 +333,11 @@ def micro_batches(policy, dataset: DemoSet, rows: np.ndarray, micro: int) -> Lis
     return out
 
 
+# Rows per forward pass of the evaluation loss: the logits of pi0-FAST are (rows, tokens, 257152 words) in float32, 7.8 GB for 16 rows of 474 tokens, which
+# ran out of memory on an L40S (the first probe). The evaluation is a few rows, so small passes cost nothing.
+EVAL_MICRO_BATCH = 4
+
+
 # -- evaluation inside the run -------------------------------------------------------------------------------------------------------
 def evaluate_chunks(policy, dataset: DemoSet, rows: np.ndarray) -> dict:
     """The policy's own chunks (`plan`, sampled as at deployment) against the demonstration's, for `rows` of `dataset`: mean absolute error
@@ -355,7 +360,7 @@ def evaluate_chunks(policy, dataset: DemoSet, rows: np.ndarray) -> dict:
 
 
 def device_memory_mib() -> Optional[dict]:
-    """JAX's view of the first device's memory (None on the CPU)."""
+    """JAX's view of the first device's memory in MiB (None on the CPU): bytes in use, peak, and the limit of its allocator."""
     import jax
     try:
         stats = jax.local_devices()[0].memory_stats()
@@ -363,7 +368,8 @@ def device_memory_mib() -> Optional[dict]:
         return None
     if not stats:
         return None
-    return {"in_use": round(stats.get("bytes_in_use", 0) / 2**20), "peak": round(stats.get("peak_bytes_in_use", 0) / 2**20)}
+    return {"in_use": round(stats.get("bytes_in_use", 0) / 2**20), "peak": round(stats.get("peak_bytes_in_use", 0) / 2**20),
+            "limit": round(stats.get("bytes_limit", 0) / 2**20)}                  # the allocator's cap: XLA_PYTHON_CLIENT_MEM_FRACTION of the card
 
 
 class MetricsLog:
@@ -439,8 +445,16 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
     import jax.numpy as jnp
     import optax
 
-    trainable, frozen = split_state(policy)
-    trainable = tree_cast(trainable, jnp.float32, copy=True)
+    original, frozen = split_state(policy)
+    trainable = tree_cast(original, jnp.float32, copy=True)
+    # The policy's own (bfloat16) copy of the trainable weights is not needed any more: 6 GiB for pi0.5 fine-tuned in full, on a card where every GiB counts.
+    # `policy.state` is stale until the first evaluation (or the end of the run) sets the state again.
+    jax.block_until_ready(trainable)                        # the copy is done before its source goes
+    kept = {id(x) for x in jax.tree.leaves(frozen)}
+    for leaf in jax.tree.leaves(original):
+        if id(leaf) not in kept and hasattr(leaf, "delete"):
+            leaf.delete()
+    del original
     n_trainable = sum(int(np.prod(x.shape)) for x in jax.tree.leaves(trainable))
     n_frozen = sum(int(np.prod(x.shape)) for x in jax.tree.leaves(frozen))
     tx, schedule = make_optimizer(cfg)
@@ -490,7 +504,7 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         result: Dict[str, Any] = {}
         for name, rows in eval_rows.items():
             losses = [float(eval_loss_fn(state, jax.random.key(cfg.seed + 2), *b))
-                      for b in micro_batches(policy, sets[name], rows, min(cfg.micro_batch_size, len(rows)))]
+                      for b in micro_batches(policy, sets[name], rows, min(cfg.micro_batch_size, len(rows), EVAL_MICRO_BATCH))]
             result[name] = {"loss": float(np.mean(losses)), **evaluate_chunks(policy, sets[name], rows)}
         log.write(event="eval", step=step, eval_s=round(time.monotonic() - t_eval, 1), **result)
 

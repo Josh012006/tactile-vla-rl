@@ -6,9 +6,9 @@
 #   sbatch jobs/job_sft_full.sh pi05 --resume <run name>               # continue a run that stopped: its own settings are used, none is added here
 # Everything after the model name goes to `python -m scripts.sft` (see its --help). Added here, except with --resume: `--full`, a micro-batch of 8 and
 # a resume snapshot every 1000 steps (40 GB each, see configs/algo/sft.yaml). A later --set wins.
-# Memory: the loaded state is 44.2 GiB (pi0.5) / 38.5 GiB (pi0-FAST), a float32 copy of the gradients 12.5 / 10.9 GiB, and the accumulation holds two of them
-# (estimate 72 GiB / 63 GiB of 79.6 with the activations, NOT measured since the buffers are donated: the first probe of the full runs died at its first step). A failure
-# writes an `error` line to metrics.jsonl. The `first_step` and `train` lines carry the real numbers (memory_mib). A smaller micro-batch does not save much.
+# Memory (docs/algos/sft.md, section 4): the first probes ran out of memory at the first step, XLA's allocator being capped at 75 % of the card. Now the cap is 0.95, the
+# gradients are accumulated in place and the policy's own copy of the weights is freed: about 67 GiB for pi0.5 (38 state + 2 x 12.5 gradients + activations), 60 GiB for
+# pi0-FAST, of 76 allowed. NOT measured since: a failure writes an `error` line to metrics.jsonl, and `first_step` / `train` carry memory_mib (in_use, peak, limit).
 # Before the first run, on the login node (fetch_models, wandb login): see jobs/job_sft_lora.sh.
 # Output: runs/sft/<run name>/ (a checkpoint holds the whole model in bfloat16: ~6.7 GB for pi0.5, 5.8 GB for pi0-FAST; a save every 200 steps is 20
 # of them: raise save_interval with `--set save_interval=1000` when the disk matters; resume/ holds one snapshot, 35-40 GB, 70-80 GB while it is swapped),
@@ -35,6 +35,7 @@ nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
 
 source .venv/bin/activate
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95      # XLA's allocator stops at 75 % of the card by default: the first full probes failed at 58-60 GiB of 80. 0.95: the memory is the constraint here
 export WANDB__SERVICE_WAIT=300                  # wandb's helper process can be slow to start on a loaded node
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 DEFAULTS="--full --set micro_batch_size=8 --set resume_interval=1000"
