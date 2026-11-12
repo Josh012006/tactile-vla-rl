@@ -103,10 +103,26 @@ Round 3 (after the cap was raised, the policy's copy of the weights freed and th
   for LoRA) stay allocated**, in every probe, old code and new. Within a step the peak is then the state + those 2 + the new gradients (3 trees) + activations: 72 GiB for pi0-FAST full, and for pi0.5 (12.5 GiB per tree) more than the
   75 GiB the card allows; and the evaluation of pi0-FAST starts from 55 GiB, so its 7.8 GB allocation (the logits of the 16-row prefill of `plan`, 16 x 948 tokens x 257,152 words in bfloat16) fails. The two failures are not a node
   problem: `in_use` is the process's own allocation and reached its own limit (76,964 of 77,094 MiB for pi0.5), which another job could not cause.
-- **Correction (hypothesis, to be checked by the next probe).** The gradient trees were kept alive by their python names (`grads` of the last micro-batch, `total` after the update: a donated buffer that no output reuses is not given back).
-  They are now dropped as soon as they are used (`del grads`, `total = None`) and only the buffers that an output reuses are donated. **If it is right, `in_use` after a step falls back to about the state** (about 34 GiB for pi0-FAST full,
-  39 GiB for pi0.5, 10 GiB for LoRA), the peak of pi0.5 full is about 39 + 2 x 12.5 + activations = 70 GiB of 75, and the evaluation fits. If `in_use` stays high the cause is elsewhere and the next lever is the first AdamW moment in bfloat16 (6 GiB less; a
-  change of the optimiser, so a decision). Not measured since the correction.
+- **Correction.** The gradient trees were kept alive by their python names (`grads` of the last micro-batch, `total` after the update: a donated buffer that no output reuses is not given back). They are now
+  dropped as soon as they are used (`del grads`, `total = None`) and only the buffers that an output reuses are donated.
+
+Round 4 (with that correction), 30 steps, batch 64, A100:
+
+| | pi0-FAST full | pi0.5 full |
+|---|---|---|
+| state once loaded | 33.2 GiB | 38.1 GiB |
+| after a step (`in_use`) | **33.7 GiB** (was 55.7) | 38.6 GiB |
+| peak | **61.0 GiB** of 75.3 (was 72.1) | 67.5 GiB (first step) |
+| first step | 77 s | 97 s |
+| seconds per step | 6.5, then 7.3: 4001 steps about **8.1 h**, about 8.6 h with the evaluations, saves and snapshots | not seen |
+| evaluation (16 chunks) | 56 s; 0 decoding failures, 11.4 tokens per chunk | not seen |
+| checkpoint (the whole model, bfloat16) | 4.3 GiB, 17 s | not seen |
+| resume snapshot | **29.0 GiB, 77 s** | not seen |
+| `param_norm` | 1819.6, moving in the 3rd decimal | |
+
+- The hypothesis is confirmed: `in_use` after a step is the state again, the peak fell by 11 GiB and the evaluation fits. pi0.5 full has room too (peak 67.5 of 75.3 GiB at its first step); its later lines were not in the file received.
+- Disk of a full run (pi0-FAST): 20 checkpoints of 4.3 GiB = 87 GiB, plus the snapshot, 29 GiB and twice that while it is swapped (58 GiB): `--set save_interval=1000` when the disk matters. A snapshot written in 77 s is far inside the 10 minutes
+  between the SIGTERM and the end of the job.
 
 ## 5. What a run writes
 
@@ -150,7 +166,7 @@ has to be repeated: the model, its overrides, the demonstrations and the setting
 
 What is written, in `<run>/resume/` (the checkpoints cannot do it: they are bfloat16 and hold no optimiser state):
 
-- the trainable parameters **in float32**, the whole **AdamW state** and the step. Size: about 3 times the float32 trainable parameters, i.e. 4.5 GiB measured with LoRA (15 s to write) and 35 to 40 GB estimated for
+- the trainable parameters **in float32**, the whole **AdamW state** and the step. Size: about 3 times the float32 trainable parameters, i.e. 4.5 GiB measured with LoRA (15 s to write) and 29 GiB measured for pi0-FAST full fine-tuning (77 s to write; pi0.5 about 33 GiB).
   full fine-tuning. It is written aside and swapped in when complete, so the disk holds twice that for a moment, and a crash while writing leaves the previous snapshot usable;
 - when: every `resume_interval` steps (500 in the YAML, 1000 in the full job; 0 = never), at the last step (so that `--set steps=<larger>` can train further), and **when the job gets a
   SIGTERM**.
@@ -204,8 +220,6 @@ that does not fit, the resume (2 + 2 steps end in the state of 4 in one go, the 
 **Not checked, to be seen in the first runs:**
 
 - wandb ONLINE from a compute node (the tests are offline or fake);
-- full fine-tuning on the A100 after the memory corrections (section 4): memory and seconds per step, and its resume snapshot (35 to 40 GB estimated, 15 s for 4.5 GiB with LoRA: minutes, to be seen against the 10-minute warning); the evaluation of pi0-FAST, which ran out of memory in the probe;
+- pi0.5 full fine-tuning beyond its first step (memory fits: peak 67.5 of 75.3 GiB): seconds per step, evaluation, checkpoint and snapshot (pi0-FAST full is measured, section 4);
 - pi0-FAST training on real FAST tokens: the path through the real tokenizer (the tests use a stub) has only been exercised by `scripts/fast_tokens.py` for the lengths;
 - that the 4000 steps and the learning rate give a policy as good as expo-ft's SFT (success rate in the env: this is the RL's evaluation, not this file's);
-- the time to write a resume snapshot and its size on the real models (`resume_snapshot` lines: `save_s`, `size_mib`), above all the 35 to 40 GB of the full fine-tuning against the 10 minutes of the SIGTERM warning;
-- the bfloat16 checkpoint of a full fine-tuning (about 6.7 GB for pi0.5) against the disk: 20 of them for `save_interval: 200`.

@@ -26,7 +26,7 @@ Resume. The snapshot holds what the checkpoints do not: the trainable parameters
 state (AdamW moments, step counts) and the step. Everything else is a function of the step: the batch of step s comes from a permutation seeded by
 `seed` (the batches already done are skipped without being prepared) and its noise from `fold_in(key(seed), s)`, so a resumed run sees what an
 uninterrupted one would have seen (up to the non-determinism of the GPU kernels). A snapshot is about 3 times the float32 trainable parameters
-(4.5 GiB measured with pi0.5 LoRA, 35 to 40 GB estimated for full fine-tuning), written aside and swapped in once complete, so the disk holds two of them for a moment.
+(4.5 GiB measured with pi0.5 LoRA, 29 GiB measured with pi0-FAST full fine-tuning, written in 77 s), written aside and swapped in once complete, so the disk holds two of them for a moment.
 What may change on resume: `steps` (only when the learning rate is constant, lr = lr_end: a decay depends on the total), the intervals, `eval_samples`,
 `prefetch`. Everything that shapes the optimisation or the data may not (FROZEN_ON_RESUME), nor the model YAML.
 

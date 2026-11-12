@@ -5,15 +5,13 @@
 #   sbatch jobs/job_sft_full.sh pi0_fast --demos demos/isaaclab/ForgePegInsert_Robotiq_teleop --run-name pi0fast_teleop_full
 #   sbatch jobs/job_sft_full.sh pi05 --resume <run name>               # continue a run that stopped: its own settings are used, none is added here
 # Everything after the model name goes to `python -m scripts.sft` (see its --help). Added here, except with --resume: `--full`, a micro-batch of 8 and
-# a resume snapshot every 1000 steps (40 GB each, see configs/algo/sft.yaml). A later --set wins.
-# Memory (docs/algos/sft.md, section 4): the allocator cap is 0.95 of the card (the first probes died at 75 %). Measured on the A100 with the first corrections: pi0-FAST trains (peak 72 GiB
-# of 75, 7.25 s per step, 4001 steps about 8 h) but its evaluation ran out of memory, and pi0.5 ran out at its first step: about two gradient trees stayed allocated after each step. They are now
-# dropped (NOT measured since: `in_use` after a step should be about the state, 34 GiB for pi0-FAST, 39 for pi0.5). A failure writes an `error` line to metrics.jsonl.
+# a resume snapshot every 1000 steps (29 GiB each for pi0-FAST, see configs/algo/sft.yaml). A later --set wins.
+# Measured on the A100 (docs/algos/sft.md, section 4), pi0-FAST: peak 61 GiB of the 75 the allocator may use (0.95 of the card; the default 0.75 killed the first probes), 7.3 s per step,
+# so 4001 steps are about 8.1 h (about 8.6 h with the evaluations, saves and snapshots, hence the 12 h below). pi0.5: first step measured only (peak 67.5 GiB, it fits). A failure writes an `error` line.
 # Before the first run, on the login node (fetch_models, wandb login): see jobs/job_sft_lora.sh.
-# Output: runs/sft/<run name>/ (a checkpoint holds the whole model in bfloat16: ~6.7 GB for pi0.5, 5.8 GB for pi0-FAST; a save every 200 steps is 20
-# of them: raise save_interval with `--set save_interval=1000` when the disk matters; resume/ holds one snapshot, 35-40 GB, 70-80 GB while it is swapped),
-# logs/slurm/sft_full_<jobid>.out
-# Time limit: 10 minutes before it, Slurm sends a SIGTERM; the run writes its snapshot after the current step and stops cleanly (writing 40 GB takes minutes).
+# Output: runs/sft/<run name>/ (a checkpoint holds the whole model in bfloat16: 4.3 GiB for pi0-FAST, written in 17 s; a save every 200 steps is 20 of them, 87 GiB: raise
+# save_interval with `--set save_interval=1000` when the disk matters; resume/ holds one snapshot, 29 GiB for pi0-FAST, twice that while it is swapped), logs/slurm/sft_full_<jobid>.out
+# Time limit: 10 minutes before it, Slurm sends a SIGTERM; the run writes its snapshot after the current step (77 s measured for pi0-FAST) and stops cleanly.
 #
 #SBATCH --job-name=sft_full
 #SBATCH --ntasks=1
@@ -24,6 +22,7 @@
 #SBATCH --signal=B:TERM@600
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --no-requeue
+#SBATCH --mail-user=josue.mongan@mila.quebec
 
 set -u
 MODEL="${1:-}"
