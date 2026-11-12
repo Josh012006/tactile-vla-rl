@@ -88,7 +88,7 @@ class SFTConfig:
     seed: int = 0
     wandb_mode: str = "online"                              # "online", "offline" or "disabled" (src/algos/tracking.py)
     wandb_project: str = "tactile-vla-rl"
-    output_root: str = "runs/sft"
+    output_root: str = "runs/sft/probing"
 
     def __post_init__(self):
         if not self.demos:

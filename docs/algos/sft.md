@@ -1,261 +1,299 @@
-# SFT: supervised fine-tuning on the FORGE demonstrations
+"""src/algos/demos.py: the demonstrations as training samples (numpy only), and the dry run of scripts/sft.py."""
+import numpy as np
+import pytest
 
-`python -m scripts.sft --model <pi05 | pi0_fast>` fine-tunes a VLA on the demonstrations of `docs/demos.md` (the same as expo-ft's). The result is a
-checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/algos/demos.py` (data), `src/algos/sft.py` (loop, checkpoints), `src/algos/tracking.py` (wandb),
-`scripts/sft.py` (command line). **Status: tested on a tiny model on the CPU; probed 30 steps on the cluster, complete for pi0.5 LoRA (both cards), pi0-FAST LoRA, pi0-FAST full and pi0.5 full, wandb online included (section 4)** (section 9).
+from src.algos import demos
+from src.envs import protocol as P
 
-## 1. Commands
+PROMPT = "Insert the peg into the socket."
 
-| What | Command |
-|---|---|
-| look at the data, load no model (login node, no GPU) | `python -m scripts.sft --model pi0_fast --dry-run` |
-| LoRA on an L40S | `sbatch jobs/job_sft_lora.sh pi0_fast` |
-| LoRA, other demonstrations | `sbatch jobs/job_sft_lora.sh pi05 --demos demos/isaaclab/ForgePegInsert_Robotiq_noisy --run-name pi05_noisy` |
-| full fine-tuning on an A100 80 GB | `sbatch jobs/job_sft_full.sh pi05` |
-| another rank | `sbatch jobs/job_sft_lora.sh pi05 --model-set vlm.lora_rank=8 --model-set action_head.lora_rank=16` |
-| shorter run, smaller micro-batch | `sbatch jobs/job_sft_lora.sh pi05 --set steps=1500 --set micro_batch_size=8` |
-| continue a run that stopped | `sbatch jobs/job_sft_lora.sh pi05 --resume <run name>` (or `job_sft_full.sh`): see section 6 |
-| follow a run | wandb (project `tactile-vla-rl`, section 5b), or `tail -f runs/sft/<run>/metrics.jsonl` (or `logs/slurm/sft_lora_<jobid>.out`) |
-| no wandb, or wandb offline | `--set wandb_mode=disabled`, `--set wandb_mode=offline` (then `wandb sync runs/sft/<run>/wandb/offline-run-*`) |
 
-`--set KEY=VALUE` overrides a key of `configs/algo/sft.yaml`; `--model-set KEY=VALUE` a key of the model YAML (`<component>.<key>`, the
-probe's `--set`); `--full` is `use_lora: false` in every component the model has. Before the first job, on the login node:
-`uv sync --group vla`, `python -m scripts.fetch_models`, `wandb login` (once), then the `--dry-run`. The jobs run offline for the models (`HF_HUB_OFFLINE`); wandb needs the network of the node (section 5b).
+def write_demo(folder, name, steps, *, seed=0, tactile=True, prompt=PROMPT, extra=None):
+    """A complete .npz with the arrays of scripts/demos/collect_waypoint_demos.py (images of 224 x 224, constant per step so rows are recognisable)."""
+    rng = np.random.default_rng(seed)
+    arrays = {
+        "exterior_image": np.broadcast_to(np.arange(steps, dtype=np.uint8)[:, None, None, None], (steps, 224, 224, 3)).copy(),
+        "wrist_image": np.zeros((steps, 224, 224, 3), np.uint8),
+        "joint_position": rng.normal(size=(steps, 7)).astype(np.float32),
+        "gripper_position": np.full((steps, 1), 0.9, np.float32),
+        "ft_force": rng.normal(size=(steps, 3)).astype(np.float32),
+        "peg_socket_offset": rng.normal(size=(steps, 3)).astype(np.float32),
+        "actions": np.concatenate([np.arange(steps, dtype=np.float32)[:, None] * np.ones((1, 7), np.float32), np.ones((steps, 1), np.float32)], axis=1),
+        "seed": np.array(seed),
+    }
+    if prompt is not None:
+        arrays["prompt"] = np.array(prompt)
+    if tactile:
+        arrays["tactile"] = rng.random((steps, 2, 7, 4)).astype(np.float32)
+        arrays["gripper_effort"] = rng.random(steps).astype(np.float32)
+    arrays.update(extra or {})
+    folder.mkdir(parents=True, exist_ok=True)
+    np.savez(folder / name, **arrays)
 
-## 2. The data
 
-The `ep_*.npz` files are read directly (`src/algos/demos.py`), not the LeRobot copy the expo-ft SFT used: the same episodes and frames, but the
-`.npz` files also hold the touch signals (`tactile`, `ft_force`, `gripper_effort`, `peg_socket_offset`), which are served under the env's
-observation keys, and the `lerobot` package is not needed. `fail_seed*.npz` are never used.
+@pytest.fixture
+def folder(tmp_path):
+    f = tmp_path / "ForgePegInsert_Robotiq_scripted"
+    for i, steps in enumerate((6, 5, 8, 4)):
+        write_demo(f, f"ep_{i:04d}_seed{i}.npz", steps, seed=i)
+    write_demo(f, "fail_seed9_120000.npz", 7, seed=9)               # a failed episode: never used
+    return f
 
-A sample is a step `t` of an episode:
 
-- **observation**: what the env sent at `t`, before the action: the two images (224 × 224), the 7 joints, the gripper position, the prompt of the file;
-- **target**: the chunk `actions[t : t + horizon]` in the env's action space (absolute joint targets + gripper command), the last action repeated past the end of
-  the episode (as openpi's LeRobot loader does, and as `scripts/fast_tokens.py` measured).
+def test_a_sample_is_an_env_observation_and_the_next_actions_with_the_last_one_repeated(folder):
+    train, val = demos.load_demos([str(folder)], horizon=4, default_prompt=PROMPT)
+    assert val is None and len(train) == 6 + 5 + 8 + 4 and train.describe()["episodes"] == 4          # fail_seed*.npz left out
+    obs, prompts, target = train.sample([0, 4, 5])                      # steps 0, 4 and 5 of the first episode (6 steps)
+    assert set(obs) >= {P.EXTERIOR_IMAGE, P.WRIST_IMAGE, P.JOINT_POSITION, P.GRIPPER_POSITION}
+    assert obs[P.EXTERIOR_IMAGE].shape == (3, 224, 224, 3) and obs[P.EXTERIOR_IMAGE].dtype == np.uint8
+    assert obs[P.GRIPPER_POSITION].shape == (3, 1) and obs[P.JOINT_POSITION].shape == (3, 7)
+    assert [int(obs[P.EXTERIOR_IMAGE][i, 0, 0, 0]) for i in range(3)] == [0, 4, 5]                    # the right frames
+    assert target.shape == (3, 4, 8) and prompts == [PROMPT] * 3
+    assert target[0, :, 0].tolist() == [0, 1, 2, 3]                                                   # actions[0:4]
+    assert target[1, :, 0].tolist() == [4, 5, 5, 5]                                                   # the end of the episode: the last action repeated
+    assert target[2, :, 0].tolist() == [5, 5, 5, 5]
 
-`horizon` is the model's `action_horizon`: **16 for pi0.5, 10 for pi0-FAST**. The conversion to the model's own space is not done here: `OpenPIPolicy.training_batch`
-applies `output_semantics` (offsets from the chunk-start state for pi0.5, absolute targets for pi0-FAST) and then the same input transforms as at inference
-(DROID normalisation with the **checkpoint's** statistics, resize, prompt and, for pi0-FAST, FAST tokens). The SFT therefore trains on exactly what the model
-receives when it acts. Folders and options: `demos`, `num_demos` (first N of each folder), `val_episodes` (last V of each folder held out). Several folders can
-be trained on together; episodes with and without taxels are not mixed.
 
-Normalisation statistics computed on the demonstrations (`scripts/demos/compute_demo_norm_stats.py`) are **not** used by this SFT: it keeps the checkpoint's, as the
-policy does at inference and as the token lengths of `docs/models/pi0_fast.md` were measured. (expo-ft had a variant with demo statistics; it would have to be
-added to the policy's transforms, not only to the SFT.)
+def test_a_chunk_never_crosses_into_the_next_episode(folder):
+    train, _ = demos.load_demos([str(folder)], horizon=6, default_prompt=PROMPT)
+    rows = np.arange(len(train))
+    chunk_rows = train.chunk_rows(rows)
+    assert (train.episode_of[chunk_rows] == train.episode_of[rows][:, None]).all()
 
-## 3. What is trained, and how
 
-- **Trainable parameters** = `policy.trainable_filter` = openpi's freeze filter for the model YAML, unchanged: with LoRA, the LoRA matrices **and** SigLIP (and,
-  for pi0.5, the action projections); without it, everything. Parameter counts are in `docs/models/pi05.md` and `pi0_fast.md` (e.g. pi0-FAST with LoRA: 442.7 M trainable
-  out of 2951.2 M).
-- **Precision**: the trainable parameters are float32 during the run and the frozen ones bfloat16, as openpi's own `train.py` does. Checkpoints and evaluation use
-  bfloat16, what the policy runs with.
-- **Loss**: `policy.loss`, i.e. openpi's `compute_loss` with `train=True` (image augmentation included): flow matching for pi0.5, next-token cross entropy for pi0-FAST.
-- **Optimiser**: openpi's AdamW (b1 0.9, b2 0.95, weight decay 1e-10, gradient clipping at 1.0), no EMA, learning rate 2.5e-5 constant (no warmup; `lr`, `lr_end`,
-  `warmup_steps` give a cosine decay if wanted). These are the values of expo-ft's pi0.5 SFT.
-- **Batches**: 64 rows per update, 4000 updates, a new random permutation of the steps every epoch. With 50 demonstrations (about 2 400 steps for scripted) that is about 100
-  epochs; expo-ft started the RL from the step 1200 to 1400 checkpoints, which is why a checkpoint is saved every 200 steps.
-- **Memory knob**: `micro_batch_size` cuts the batch into passes whose gradients are summed (`batch_size` must be a multiple). It sets the memory, not the optimisation. One
-  device, no FSDP.
-- A thread prepares the next batches (`prefetch`): openpi's transforms (resize, tokens, FAST) are CPU work.
+def test_the_touch_signals_are_served_under_the_envs_keys(folder):
+    train, _ = demos.load_demos([str(folder)], horizon=4, default_prompt=PROMPT)
+    obs, _, _ = train.sample([0, 1])
+    assert obs[P.TACTILE].shape == (2, 2, 7, 4) and obs[P.GRIPPER_EFFORT].shape == (2,)
+    assert obs[P.FT_FORCE].shape == (2, 3) and obs[P.PEG_SOCKET_OFFSET].shape == (2, 3)
 
-## 4. LoRA or full fine-tuning
 
-| | LoRA (default) | Full |
-|---|---|---|
-| model YAML | `use_lora: true`, ranks 16 (VLM) and 32 (action expert) | `--full`: `use_lora: false` in every component |
-| job | `jobs/job_sft_lora.sh`, L40S 46 GB, 64 GB of RAM | `jobs/job_sft_full.sh`, A100 80 GB (`a100l`), 128 GB of RAM, micro-batch 8 |
-| starting point | the checkpoint plus a small random LoRA (openpi's normal(0.01) init for both matrices: not exactly the base function) | exactly the checkpoint |
-| checkpoint | the trainable part only | the whole model |
+def test_num_demos_and_held_out_episodes_are_taken_per_folder(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    for i in range(5):
+        write_demo(a, f"ep_{i:04d}_seed{i}.npz", 4, seed=i)
+        write_demo(b, f"ep_{i:04d}_seed{i}.npz", 3, seed=10 + i)
+    train, val = demos.load_demos([str(a), str(b)], horizon=2, num_demos=4, val_episodes=1, default_prompt=PROMPT)
+    assert [ep.source for ep in train.episodes] == [f"a/ep_{i:04d}_seed{i}.npz" for i in range(3)] + [f"b/ep_{i:04d}_seed{i}.npz" for i in range(3)]
+    assert [ep.source for ep in val.episodes] == ["a/ep_0003_seed3.npz", "b/ep_0003_seed3.npz"]       # the last of the first 4 of each folder
+    with pytest.raises(ValueError, match="no training episode"):
+        demos.load_demos([str(a)], horizon=2, num_demos=2, val_episodes=2, default_prompt=PROMPT)
 
-The experiments use LoRA, as in expo-ft. Measured by 30-step probes (2026-11-11, batch 64, with one checkpoint, one evaluation and, in the second round, one resume snapshot at the end):
 
-| LoRA, micro-batch 16 | pi0.5, L40S | pi0.5, A100 80 GB | pi0-FAST, L40S |
-|---|---|---|---|
-| memory once loaded | 11.8 GiB | 11.9 GiB | 10.6 GiB |
-| memory peak (training) | 23.9 GiB (of 45) | 23.7 GiB | 22.0 GiB |
-| first step (compilation) | 108 s | 114 s | 87 s |
-| seconds per step | 7.7, then 8.7 | 5.4, then 6.0 | 7.9, then 8.9 |
-| evaluation (16 chunks) | 34 s (first, compilation included) | 35 s | out of memory (below) |
-| checkpoint | 698 MiB, 2.5 s | 698 MiB, 3.4 s | |
-| resume snapshot | | 4.5 GiB, 15 s | |
+def test_the_prompt_comes_from_the_file_then_from_the_default(tmp_path):
+    f = tmp_path / "d"
+    write_demo(f, "ep_0000_seed0.npz", 4, prompt="put it in")
+    write_demo(f, "ep_0001_seed1.npz", 4, prompt=None)
+    train, _ = demos.load_demos([str(f)], horizon=2, default_prompt="default")
+    _, prompts, _ = train.sample([0, 4])
+    assert prompts == ["put it in", "default"]
 
-- **Time.** The step is compute-bound and the card decides: **6.0 s on the A100, 8.7 s on the L40S** (x1.44). 4000 steps are about **7 h on an A100** (6.7 h of steps, a quarter of an hour of evaluations and saves) and
-  **10 h on an L40S** (the LoRA job asks for 14 h, which holds for both). expo-ft's SFT, same model, batch, steps and learning rate, ran on an A100 (`job_forge_sft.sh`) in about 6 h: the same order, so the loop
-  is not slower than openpi's. The two models cost the same per step. A larger micro-batch would not speed it up much, 16 stays. After 30 steps the loss went 1.56 -> 0.14 (pi0.5, flow matching) and
-  1.22 -> 0.41 (pi0-FAST, tokens), and pi0.5's own chunks were 0.048 rad (mean over the 7 joints) from the demonstration's, 16/16 valid. 20 checkpoints of 698 MiB (the size at step 30) are 14 GB.
-- **Round 1 failures** were the allocator's 75 % cap (`XLA_PYTHON_CLIENT_MEM_FRACTION`, 0.75 by default even with `PREALLOCATE=false`): the full runs died at 57 to 59 GiB in use (75 % of 80 GB with the next buffer),
-  and the jobs now raise it (0.9 LoRA, 0.95 full; `memory_mib.limit` shows it: 77,094 MiB on the A100, 41,138 on the L40S).
 
-Round 3 (after the cap was raised, the policy's copy of the weights freed and the evaluation loss cut in 4-row passes), 30 steps, batch 64:
+def test_a_broken_demonstration_is_refused_with_its_name(tmp_path):
+    f = tmp_path / "d"
+    write_demo(f, "ep_0000_seed0.npz", 4, extra={"actions": np.zeros((4, 7), np.float32)})
+    with pytest.raises(ValueError, match=r"ep_0000_seed0\.npz.*actions"):
+        demos.load_demos([str(f)], horizon=2, default_prompt=PROMPT)
+    g = tmp_path / "e"
+    write_demo(g, "ep_0000_seed0.npz", 4, extra={"joint_position": np.full((4, 7), np.nan, np.float32)})
+    with pytest.raises(ValueError, match="non-finite"):
+        demos.load_demos([str(g)], horizon=2, default_prompt=PROMPT)
+    with pytest.raises(FileNotFoundError):
+        demos.load_demos([str(tmp_path / "empty")], horizon=2, default_prompt=PROMPT)
 
-| | pi0-FAST LoRA, L40S | pi0-FAST full, A100 | pi0.5 full, A100 |
-|---|---|---|---|
-| state once loaded | 10.1 GiB | 33.2 GiB | 38.1 GiB (was 44.2: the policy's copy is gone) |
-| after a step (`in_use`) | 14.0 GiB | **55.7 GiB** | |
-| peak | 21.8 GiB (of 40) | **72.1 GiB** (of 75.3) | out of memory at the first step: 75.2 GiB in use of 75.3 |
-| seconds per step | 8.0, then 8.9 | 6.5, then 7.25 (4001 steps: about 8 h) | |
-| first step | 86 s | 77 s | |
-| outcome | complete: evaluation 66 s (16 chunks decoded, 0 failures, 11 tokens each), checkpoint 662 MiB, snapshot 4.0 GiB in 8.7 s | **out of memory in the evaluation** (a 7.8 GB allocation) | |
 
-- **What the numbers say.** The state is what it should be (`in_use` at the start = float32 parameters + the two AdamW moments, 12 bytes per parameter). But **after each step about two gradient trees (2 x 10.9 GiB for pi0-FAST full, 2 x 1.6 GiB
-  for LoRA) stay allocated**, in every probe, old code and new. Within a step the peak is then the state + those 2 + the new gradients (3 trees) + activations: 72 GiB for pi0-FAST full, and for pi0.5 (12.5 GiB per tree) more than the
-  75 GiB the card allows; and the evaluation of pi0-FAST starts from 55 GiB, so its 7.8 GB allocation (the logits of the 16-row prefill of `plan`, 16 x 948 tokens x 257,152 words in bfloat16) fails. The two failures are not a node
-  problem: `in_use` is the process's own allocation and reached its own limit (76,964 of 77,094 MiB for pi0.5), which another job could not cause.
-- **Correction.** The gradient trees were kept alive by their python names (`grads` of the last micro-batch, `total` after the update: a donated buffer that no output reuses is not given back). They are now
-  dropped as soon as they are used (`del grads`, `total = None`) and only the buffers that an output reuses are donated.
+def test_demonstrations_with_and_without_taxels_are_not_mixed(tmp_path):
+    f = tmp_path / "d"
+    write_demo(f, "ep_0000_seed0.npz", 4, tactile=True)
+    write_demo(f, "ep_0001_seed1.npz", 4, tactile=False)
+    with pytest.raises(ValueError, match="with and without taxels"):
+        demos.load_demos([str(f)], horizon=2, default_prompt=PROMPT)
 
-Round 4 (with that correction), 30 steps, batch 64, A100:
 
-| | pi0-FAST full | pi0.5 full (round 5, below) |
-|---|---|---|
-| state once loaded | 33.2 GiB | 38.1 GiB |
-| after a step (`in_use`) | **33.7 GiB** (was 55.7) | **38.6 GiB** |
-| peak | **61.0 GiB** of 75.3 (was 72.1) | **68.1 GiB** of 75.3 (69,733 MiB of 77,094 at step 30) |
-| first step | 77 s | 99 s |
-| seconds per step | 6.5, then 7.3: 4001 steps about **8.1 h**, about 8.6 h with the evaluations, saves and snapshots | 6.4, then 7.1 to 7.3: 4000 steps about **8.0 h**, about **8.7 h** with the evaluations, saves and snapshots |
-| evaluation (16 chunks) | 56 s; 0 decoding failures, 11.4 tokens per chunk | 54 s (compilation included); 16/16 valid chunks |
-| checkpoint (the whole model, bfloat16) | 4.3 GiB, 17 s | 4.9 GiB (5,008 MiB), 41 s |
-| resume snapshot | **29.0 GiB, 77 s** | **29.0 GiB (29,722 MiB), 160 s** |
-| `param_norm` | 1819.6, moving in the 3rd decimal | 1832.708 -> 1832.721, moving in the 3rd decimal |
+def test_the_dry_run_reads_the_demonstrations_and_loads_no_model(folder, capsys):
+    from scripts import sft as cli
+    assert cli.main(["--model", "pi0_fast", "--demos", str(folder), "--dry-run", "--set", "steps=20", "--set", "batch_size=4",
+                     "--set", "micro_batch_size=2", "--set", "val_episodes=1"]) == 0
+    out = capsys.readouterr().out
+    assert "pi0_fast" in out and "horizon 10" in out and "lora" in out and "held-out set: 1 episodes" in out
+    cli.main(["--model", "pi05", "--full", "--demos", str(folder), "--dry-run"])
+    out = capsys.readouterr().out
+    assert "horizon 16" in out and out.splitlines()[0].endswith(", full")
 
-- The hypothesis is confirmed: `in_use` after a step is the state again, the peak fell by 11 GiB and the evaluation fits.
-- Round 5 (pi0.5 full, A100, job 11665035, 30 steps, batch 64, micro-batch 8) is complete: the first attempt of round 4 had been **preempted by Slurm** after 3 minutes (state PREEMPTED, no error in the log: not a failure of the code).
-  Loss 1.08 (step 10) -> 0.070 -> 0.014 (step 30); gradient norm 11.7 -> 3.4 -> 1.1; at step 30 the evaluation (16 training rows) gives a loss of 0.0054, 0.0105 rad mean error over the 7 joints of the whole chunk (0.0084 at its first step) and 0.043 on the gripper.
-  The peak grows slowly (69,086 -> 69,733 MiB over 30 steps) and leaves 7.3 GiB under the allocator's limit.
-- Disk of a full run: pi0-FAST 20 checkpoints of 4.3 GiB = 87 GiB; pi0.5 20 of 4.9 GiB = 98 GiB. Plus the snapshot (29 GiB, twice that while it is swapped): `--set save_interval=1000` when the disk matters.
-  The snapshot sizes were measured after 30 steps, when the AdamW moments compress well; the upper bound is 3 times the float32 parameters (37.5 GiB for pi0.5, 32.6 GiB for pi0-FAST), and a longer run may write more
-  and take longer than the 160 s measured (pi0.5). Even at twice that it is far inside the 10 minutes between the SIGTERM and the end of the job. It is longer than the roughly 30 seconds Slurm leaves after a
-  **preemption**: a preempted full run only has the periodic snapshots (every 1000 steps, about 2 h), not a final one.
 
-## 4b. Where the GPU waits (the cluster's under-use notice, 2026-11-12)
+def test_full_turns_lora_off_in_every_component_the_model_has():
+    from scripts import sft as cli
+    from src.models.interface import apply_overrides, load_model_cfg
+    from src.models.settings import parse_model_settings
+    for name, components in (("pi05", ("vlm", "action_head")), ("pi0_fast", ("vlm",))):
+        cfg = load_model_cfg(name)
+        full = apply_overrides(cfg, cli.model_overrides(cfg, True, {}))
+        settings = parse_model_settings(full)
+        assert not settings.any_lora, name
+        assert set(cli.model_overrides(cfg, True, {})) == {f"{c}.use_lora" for c in components}
+    cfg = load_model_cfg("pi05")
+    assert cli.model_overrides(cfg, True, {"vlm.use_lora": True})["vlm.use_lora"] is True               # --model-set wins over --full
+    assert cli.parse_assignments(["a=1", "b.c=false", "d=x"]) == {"a": 1, "b.c": False, "d": "x"}
 
-The 30-step probes are short, and most of their time is not training: the pi0.5 full probe (job 11665035) ran 605 s on the card; the nvidia-smi report gave 37 % utilisation, and the 210 s of its 30 steps
-are 35 % of that. Compilation (99 s), the evaluation (54 s), the checkpoint (41 s) and the snapshot (160 s) keep the card nearly idle, and so does the loading of the model before them. A notice about such a job
-measures the probe, not the real run. For a real run of 4000 steps, from the measured times:
 
-| | steps | compilation | evaluations | checkpoints | snapshots | card busy |
-|---|---|---|---|---|---|---|
-| pi0.5 LoRA, L40S | 9.7 h | 108 s, once | 20, at most 34 s each | 20 x 2.5 s | 8 x 15 s | about 97 % |
-| pi0.5 full, A100 | 8.0 h | 99 s, once | 20, at most 54 s each | 20 x 41 s | 4 x 160 s | about 91 % |
+def test_the_sft_config_refuses_what_it_does_not_know_and_what_does_not_fit():
+    from src.algos import sft
+    cfg = sft.load_config()
+    assert cfg.batch_size % cfg.micro_batch_size == 0 and cfg.demos and cfg.lr == cfg.lr_end
+    with pytest.raises(ValueError, match="unknown SFT keys"):
+        sft.load_config(overrides={"learning_rate": 1})
+    with pytest.raises(ValueError, match="multiple of micro_batch_size"):
+        sft.load_config(overrides={"batch_size": 10, "micro_batch_size": 4})
+    assert sft.load_config(overrides={"demos": "demos/x"}).demos == ("demos/x",)
 
-During the steps the card is busy: the batches are prepared by a thread ahead of the step (`prefetch`), JAX dispatches without waiting (the first host synchronisation is at the first `log_interval`), and a rough count of
-the work (about 770 tokens per sample through the 2 B Gemma and the three SigLIP image slots, the forward done twice because of openpi's remat, once more backwards) gives about half of the A100's bf16 peak during a full step, which is
-what XLA reaches on such models. So the loop has no large margin left; what remains is below.
 
-Done (no change to what is trained or computed):
+def test_row_batches_cover_the_data_without_repeating_inside_an_epoch_and_drop_the_tail():
+    from src.algos.sft import row_batches
+    batches = list(row_batches(n_rows=10, batch_size=4, steps=5, seed=0))
+    assert len(batches) == 5 and all(len(b) == 4 and len(set(b)) == 4 for b in batches)
+    assert len(set(batches[0]) | set(batches[1])) == 8                       # an epoch: 2 batches of 4 out of 10 (the 2 left over are dropped)
+    assert [b.tolist() for b in row_batches(10, 4, 5, seed=0)] == [b.tolist() for b in batches]             # reproducible
+    with pytest.raises(ValueError, match="batch_size"):
+        list(row_batches(3, 4, 1, 0))
 
-- **Compilation cache.** `scripts/sft.py` turns on JAX's persistent cache (`~/.cache/jax`, openpi's and expo-ft's folder; `JAX_COMPILATION_CACHE_DIR` to choose another): the 100 s of the first step, and of the first
-  evaluation, are paid once per program and per type of card, not at every launch and every resume.
-- **Measures, to see the real run instead of guessing.** Each `train` line has `batch_prep_s` (seconds the feed thread takes to prepare one batch; the GPU waits for data only if it exceeds `step_s`), and both SFT jobs write
-  the card's utilisation and memory every 30 s to `logs/slurm/gpu_<jobid>.csv`.
 
-Looked at and not done:
+def test_prefetch_gives_the_items_in_order_and_raises_the_error_of_its_thread():
+    from src.algos.sft import prefetch
+    assert list(prefetch(iter(range(7)), depth=2)) == list(range(7))
 
-- **Saving in the background.** Checkpoints and snapshots stop the card for about 25 minutes of a full run (3 % of its time) and for 3 minutes of a LoRA run (0.5 %): the experiments are LoRA, and the change (host copies of 29 GiB,
-  a thread to join at every stop) is not worth that.
-- **Two runs on one card.** The steps are compute-bound: two LoRA runs on one A100 would each take about twice as long.
-- **A larger micro-batch.** The noise and the augmentation of a micro-batch come from `fold_in(key, step * n_micro + i)`: a different number of micro-batches draws other numbers, so the run would no longer be the same one.
-- **Remat policy (needs a decision).** openpi's Gemma recomputes the forward pass in the backward (`nothing_saveable`, hard-coded in `gemma.py` of the pinned fork). Keeping activations would remove that
-  recomputation, a quarter to a third of the step if the memory allows it (LoRA on an A100 has room, the L40S probably not), with the same maths. It means changing the pinned openpi commit (checked by `tests/test_models_pin.py`),
-  so it is not done; a probe on the cluster would tell the gain and the memory.
+    def broken():
+        yield 1
+        raise RuntimeError("tokenizer exploded")
 
-## 5. What a run writes
+    got = []
+    with pytest.raises(RuntimeError, match="tokenizer exploded"):
+        for item in prefetch(broken(), depth=2):
+            got.append(item)
+    assert got == [1]
 
-`runs/sft/<model>_<demos>_<lora|full>_<date>/` (`runs` is a link to the scratch disk; `--run-name` chooses the folder):
 
-| File | Content |
-|---|---|
-| `config.json` | the algorithm settings and the model YAML as run (overrides included); read back by `--resume` |
-| `metrics.jsonl` | one JSON line per event: `start` (parameter counts, sizes), `error` (the exception and the memory, when the run fails), `first_step` (seconds including the compilation, memory), `train` (every `log_interval`: loss, gradient norm, `param_norm`, learning rate, seconds per step, `batch_prep_s`, memory), `eval` (with `eval_s`), `checkpoint` (with `save_s` and `size_mib`), `resume_snapshot` (same), `resume`, `done` or `stopped`; every line has `elapsed_s` |
-| `wandb_id.txt` | the id of the wandb run of this training (section 5b); `--resume` reads it to continue the same run |
-| `wandb/` | the local files of wandb (the whole run when it is offline) |
-| `resume/` | the training state to resume from (section 6), replaced at each snapshot |
-| `checkpoints/<step>/` | `params` (orbax: the trainable parameters in bfloat16) and `meta.json` (step, model, overrides, demos, settings) |
-| `summary.json` | final loss, checkpoint list, duration |
+def test_row_batches_can_skip_the_batches_a_resumed_run_already_did():
+    from src.algos.sft import row_batches
+    full = [b.tolist() for b in row_batches(10, 4, 7, seed=3)]
+    assert [b.tolist() for b in row_batches(10, 4, 7, seed=3, skip=3)] == full[3:]
+    assert list(row_batches(10, 4, 7, seed=3, skip=7)) == []
 
-`eval` lines (every `eval_interval`) hold, for a **fixed** set of `eval_samples` rows, once on training rows and once on held-out rows when `val_episodes > 0`: the loss, and
-the policy's own chunks (`plan`, sampled as at deployment) against the demonstration's: mean absolute error of the 7 joints over the chunk, of the first step, of the
-gripper. For pi0-FAST the line also has `decode`: the failures of the FAST decoder, the chunks without an end token and the token-string lengths
-(`OpenPIPolicy.decode_stats`); a chunk that could not be decoded is counted and left out of the errors. This is not the success rate, which only the env gives.
 
-## 5b. wandb
+def test_resume_refuses_what_changes_the_optimisation_and_accepts_the_rest():
+    from src.algos import sft
+    saved = dataclass_dict(sft.load_config(overrides={"steps": 100}))
+    sft.check_resume_compatible(saved, sft.load_config(overrides={"steps": 200, "log_interval": 7, "eval_samples": 32, "resume_interval": 9}))     # constant lr: longer is fine
+    for key, value in (("lr", 1e-4), ("batch_size", 32), ("seed", 5), ("demos", ["demos/other"]), ("b2", 0.99)):
+        with pytest.raises(ValueError, match=f"{key}: "):
+            sft.check_resume_compatible(saved, sft.load_config(overrides={"steps": 100, key: value, **({"lr_end": 1e-4} if key == "lr" else {})}))
+    decaying = dataclass_dict(sft.load_config(overrides={"steps": 100, "lr_end": 1e-6}))
+    with pytest.raises(ValueError, match="the schedule depends on the total"):
+        sft.check_resume_compatible(decaying, sft.load_config(overrides={"steps": 200, "lr_end": 1e-6}))
+    with pytest.raises(ValueError, match="model YAML"):
+        sft.check_resume_compatible(saved, sft.load_config(overrides={"steps": 100}), {"vlm": {"use_lora": True}}, {"vlm": {"use_lora": False}})
 
-The events of `metrics.jsonl` are also logged to Weights & Biases (`src/algos/tracking.py`, settings `wandb_mode` and `wandb_project` in `configs/algo/sft.yaml`; the run is named after its folder),
-as expo-ft did (openpi's `loss`, `grad_norm`, `param_norm`, and the `camera_views` of 5 training rows at the start of a fresh run): `train/*` (loss, `grad_norm`, `param_norm`, `lr`, `step_s`, `memory_mib/*`), `eval/<train|val>/*` (loss, own-chunk errors, FAST decoding statistics), `checkpoint/*`, `snapshot/*` (`save_s`, `size_mib`),
-`perf/*` (the first step, compilation included), and the parameter counts and final numbers in the run's summary. The config (settings + model YAML) is the run's config in wandb. Tags: the model and `lora`/`full`.
 
-- **Resume = the same wandb run.** The id is written to `<run>/wandb_id.txt` when the training starts; `--resume` calls `wandb.init(id=..., resume="must")`, in the project the run was created in
-  (a `wandb_project` given on resume is ignored), so the curves continue in the same run instead of a new one. `resume="must"` is expo-ft's choice: an error rather than a new run if that one does not exist.
-  A run that was never logged to wandb (no `wandb_id.txt`) gets a new wandb run on resume, with a warning.
-- **x axis: `step`.** Every point carries our `step` and `define_metric("*", step_metric="step")` makes it the axis, because wandb's own step may only increase and a resumed run goes back to its snapshot
-  (the points that go back would be dropped). Consequence: steps that were run twice (a crash, then a resume from an older snapshot) are on the curve twice. After a SIGTERM stop the snapshot is
-  at the stop step, so there is no overlap.
-- **Never stops a run.** `wandb_mode: online` (default) that cannot start (no login, no network on the node) falls back to **offline** with a warning, in the same run id: `wandb sync runs/sft/<run>/wandb/offline-run-*`
-  uploads it later. A package that is not installed, or an error while logging, leaves `metrics.jsonl` alone (it stays the reference). `disabled` logs nothing and does not import wandb.
-- Not known yet: whether the compute nodes reach wandb's servers (the first job says it: `[wandb] ... falling back to offline` in the log if not). `wandb login` on the login node is needed once.
+def dataclass_dict(cfg):
+    import dataclasses
+    import json
+    return json.loads(json.dumps(dataclasses.asdict(cfg)))            # as config.json stores it (tuples become lists)
 
-## 6. Resume
 
-A run can be continued after a time limit, a failure or a preemption: `--resume <run name>` (a folder name under `runs/sft`, or a path), with the same job script. Nothing else
-has to be repeated: the model, its overrides, the demonstrations and the settings come from the run's `config.json`, so only `--set` is accepted next to `--resume`.
+def test_find_resume_takes_the_newest_complete_snapshot_after_a_crash_while_swapping(tmp_path):
+    import json
+    from src.algos import sft
+    assert sft.find_resume(tmp_path) is None
+    for name, step, complete in (("resume.old", 10, True), ("resume.new", 20, False), ("resume", 5, True)):
+        (tmp_path / name).mkdir()
+        if complete:
+            (tmp_path / name / "meta.json").write_text(json.dumps({"step": step}))
+    directory, meta = sft.find_resume(tmp_path)
+    assert directory.name == "resume.old" and meta["step"] == 10               # an unfinished `.new` (no meta.json) is ignored
 
-What is written, in `<run>/resume/` (the checkpoints cannot do it: they are bfloat16 and hold no optimiser state):
 
-- the trainable parameters **in float32**, the whole **AdamW state** and the step. Size: about 3 times the float32 trainable parameters, i.e. 4.5 GiB measured with LoRA (15 s to write) and 29 GiB measured for pi0-FAST full fine-tuning (77 s to write) and 29 GiB measured for pi0.5 full fine-tuning (160 s to write).
-  full fine-tuning. It is written aside and swapped in when complete, so the disk holds twice that for a moment, and a crash while writing leaves the previous snapshot usable;
-- when: every `resume_interval` steps (500 in the YAML, 1000 in the full job; 0 = never), at the last step (so that `--set steps=<larger>` can train further), and **when the job gets a
-  SIGTERM**.
+def test_resume_on_the_command_line_takes_everything_from_the_run(tmp_path, folder):
+    import json
+    from scripts import sft as cli
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    (run / "config.json").write_text(json.dumps({"model_name": "pi05", "mode": "lora", "model_cfg": {}, "sft": {"demos": [str(folder)]}}))
+    assert cli.find_run_dir(str(run), "runs/sft") == run.resolve()
+    with pytest.raises(SystemExit, match="no run"):
+        cli.find_run_dir("nope", "runs/sft")
+    for extra in (["--full"], ["--demos", str(folder)], ["--model-set", "vlm.lora_rank=8"]):
+        with pytest.raises(SystemExit, match="only --set is accepted"):
+            cli.main(["--model", "pi05", "--resume", str(run), *extra])
+    with pytest.raises(SystemExit, match="not of pi0_fast"):
+        cli.main(["--model", "pi0_fast", "--resume", str(run)])
 
-**The SIGTERM**: Slurm sends it before the time limit (`--signal=B:TERM@300` in the LoRA job, `@600` in the full one, whose snapshot is longer to write); the job scripts forward it to Python,
-which finishes its current step, writes a snapshot and ends with the status 0 and the line `stopped at step N ... continue with ...`. A job killed without warning (node failure, `scancel -9`)
-resumes from the last periodic snapshot.
 
-**Same run**: the batch of step `s` comes from a permutation seeded by `seed` (the batches already done are skipped, not prepared) and its noise from `fold_in(key(seed), s)`, so a resumed run
-trains on what an uninterrupted one would have. The test compares the parameters and the optimiser state after 4 steps done in one go and as 2 + 2: equal (up to 1e-5, the GPU kernels are not
-bit-reproducible). The checkpoints of the steps already passed are kept; those the resume repeats are written again.
+def test_the_compilation_cache_is_openpis_unless_the_environment_names_another(monkeypatch):
+    import jax
+    from scripts import sft as cli
+    seen = {}
+    monkeypatch.setattr(jax.config, "update", lambda name, value: seen.update({name: value}))
+    monkeypatch.setenv("JAX_COMPILATION_CACHE_DIR", "/somewhere/else")
+    cli.enable_compilation_cache()
+    assert seen == {}                                                                                       # jax reads that variable itself
+    monkeypatch.delenv("JAX_COMPILATION_CACHE_DIR")
+    cli.enable_compilation_cache()
+    assert seen["jax_compilation_cache_dir"].endswith("/.cache/jax")
 
-**What may change on resume**: `steps` (only with a constant learning rate, `lr = lr_end`, since a decay depends on the total), `log_interval`, `eval_interval`, `eval_samples`, `save_interval`,
-`resume_interval`, `prefetch`. **What may not**: the demonstrations (and their number), `batch_size`, `micro_batch_size`, the optimiser and its rates, `seed`, the prompt, the model YAML: the
-resume is refused with the list of the differences. A run already at its `steps` is refused too (raise `steps`).
 
-Not done: restoring on several devices, and a resume after the demonstrations changed (the number of training rows must be the same).
+# -- experiment files (configs/experiment/sft/) ---------------------------------------------------------------------------------------------
+def experiment_files():
+    from pathlib import Path
+    return sorted((Path(__file__).resolve().parents[1] / "configs" / "experiment" / "sft").glob("*.yaml"))
 
-## 7. Loading a checkpoint
 
-```python
-from src.models import load_model
-from src.algos.sft import load_checkpoint
-policy = load_model("pi05")                       # the SAME model YAML and overrides as the run (the rank is part of the structure; --full too)
-meta = load_checkpoint(policy, "runs/sft/<run>/checkpoints/1200")
-```
+def test_the_six_sft_experiments_are_the_two_models_times_the_three_demonstration_types():
+    from scripts import sft as cli
+    from src.models.interface import apply_overrides, load_model_cfg
+    from src.models.settings import parse_model_settings
+    files = experiment_files()
+    assert [f.stem for f in files] == sorted(f"{m}_lora_{d}" for m in ("pi05", "pi0_fast") for d in ("scripted", "noisy", "teleop"))
+    names = set()
+    for f in files:
+        exp = cli.load_experiment(f)
+        model, demos_type = f.stem.split("_lora_")
+        assert exp["model"] == model and exp["full"] is False
+        assert exp["name"] == f"peg_insert_{model}_lora_{demos_type}" and exp["name"] not in names       # clear, and one folder per run
+        names.add(exp["name"])
+        assert exp["demos"] == [f"demos/isaaclab/ForgePegInsert_Robotiq_{demos_type}"]
+        assert exp["set"] == {"output_root": "runs/sft/peg_insert"}
+        cfg = load_model_cfg(model)
+        settings = parse_model_settings(apply_overrides(cfg, cli.model_overrides(cfg, exp["full"], exp["model_set"])))
+        assert settings.any_lora and not settings.active_touch                                           # LoRA, and no touch in any component
 
-`load_checkpoint` puts the trained parameters into the policy (`set_state`: nothing recompiles) and returns `meta.json`. It refuses a checkpoint with a parameter the policy lacks or
-of another shape (another rank), naming the first ones. A stopped run is continued with `--resume` (section 6).
 
-## 8. Differences from the SFT of expo-ft
+def test_an_experiment_gives_the_run_folder_and_the_command_line_wins(folder, capsys):
+    from scripts import sft as cli
+    file = next(f for f in experiment_files() if f.stem == "pi05_lora_scripted")
+    assert cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"]) == 0
+    out = capsys.readouterr().out
+    assert "runs/sft/peg_insert/peg_insert_pi05_lora_scripted" in out and "EXISTS" not in out
+    cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", "--run-name", "other", "--set", "output_root=runs/sft/probing",
+              "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"])
+    assert "runs/sft/probing/other" in capsys.readouterr().out                                          # --run-name and --set win over the file
+    cli.main(["--model", "pi0_fast", "--demos", str(folder), "--dry-run", "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"])
+    assert "runs/sft/probing/pi0_fast_" in capsys.readouterr().out                                      # without an experiment: a probe
 
-| | expo-ft | here |
-|---|---|---|
-| training code | openpi's `scripts/train.py` through `run_pipeline.py --stage sft`, with a config added to the fork | our own loop on `OpenPIPolicy` (one code for pi0.5 and pi0-FAST, and for the touch inputs later); openpi's loss, filter and optimiser |
-| data | LeRobot dataset converted from the `.npz` | the `.npz` directly (touch included) |
-| pi0.5 chunk | 16 steps, offsets (DeltaActions) | the same |
-| pi0-FAST | not run | 10-step chunks, absolute targets (openpi's pipeline for this checkpoint) |
-| steps | `num_train_steps: 4001` (4001 iterations) | `steps: 4000` updates |
-| evaluation | none during the run | loss and own-chunk error on a fixed set, FAST decoding statistics |
-| resume | yes (openpi's) | yes (section 6) |
-| wandb | yes, the same run on resume (`wandb_id.txt`) | yes, same logic (section 5b), x axis `step` |
-| FSDP | yes (openpi's) | no (one device) |
 
-## 9. Checked and not checked
-
-Checked (`tests/test_sft_demos.py`, `tests/test_sft.py`, CPU): the chunks (last action repeated, never across episodes), the options of the data and of the command line, the refusal of broken
-demonstrations, the loop on a tiny pi0.5 (micro-batches, accumulation, only the trainable part moves, the log, the checkpoints), the loading of a checkpoint into a fresh policy and the refusal of one
-that does not fit, the resume (2 + 2 steps end in the state of 4 in one go, the refusals, the SIGTERM stop, a crash while swapping snapshots). wandb (`tests/test_tracking.py`: a fake `wandb` module for the id file, the resume, the fallbacks and the events; and a real offline run of 2 + 2 steps: one id, two attempts). The vision tower of that tiny model is frozen (its optimiser state does not fit the test machine).
-
-**Not checked, to be seen in the first runs:**
-
-- the memory, the time per step and the snapshot size of the full runs after the first 30 steps (measured at 30 steps; the snapshots may grow towards 3 times the float32 parameters);
-- pi0-FAST training on real FAST tokens: the path through the real tokenizer (the tests use a stub) has only been exercised by `scripts/fast_tokens.py` for the lengths;
-- that the 4000 steps and the learning rate give a policy as good as expo-ft's SFT (success rate in the env: this is the RL's evaluation, not this file's);
+def test_a_wrong_experiment_is_refused(tmp_path):
+    from scripts import sft as cli
+    bad = tmp_path / "bad.yaml"
+    for text, message in (("name: a\nmodel: pi05\nstep: 3\n", "unknown keys"), ("model: pi05\n", "`name` is required"), ("name: a\n", "`model` is required"),
+                          ("name: a\nmodel: pi05\ndemos: x\n", "list of folders"), ("name: a\nmodel: pi05\nfull: 3\n", "true or false"),
+                          ("name: a\nmodel: pi05\nset: [1]\n", "mapping")):
+        bad.write_text(text)
+        with pytest.raises(SystemExit, match=message):
+            cli.load_experiment(bad)
+    with pytest.raises(SystemExit, match="no experiment file"):
+        cli.load_experiment(tmp_path / "missing.yaml")
+    file = experiment_files()[0]
+    with pytest.raises(SystemExit, match="not of pi0_fast"):
+        cli.main(["--experiment", str(file), "--model", "pi0_fast", "--dry-run"])
+    with pytest.raises(SystemExit, match="no --experiment next to it"):
+        cli.main(["--experiment", str(file), "--resume", "x"])
+    with pytest.raises(SystemExit):
+        cli.main(["--dry-run"])                                                                          # a model, an experiment or a run to resume is needed

@@ -1,0 +1,20 @@
+# SFT of pi0.5 with LoRA on the FORGE PegInsert clean scripted demonstrations (50 episodes, all of them).
+# Touch is NOT used: this is the SFT of expo-ft (cameras, joints, gripper, prompt), whose checkpoint the RL starts from. The taxels in the demonstrations are ignored.
+# Everything else (steps, batch, learning rate, checkpoints every 200 steps, resume snapshots, wandb) is configs/algo/sft.yaml; the model is configs/model/pi05.yaml (LoRA).
+#
+#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/pi05_lora_scripted.yaml
+#   continue it:  sbatch jobs/job_sft_lora.sh --resume runs/sft/peg_insert/peg_insert_pi05_lora_scripted
+# Output: runs/sft/peg_insert/peg_insert_pi05_lora_scripted/
+name: peg_insert_pi05_lora_scripted
+description: "pi0.5 LoRA SFT, PegInsert, clean scripted demonstrations, no touch"
+model: pi05
+full: false
+demos:
+  - demos/isaaclab/ForgePegInsert_Robotiq_scripted
+set:
+  output_root: runs/sft/peg_insert
+model_set:                       # touch off in every component the model has (it is off in the model YAML too: written here so that the file says it)
+  vlm.use_tactile: false
+  vlm.use_force: false
+  action_head.use_tactile: false
+  action_head.use_force: false

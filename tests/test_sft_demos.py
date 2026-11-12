@@ -238,3 +238,62 @@ def test_the_compilation_cache_is_openpis_unless_the_environment_names_another(m
     monkeypatch.delenv("JAX_COMPILATION_CACHE_DIR")
     cli.enable_compilation_cache()
     assert seen["jax_compilation_cache_dir"].endswith("/.cache/jax")
+
+
+# -- experiment files (configs/experiment/sft/) ---------------------------------------------------------------------------------------------
+def experiment_files():
+    from pathlib import Path
+    return sorted((Path(__file__).resolve().parents[1] / "configs" / "experiment" / "sft").glob("*.yaml"))
+
+
+def test_the_six_sft_experiments_are_the_two_models_times_the_three_demonstration_types():
+    from scripts import sft as cli
+    from src.models.interface import apply_overrides, load_model_cfg
+    from src.models.settings import parse_model_settings
+    files = experiment_files()
+    assert [f.stem for f in files] == sorted(f"{m}_lora_{d}" for m in ("pi05", "pi0_fast") for d in ("scripted", "noisy", "teleop"))
+    names = set()
+    for f in files:
+        exp = cli.load_experiment(f)
+        model, demos_type = f.stem.split("_lora_")
+        assert exp["model"] == model and exp["full"] is False
+        assert exp["name"] == f"peg_insert_{model}_lora_{demos_type}" and exp["name"] not in names       # clear, and one folder per run
+        names.add(exp["name"])
+        assert exp["demos"] == [f"demos/isaaclab/ForgePegInsert_Robotiq_{demos_type}"]
+        assert exp["set"] == {"output_root": "runs/sft/peg_insert"}
+        cfg = load_model_cfg(model)
+        settings = parse_model_settings(apply_overrides(cfg, cli.model_overrides(cfg, exp["full"], exp["model_set"])))
+        assert settings.any_lora and not settings.active_touch                                           # LoRA, and no touch in any component
+
+
+def test_an_experiment_gives_the_run_folder_and_the_command_line_wins(folder, capsys):
+    from scripts import sft as cli
+    file = next(f for f in experiment_files() if f.stem == "pi05_lora_scripted")
+    assert cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"]) == 0
+    out = capsys.readouterr().out
+    assert "runs/sft/peg_insert/peg_insert_pi05_lora_scripted" in out and "EXISTS" not in out
+    cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", "--run-name", "other", "--set", "output_root=runs/sft/probing",
+              "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"])
+    assert "runs/sft/probing/other" in capsys.readouterr().out                                          # --run-name and --set win over the file
+    cli.main(["--model", "pi0_fast", "--demos", str(folder), "--dry-run", "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"])
+    assert "runs/sft/probing/pi0_fast_" in capsys.readouterr().out                                      # without an experiment: a probe
+
+
+def test_a_wrong_experiment_is_refused(tmp_path):
+    from scripts import sft as cli
+    bad = tmp_path / "bad.yaml"
+    for text, message in (("name: a\nmodel: pi05\nstep: 3\n", "unknown keys"), ("model: pi05\n", "`name` is required"), ("name: a\n", "`model` is required"),
+                          ("name: a\nmodel: pi05\ndemos: x\n", "list of folders"), ("name: a\nmodel: pi05\nfull: 3\n", "true or false"),
+                          ("name: a\nmodel: pi05\nset: [1]\n", "mapping")):
+        bad.write_text(text)
+        with pytest.raises(SystemExit, match=message):
+            cli.load_experiment(bad)
+    with pytest.raises(SystemExit, match="no experiment file"):
+        cli.load_experiment(tmp_path / "missing.yaml")
+    file = experiment_files()[0]
+    with pytest.raises(SystemExit, match="not of pi0_fast"):
+        cli.main(["--experiment", str(file), "--model", "pi0_fast", "--dry-run"])
+    with pytest.raises(SystemExit, match="no --experiment next to it"):
+        cli.main(["--experiment", str(file), "--resume", "x"])
+    with pytest.raises(SystemExit):
+        cli.main(["--dry-run"])                                                                          # a model, an experiment or a run to resume is needed

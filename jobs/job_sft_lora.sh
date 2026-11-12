@@ -1,16 +1,17 @@
 #!/bin/bash
 # SFT with LoRA (the model YAML's: openpi's own LoRA) of pi0.5 or pi0-FAST on the FORGE demonstrations, on an L40S (46 GB).
-#   sbatch jobs/job_sft_lora.sh pi0_fast                                    # the demonstrations of configs/algo/sft.yaml (scripted)
-#   sbatch jobs/job_sft_lora.sh pi05 --demos demos/isaaclab/ForgePegInsert_Robotiq_noisy --run-name pi05_noisy
-#   sbatch jobs/job_sft_lora.sh pi05 --set steps=1500 --set micro_batch_size=8 --model-set vlm.lora_rank=8
-#   sbatch jobs/job_sft_lora.sh pi05 --resume <run name>                     # continue a run that stopped (time limit, failure): its own settings are used
-# Everything after the model name goes to `python -m scripts.sft` (see its --help; --set overrides configs/algo/sft.yaml, --model-set the model YAML).
+#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/pi05_lora_scripted.yaml      # a main run: configs/experiment/sft/, output in runs/sft/peg_insert
+#   sbatch jobs/job_sft_lora.sh --model pi0_fast                            # a probe: the demonstrations of configs/algo/sft.yaml, output in runs/sft/probing
+#   sbatch jobs/job_sft_lora.sh --model pi05 --demos demos/isaaclab/ForgePegInsert_Robotiq_noisy --run-name pi05_noisy
+#   sbatch jobs/job_sft_lora.sh --model pi05 --set steps=1500 --set micro_batch_size=8 --model-set vlm.lora_rank=8
+#   sbatch jobs/job_sft_lora.sh --resume runs/sft/peg_insert/<run name>      # continue a run that stopped (time limit, failure): its own settings are used
+# Every option goes to `python -m scripts.sft` (see its --help; --set overrides configs/algo/sft.yaml, --model-set the model YAML).
 # Full fine-tuning does not fit here: jobs/job_sft_full.sh (A100 80 GB).
 # Before the first run, on the login node (internet needed, the job itself runs offline):
 #   uv sync --group vla && source .venv/bin/activate && python -m scripts.fetch_models
 #   python -m scripts.sft --model <model> --dry-run                         # reads the demonstrations, loads no model
 #   wandb login                                                             # once; the job logs to wandb (--set wandb_mode=offline | disabled to change)
-# Output: runs/sft/<run name>/ (metrics.jsonl, wandb_id.txt, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out, logs/slurm/gpu_<jobid>.csv (the card's utilisation every 30 s)
+# Output: <output_root>/<run name>/, runs/sft/peg_insert/ for an experiment, runs/sft/probing/ otherwise (metrics.jsonl, wandb_id.txt, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out, logs/slurm/gpu_<jobid>.csv (the card's utilisation every 30 s)
 # Time: 4000 steps are about 10 h on an L40S (8.7 s per step, measured) and 7 h on an A100 (6.0 s; `sbatch --gres=gpu:a100l:1 jobs/job_sft_lora.sh ...`), hence 14 h. Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (4.5 GiB with LoRA) and stops cleanly.
 #
 #SBATCH --job-name=sft_lora
@@ -26,11 +27,9 @@
 #SBATCH --mail-user=josue.mongan@mila.quebec
 
 set -u
-MODEL="${1:-}"
-[ -z "$MODEL" ] || [[ "$MODEL" == --* ]] && { echo "usage: sbatch jobs/job_sft_lora.sh <model: pi05 | pi0_fast> [scripts.sft options]" >&2; exit 1; }
-shift
+[ $# -eq 0 ] && { echo "usage: sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/<name>.yaml | --model <pi05 | pi0_fast> | --resume <run> [scripts.sft options]" >&2; exit 1; }
 cd "${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}" || exit 1
-mkdir -p logs/slurm runs/sft
+mkdir -p logs/slurm runs/sft/peg_insert runs/sft/probing
 nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
 
 source .venv/bin/activate
@@ -43,7 +42,7 @@ nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv,nohead
 smi=$!
 # Run in the background and forward the SIGTERM Slurm sends 5 minutes before the time limit (--signal=B:TERM@300): the SFT then writes a resume
 # snapshot after its current step and exits 0 ("stopped at step N ... continue with ..."). `wait` returns early on a trapped signal: wait again.
-python -m scripts.sft --model "$MODEL" "$@" &
+python -m scripts.sft "$@" &
 child=$!
 trap 'kill -TERM $child 2>/dev/null' TERM
 wait $child; status=$?

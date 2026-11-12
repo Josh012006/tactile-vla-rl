@@ -1,16 +1,16 @@
 #!/bin/bash
 # FULL fine-tuning (use_lora false in every component: every weight trained, the exact base function at the start) of pi0.5 or pi0-FAST on
 # the FORGE demonstrations, on an A100 80 GB. LoRA runs on an L40S: jobs/job_sft_lora.sh.
-#   sbatch jobs/job_sft_full.sh pi05
-#   sbatch jobs/job_sft_full.sh pi0_fast --demos demos/isaaclab/ForgePegInsert_Robotiq_teleop --run-name pi0fast_teleop_full
-#   sbatch jobs/job_sft_full.sh pi05 --resume <run name>               # continue a run that stopped: its own settings are used, none is added here
-# Everything after the model name goes to `python -m scripts.sft` (see its --help). Added here, except with --resume: `--full`, a micro-batch of 8 and
+#   sbatch jobs/job_sft_full.sh --model pi05
+#   sbatch jobs/job_sft_full.sh --model pi0_fast --demos demos/isaaclab/ForgePegInsert_Robotiq_teleop --run-name pi0fast_teleop_full
+#   sbatch jobs/job_sft_full.sh --resume runs/sft/probing/<run name>   # continue a run that stopped: its own settings are used, none is added here
+# Every option goes to `python -m scripts.sft` (see its --help); a run without an experiment file is a probe, in runs/sft/probing. Added here, except with --resume: `--full`, a micro-batch of 8 and
 # a resume snapshot every 1000 steps (29 GiB each for pi0-FAST, see configs/algo/sft.yaml). A later --set wins.
 # Measured on the A100 (docs/algos/sft.md, section 4), pi0-FAST: peak 61 GiB of the 75 the allocator may use (0.95 of the card; the default 0.75 killed the first probes), 7.3 s per step,
 # so 4001 steps are about 8.1 h (about 8.6 h with the evaluations, saves and snapshots, hence the 12 h below). pi0.5: peak 68 GiB, 7.2 s per step, so about 8.7 h in all. A failure writes an `error` line.
 # A preemption by Slurm (job state PREEMPTED) leaves about 30 s, less than a snapshot takes (77 s pi0-FAST, 160 s pi0.5): only the periodic snapshots survive it, then `--resume <run name>`.
 # Before the first run, on the login node (fetch_models, wandb login): see jobs/job_sft_lora.sh.
-# Output: runs/sft/<run name>/ (a checkpoint holds the whole model in bfloat16: 4.3 GiB for pi0-FAST, written in 17 s, 4.9 GiB and 41 s for pi0.5; a save every 200 steps is 20 of them, 87 to 98 GiB: raise
+# Output: <output_root>/<run name>/ (runs/sft/probing by default; a checkpoint holds the whole model in bfloat16: 4.3 GiB for pi0-FAST, written in 17 s, 4.9 GiB and 41 s for pi0.5; a save every 200 steps is 20 of them, 87 to 98 GiB: raise
 # save_interval with `--set save_interval=1000` when the disk matters; resume/ holds one snapshot, 29 GiB for pi0-FAST, twice that while it is swapped), logs/slurm/sft_full_<jobid>.out, logs/slurm/gpu_<jobid>.csv (the card's utilisation every 30 s)
 # Time limit: 10 minutes before it, Slurm sends a SIGTERM; the run writes its snapshot after the current step (77 s measured for pi0-FAST, 160 s for pi0.5) and stops cleanly.
 #
@@ -27,11 +27,9 @@
 #SBATCH --mail-user=josue.mongan@mila.quebec
 
 set -u
-MODEL="${1:-}"
-[ -z "$MODEL" ] || [[ "$MODEL" == --* ]] && { echo "usage: sbatch jobs/job_sft_full.sh <model: pi05 | pi0_fast> [scripts.sft options]" >&2; exit 1; }
-shift
+[ $# -eq 0 ] && { echo "usage: sbatch jobs/job_sft_full.sh --model <pi05 | pi0_fast> | --experiment <file> | --resume <run> [scripts.sft options]" >&2; exit 1; }
 cd "${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}" || exit 1
-mkdir -p logs/slurm runs/sft
+mkdir -p logs/slurm runs/sft/peg_insert runs/sft/probing
 nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
 
 source .venv/bin/activate
@@ -46,7 +44,7 @@ nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv,nohead
 smi=$!
 # Run in the background and forward the SIGTERM Slurm sends 10 minutes before the time limit (--signal=B:TERM@600): the SFT then writes a resume
 # snapshot after its current step and exits 0 ("stopped at step N ... continue with ..."). `wait` returns early on a trapped signal: wait again.
-python -m scripts.sft --model "$MODEL" $DEFAULTS "$@" &
+python -m scripts.sft $DEFAULTS "$@" &
 child=$!
 trap 'kill -TERM $child 2>/dev/null' TERM
 wait $child; status=$?
