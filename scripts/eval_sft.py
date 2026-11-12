@@ -1,6 +1,6 @@
 """Success-rate curve of an SFT run: every checkpoint, and the run's initial state (step 0), evaluated in the FORGE environment on the same fixed episodes.
 
-    python -m scripts.eval_sft --run runs/sft/peg_insert/peg_insert_pi05_lora_teleop --n-episodes 200 --workers 3
+    python -m scripts.eval_sft --run runs/sft/peg_insert/peg_insert_pi05_lora_teleop --n-episodes 50
     python -m scripts.eval_sft --run <run> --dry-run                      # what would be evaluated and what is already done: no GPU, no model, no server
     python -m scripts.eval_sft --run <run> --steps 0 1000 4000            # only these checkpoints (0 = the run's initial state)
     python -m scripts.eval_sft --run <run> --plot-only --title "Teleop demos"      # rebuild curve.json / .png / .pdf from the results on disk: no GPU, no server
@@ -9,7 +9,8 @@ Run it through jobs/job_eval_sft.sh (an env server is started for each checkpoin
 
 What is evaluated. `--run` is a run folder of scripts/sft.py (runs/sft/peg_insert/<name>, or a probe under runs/sft/probing/): its config.json gives the model YAML with its
 overrides and normalisation statistics, and checkpoints/<step>/ the trained parameters. Step 0 is the run's own initial state: the same model, the same LoRA initialisation
-(openpi's, seed 0), nothing trained: the point the curve starts from (`--no-initial` leaves it out).
+(openpi's, seed 0), nothing trained: the point the curve starts from (`--no-initial` leaves it out). The normalisation statistics are the run's too: the file its model YAML names, which
+the SFT copied into every checkpoint (checkpoints/<step>/assets/); the two are compared byte for byte before anything starts, and a difference is refused (check_norm_stats).
 
 The episodes. `--seed` (default 42) generates the `--n-episodes` seeds ONCE (the way expo-ft does: episode_seeds.json, kept in the output folder); every checkpoint plays the same
 ones. Each episode is `reset(seed=<its seed>)` in a server with ONE environment, a chunk is executed `--replan` steps (default: half the model's chunk, as expo-ft's 8 of 16) and
@@ -25,7 +26,7 @@ result and the curve are recomputed from the file as if nothing had happened. (A
 attempt, not bit-identical: docs/envs/isaaclab_env.md N1. `single_attempt` in its result says which one it is.) Another --seed / --replan / task YAML / model than the folder's is refused.
 `--n-episodes` may grow: the first seeds do not change, only the missing episodes are run. `--force` sets aside (`.prev1`, ...) the results of the checkpoints it evaluates and starts them over.
 
-Parallel. `--workers N` evaluates N checkpoints at the same time: one thread per checkpoint, each with its own env server (a subprocess, own port and process group) and its own
+Parallel. `--workers N` (default 1: on one L40S two or three workers gave the same throughput as one, docs/eval/sft_eval.md section 6) evaluates N checkpoints at the same time: one thread per checkpoint, each with its own env server (a subprocess, own port and process group) and its own
 policy (they share the compiled model and the base weights, so N workers cost N env servers plus one model in GPU memory). SIGTERM / SIGINT stop it cleanly: the episodes in progress are dropped,
 every server is killed, the finished episodes are kept.
 
@@ -35,6 +36,7 @@ logs/server_<step>.log, videos/<step>/ with --save-videos; curve.json / curve.pn
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -52,12 +54,13 @@ from scripts.sft import enable_compilation_cache, parse_assignments
 from src.eval import episodes as E
 from src.eval.curve import write_curve
 from src.eval.sweep import Job, Sweep, gpu_name, kill_all_servers, make_server_factory
-from src.models.interface import ROOT
+from src.models.interface import ROOT, norm_stats_source
 
 RECIPE = "deterministic-v1"                  # policy seeded per episode, batch of 1, fresh server per checkpoint, one environment per server
 DEFAULT_TASK = "configs/task/peg_insert_forge.yaml"
 XLA_DETERMINISTIC = "--xla_gpu_deterministic_ops=true"
 FORBIDDEN_ENV_SET = ("num_envs", "server_port")
+NORM_STATS_FILE = "norm_stats.json"
 
 
 # -- the run and its checkpoints -------------------------------------------------------------------------------------------------------
@@ -110,8 +113,52 @@ def build_protocol(args, run_dir: Path, model_cfg: dict, task: dict) -> dict:
     replan = int(args.replan) if args.replan else max(1, horizon // 2)
     if not 1 <= replan <= horizon:
         raise SystemExit(f"--replan {replan}: between 1 and the model's chunk length ({horizon})")
+    stats = norm_stats_path(model_cfg)
     return {"recipe": RECIPE, "master_seed": int(args.seed), "replan": replan, "max_steps": int(task["max_steps_per_episode"]), "num_envs": 1,
-            "model_cfg": model_cfg, "task": task, "run": str(run_dir)}
+            "model_cfg": model_cfg, "norm_stats_sha": file_sha(stats) if stats else None, "task": task, "run": str(run_dir)}
+
+
+def file_sha(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def norm_stats_path(model_cfg: dict) -> Optional[Path]:
+    """The normalisation statistics file the run's model YAML (as the run saved it) names; None without the block (the base checkpoint's own, DROID's). The policy of this
+    evaluation reads exactly this file (src/models/loading.py), the same way the SFT did."""
+    source = norm_stats_source(model_cfg)
+    if source is None:
+        return None
+    folder, asset_id = source
+    path = folder / asset_id / NORM_STATS_FILE
+    if not path.is_file():
+        raise SystemExit(f"the run's model YAML names normalisation statistics that are not there: {path}")
+    return path
+
+
+def check_norm_stats(model_cfg: dict, jobs: List[Job]) -> dict:
+    """Refuse to evaluate with other normalisation statistics than the ones the run trained with. The SFT copies the file it used into every checkpoint
+    (checkpoints/<step>/assets/<asset id>/norm_stats.json); the evaluation reads the file the YAML names, so the two are compared byte for byte, for every checkpoint to be evaluated
+    (step 0 is built from the same YAML, nothing to compare). Without a `norm_stats` block both sides use the base checkpoint's own statistics."""
+    path = norm_stats_path(model_cfg)
+    if path is None:
+        return {"source": None, "sha256": None, "verified": []}
+    sha = file_sha(path)
+    _, asset_id = norm_stats_source(model_cfg)
+    problems, verified = [], []
+    for job in jobs:
+        if job.checkpoint is None:
+            continue
+        copy = Path(job.checkpoint) / "assets" / asset_id / NORM_STATS_FILE
+        if not copy.is_file():
+            problems.append(f"step {job.step}: no copy of the statistics in the checkpoint ({copy})")
+        elif file_sha(copy) != sha:
+            problems.append(f"step {job.step}: the checkpoint's copy ({copy}) is not the file the YAML names")
+        else:
+            verified.append(job.step)
+    if problems:
+        raise SystemExit(f"the normalisation statistics of the evaluation ({path}, sha256 {sha[:12]}) are not the ones the run was trained with:\n  " + "\n  ".join(problems)
+                         + "\nThe statistics saved in a checkpoint are the ones it was trained with: put them back in the folder the YAML names, or evaluate with the YAML the run used.")
+    return {"source": str(path), "sha256": sha, "verified": verified}
 
 
 def with_deterministic_xla(flags: str) -> str:
@@ -216,6 +263,7 @@ def main(argv=None) -> int:
         raise SystemExit(f"no task YAML {task_config}")
     task = task_settings(task_config, args.env_set)
     protocol = build_protocol(args, run_dir, model_cfg, task)
+    norm = check_norm_stats(model_cfg, jobs)
     protocol_path = output_dir / E.PROTOCOL_FILE
     saved = json.loads(protocol_path.read_text()) if protocol_path.exists() else None
     try:
@@ -228,6 +276,11 @@ def main(argv=None) -> int:
     done = progress_of(output_dir, jobs, seeds)
     print(f"run {run_dir}\nmodel {model_cfg['name']} ({model_cfg['family']}), chunk {model_cfg['action_horizon']}, replan {protocol['replan']}, episodes of at most {protocol['max_steps']} steps")
     print(f"{len(seeds)} episodes per checkpoint, master seed {args.seed}, {args.workers} worker(s); data in {output_dir}, curve in {curve_dir}")
+    if norm["source"] is None:
+        print("normalisation statistics: the base checkpoint's own (the model YAML has no norm_stats block), as in the SFT")
+    else:
+        print(f"normalisation statistics: {norm['source']} (sha256 {norm['sha256'][:12]}), identical to the copy saved in {len(norm['verified'])} checkpoint(s) to evaluate, "
+              f"as in the SFT")
     for j in jobs:
         where = "initial state of the run" if j.checkpoint is None else str(j.checkpoint.relative_to(run_dir))
         print(f"  step {j.step:>6}: {done[j.label]:>4}/{len(seeds)} episodes done   ({where})")

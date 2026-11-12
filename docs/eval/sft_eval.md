@@ -4,7 +4,7 @@
 success rate against the training step. Code: `src/eval/episodes.py` (seeds, one episode, the log, the numbers), `src/eval/sweep.py` (several checkpoints at once: threads, env servers),
 `src/eval/curve.py` (the plot), `scripts/eval_sft.py` (command line), `scripts/probe_eval_parallel.py` (measures the parallelism), `jobs/job_eval_sft.sh`,
 `jobs/job_probe_eval_parallel.sh`. Tests: `tests/test_eval_episodes.py`, `tests/test_eval_sweep.py`, `tests/test_eval_sft_script.py`, and the two `fork` tests of
-`tests/test_openpi_policy.py` and `tests/test_sft.py`. **Status: tested on CPU (fake simulator over real sockets, real subprocesses); not yet run on the cluster** (section 9).
+`tests/test_openpi_policy.py` and `tests/test_sft.py`. **Status: tested on CPU (fake simulator over real sockets, real subprocesses); a first probe ran on an L40S on 12 Nov. 2026 (cost and parallelism, section 6); no real checkpoint has been evaluated yet** (section 9).
 
 It follows expo-ft's `scripts/eval_curve.py` (fixed seeds generated from `--seed` 42, `--n-episodes`, a curve in % with one standard error, curve.json / png / pdf) and adds what that script does not
 have: a resume at the episode, a deterministic policy for both models, several checkpoints at the same time, and a record that shows whether two evaluations are bit-identical.
@@ -13,9 +13,9 @@ have: a resume at the episode, a deterministic policy for both models, several c
 
 | What | Command |
 |---|---|
-| the curve of a run, 200 episodes per checkpoint, 3 checkpoints at a time | `sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/<run> --n-episodes 200 --workers 3` |
+| the curve of a run, 50 episodes per checkpoint (about 1.2 h per checkpoint for pi0.5, 1.5 h for pi0-FAST) | `sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/<run> --n-episodes 50` |
 | what would be evaluated, and what is already done (login node, no GPU, no model, no server) | `python -m scripts.eval_sft --run <run> --n-episodes 200 --dry-run` |
-| continue an evaluation that stopped (time limit, failure, `scancel`) | **the same command again**: only the missing episodes are run |
+| continue an evaluation that stopped (time limit, failure, `scancel`) | **the same command again**: only the missing episodes are run (a preemption or a node failure requeues the job, which does it by itself) |
 | only some checkpoints (0 = the run's initial state) | `--steps 0 1000 4000` |
 | more episodes than before | the same command with a larger `--n-episodes`: the first seeds do not change, only the new episodes are run |
 | another seed, another folder | `--seed 7 --output-dir <dir>` (a folder made with another seed is refused) |
@@ -23,15 +23,21 @@ have: a resume at the episode, a deterministic policy for both models, several c
 | videos | `--save-videos` (`<output-dir>/videos/<step>/ep_<i>_seed<seed>.mp4`), `--video-dir <dir>` |
 | the plot only (no GPU, no server) | `python -m scripts.eval_sft --run <run> --plot-only --title "Teleop demos, pi0.5"` |
 | where the files go | `--output-dir` (data, default `<run>/eval`), `--curve-dir` (curve.json / png / pdf, default the output folder) |
-| how many workers fit and pay off | `sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 3 --episodes 4` (section 6) |
+| what a worker costs, and whether more workers pay off (measured: they do not on one L40S) | `sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 --episodes 4` (section 6) |
 
 Before the first run: `uv sync --group vla` (matplotlib is in that group since this file), the models fetched, the Isaac Lab venv (`scripts/setup_isaac_venv.sh`), the SFT run's checkpoints.
-`--run` is a path, or the folder name under `runs/sft/peg_insert/` or `runs/sft/probing/`. The job mails at the end (`--mail-user`, `--mail-type=ALL`, like the SFT jobs).
+`--run` is a path, or the folder name under `runs/sft/peg_insert/` or `runs/sft/probing/`. The job mails (`--mail-user`, `--mail-type=ALL`, like the SFT jobs) and is requeueable (`--requeue`): a preemption or a node failure restarts the script, which is the same command, so the evaluation continues; a time limit is not
+a requeue, send the command again. Resources for one worker: 1 L40S, 8 CPUs, 48 G, 14 h (`sacct -j <jobid> --format=JobID,Elapsed,AllocCPUS,TotalCPU,MaxRSS,ReqMem` says what a job really used).
 
 ## 2. What is evaluated
 
 - **The run.** Its `config.json` gives the model YAML with its overrides and normalisation statistics (`model_cfg`): the evaluation builds the policy from that, never from the current YAML, so the
   weights, the rank and the statistics are the ones the run trained with. `checkpoints/<step>/` (complete ones only: `meta.json` is written last) holds the trained parameters.
+- **The normalisation statistics are checked.** The policy reads the file the run's `norm_stats` block names (`<dir>/<asset id>/norm_stats.json`, the way the SFT did); the SFT also copied that file into every
+  checkpoint it saved (`checkpoints/<step>/assets/<asset id>/norm_stats.json`). Before anything starts (and in `--dry-run`), the evaluation compares the two **byte for byte** for every checkpoint it is going
+  to evaluate and refuses if one differs or has no copy (the folder was recomputed or edited after the training: put the checkpoint's copy back, or evaluate with the YAML the run used). The file's sha256
+  is printed and frozen in `eval_protocol.json` (`norm_stats_sha`), so a folder cannot be resumed with other statistics. A model YAML without a `norm_stats` block uses the base checkpoint's own (DROID's)
+  statistics on both sides: nothing to compare. Step 0 is built from the same YAML, so it has the run's statistics by construction.
 - **Step 0** is the run's own initial state: the same model with the same LoRA initialisation (openpi's, seed 0) and nothing trained. This is the point the curve starts from, and also where an RL run
   starts from SFT's checkpoint. (`--no-initial` leaves it out of the default list; a checkpoint list given with `--steps` is exact.)
 - **The episodes.** `--seed` (default 42) generates the `--n-episodes` seeds once (`np.random.default_rng(seed).integers(0, 2**31 - 1, n)`, expo-ft's recipe), kept in `<output-dir>/episode_seeds.json`.
@@ -95,8 +101,8 @@ The same command again reads these files:
 - a log from another evaluation (an episode whose seed is not the one of the list) and a damaged whole line are errors, not silently dropped; an episode that appears twice keeps its first record, with a warning;
 - one evaluation at a time per output folder (`eval.lock`, `flock`): two would append to the same files.
 
-**What may not change between two runs on a folder** (`eval_protocol.json`): `--seed`, `--replan`, the episode length, the number of environments, the model YAML as the run saved it, the task YAML with its
-`--env-set` overrides, and the recipe name (`deterministic-v1`). A change is refused with the list of what differs. The number of episodes, the checkpoints, `--workers`, the videos and the title may change.
+**What may not change between two runs on a folder** (`eval_protocol.json`): `--seed`, `--replan`, the episode length, the number of environments, the model YAML as the run saved it, the sha256 of its
+normalisation statistics, the task YAML with its `--env-set` overrides, and the recipe name (`deterministic-v1`). A change is refused with the list of what differs. The number of episodes, the checkpoints, `--workers`, the videos and the title may change.
 
 ## 5. Parallel evaluation of several checkpoints
 
@@ -116,20 +122,43 @@ The same command again reads these files:
   after the grace period. If the workers have not left 90 s after the stop, the servers are killed from the main thread (their calls fail and the workers leave); `atexit` kills what is left; a second signal
   kills at once. A checkpoint that fails (a checkpoint that does not fit, a server that dies, a crash) is reported, does not stop the others, and the exit code is 1; a stop leaves exit code 0 with the message
   to run the same command again.
-- **Choosing `--workers`.** It depends on the card (memory) and on how much the simulator and the model slow each other down on one GPU, which is what `jobs/job_probe_eval_parallel.sh` measures: for each
-  worker count, the time of an episode with that many workers running, the throughput and speed-up, the GPU memory and utilisation, and the determinism checks of section 6. The default is 1 until that is measured.
+- **Choosing `--workers`: 1.** Measured on an L40S (section 6): two or three workers saturate the card (92-97 % utilisation) and give **the same throughput as one** (42 episodes per hour for pi0.5, 34 for pi0-FAST),
+  while one worker already uses 17 GB. The likely reason (not checked) is that processes sharing one GPU without MPS take turns instead of overlapping; whatever the reason, more workers cost memory and nothing else. The default is 1, and `--workers` stays for a card
+  or a setting where it pays off (the probe measures it). To go faster, use **several GPUs**, i.e. one job per run (or, if needed, one job per group of checkpoints: a worker pool that spans jobs needs a lock per
+  checkpoint instead of one per folder, which is not written).
 
 ## 6. The probe
 
-`sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 3 --episodes 4` (same with `--model pi0_fast`; `--gres=gpu:a100l:1` and `--workers 1 2 4 6` for the big card). It needs no SFT run: the policy
-is the model's initial state. For each worker count W it evaluates W identical checkpoints (same weights, same episodes) at the same time with the real code path, and the report
-(`reports/probe_eval_parallel_<time>.json`, printed at the end) gives:
+`sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 --episodes 4` (same with `--model pi0_fast`; `--no-deterministic-xla --workers 1 --no-resume-check` measures what XLA's deterministic ops cost).
+It needs no SFT run: the policy is the model's initial state. For each worker count W it evaluates W identical checkpoints (same weights, same episodes) at the same time with the real code path, and the
+report (`reports/probe_eval_parallel_<model>_<time>_<jobid>.json`, printed at the end) gives:
 
-- the median time of an episode (the first episode of each replica carries the compilation and is left out), the throughput `3600 * W / median` and the speed-up against the first count;
+- the median time of an episode (the first episode of each replica carries the compilation and is left out), how much of it is the model (plans x median plan time) and the rest (simulator), the throughput
+  `3600 * W / median` and the speed-up against the first count;
 - the GPU memory peak and utilisation (nvidia-smi, every 5 s) and the wall time with the servers' start-up;
 - whether every replica of every count is **bit-identical** to the first one (`traj_sha` per episode): parallel evaluation on one GPU and the number of workers must not change a result;
 - the **cut-and-resume check**: the first replica is copied with only its first half kept, as if the job had been killed, and resumed on a fresh server: how many of the episodes run after the cut differ
   from the uninterrupted ones (N1 says some may, slightly; this puts a number on it).
+
+Every probe writes in its own folder (`runs/sft/probing/_probe_eval_parallel_<model>_<time>_<jobid>/`, under a lock).
+
+**First measurements (L40S, 12 Nov. 2026, initial state, 4 episodes, XLA deterministic ops on, read from the two jobs' logs).** Seconds per episode of one worker, and throughput:
+
+| | W = 1 | W = 2 | W = 3 |
+|---|---|---|---|
+| pi0.5 (replan 8): s per episode of each worker | 86-87 (95 with the compilation) | 172 | 259 |
+| pi0.5: episodes per hour | 42 | 42 | 42 |
+| pi0.5: GPU memory peak / mean utilisation | 17.0 GB / 65 % | 25.2 GB / 92 % | 33.3 GB / 97 % |
+| pi0-FAST (replan 5): s per episode of each worker | 104-118 (107 typical) | 212 | 320-330 |
+| pi0-FAST: episodes per hour | 34 | 34 | 33-34 |
+
+An episode is 86 s for pi0.5 and 107 s for pi0-FAST, not the 35 s of expo-ft (a separate server, another protocol): 50 episodes are about 1.2 h and 1.5 h, 200 episodes about 4.8 h and 6 h.
+What part of it is the model, and whether XLA's deterministic ops cost anything, is what the next probe prints. The 0/4 successes are expected (nothing is trained), and the `Error decoding tokens ... shape (0, 8)`
+lines of pi0-FAST are openpi's message for an initial-state model that writes no action tokens: the chunk is counted as not decoded (`decode_failed`) and the previous one is kept.
+
+**The determinism part of that first probe is void.** The two jobs (pi0.5 and pi0-FAST) started in the same second and so wrote in the same folder: their episodes were mixed in the same files (the log's
+"1 episodes appear twice", the pi0-FAST job's crash on the existing `resume/` folder), and every "bit-identical: False" compares one model with the other. It has to be run again (the probe now refuses to
+share a folder); the speeds above do not depend on it, they are the per-episode times of each job's own log lines.
 
 ## 7. What is written
 
@@ -170,10 +199,10 @@ policy untouched and the frozen weights shared.
 **Not checked, to be seen on the cluster:**
 - everything that needs Isaac Sim and the real models together: a first evaluation of a real checkpoint, the server subprocess started from the learner's venv through `jobs/env_server.sh`, the `ready` line, the
   clean-up of Isaac's child processes;
-- that `--xla_gpu_deterministic_ops` gives the same bits in two compilations and two threads, and its cost (the probe's replicas compare them);
-- that two servers and a model on one GPU give episodes bit-identical to one alone (G1 was measured with one server), the speed-up of each worker count, the memory of several Isaac servers on the host
-  (`--mem=96G` in the jobs is a guess) and on the GPU;
+- that `--xla_gpu_deterministic_ops` gives the same bits in two compilations and two threads, and its cost (the corrected probe compares replicas, `--no-deterministic-xla` the cost);
+- that two servers and a model on one GPU give episodes bit-identical to one alone (G1 was measured with one server); the speed-up is measured (none on an L40S); the host memory of an Isaac server
+  (`--mem=48G` for one worker is an estimate, to be checked with `sacct` after the first evaluation job);
 - the size of N1 for resumed episodes (the probe's cut-and-resume check), and the effect on a success rate over hundreds of episodes (N6 of the env's reproducibility section);
 - the compilation of the shared sampler by several threads at once;
-- the time of an episode with the model and the simulator on one card (35 s is expo-ft's, with a separate server);
+- what the model and the simulator each take of the 86 s / 107 s of an episode (the corrected probe prints it);
 - the default `--replan` of pi0-FAST (5 of 10): expo-ft's 8 of 16 transposed, not measured.

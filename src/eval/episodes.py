@@ -235,7 +235,7 @@ def summarize(label: str, step: int, records: Mapping[int, dict], seeds: Sequenc
 
 # -- the protocol: what may not change between two runs on the same output folder ---------------------------------------------------------
 PROTOCOL_FILE = "eval_protocol.json"
-FROZEN_PROTOCOL = ("master_seed", "replan", "max_steps", "num_envs", "model_cfg", "task", "recipe")
+FROZEN_PROTOCOL = ("master_seed", "replan", "max_steps", "num_envs", "model_cfg", "norm_stats_sha", "task", "recipe")
 
 
 def check_protocol(saved: Mapping[str, Any], now: Mapping[str, Any]) -> None:

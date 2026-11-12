@@ -1,20 +1,25 @@
 """Probe of the parallel evaluation (src/eval/sweep.py): how many checkpoints one GPU can evaluate at the same time, and whether the results stay bit-identical.
 
-    python -m scripts.probe_eval_parallel --model pi05 --workers 1 2 3 --episodes 4
+    python -m scripts.probe_eval_parallel --model pi05 --workers 1 2 --episodes 4
     python -m scripts.probe_eval_parallel --model pi0_fast --workers 1 2 --episodes 4 --model-set vlm.lora_rank=8
+    python -m scripts.probe_eval_parallel --model pi05 --workers 1 --episodes 4 --no-resume-check --no-deterministic-xla      # what XLA's deterministic ops cost
 
 Run it through jobs/job_probe_eval_parallel.sh. It needs no SFT run: the policy is the model's initial state (openpi's LoRA initialisation, seed 0), which is also what step 0
 of a run is. For each worker count W it evaluates W IDENTICAL "checkpoints" (the same weights, the same episodes) at the same time, with the real code path of
 scripts/eval_sft.py (one env server per checkpoint, a policy fork per worker), and reports:
 
   * cost: the median time of an episode with W workers running (the steady state, start-up and compilation excluded), hence the throughput in episodes per hour and the
-    speed-up against W = 1; the GPU memory and utilisation (nvidia-smi, every 5 s) at the peak; the wall time including the servers' start-up;
+    speed-up against W = 1; how much of that time is the model (plans x median plan time) and how much the simulator; the GPU memory and utilisation (nvidia-smi, every 5 s)
+    at the peak; the wall time including the servers' start-up;
   * determinism, checked on the trajectories (`traj_sha`: every joint / gripper / peg-socket reading of every episode):
       - between the W replicas of one run: are the episodes of two checkpoints evaluated at the same time on the same GPU bit-identical?
       - between the runs with different W: does adding workers change a result?
       - after a CUT: the first W = 1 replica is copied with only its first episodes kept, as if the job had been killed, and the evaluation is resumed on a fresh server:
         how many of the episodes run after the cut differ from the uninterrupted ones? (docs/envs/isaaclab_env.md N1 says some may, slightly.)
     The verdict of each is printed and stored in the report (reports/probe_eval_parallel_<time>.json).
+
+Every run writes in its OWN folder, <output-root>/_probe_eval_parallel_<model>_<time>_<job id>/ (two probes started in the same second once shared one folder and mixed their
+episodes: the results of that first pair were worth nothing), under a lock; the report has the same tag.
 
 What it cannot say: other GPU models (N4), longer evaluations than `--episodes`, other checkpoints than the initial state.
 """
@@ -31,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from scripts.eval_sft import DEFAULT_TASK, RECIPE, task_settings, with_deterministic_xla
+from scripts.eval_sft import DEFAULT_TASK, RECIPE, acquire_run_lock, task_settings, with_deterministic_xla
 from scripts.sft import enable_compilation_cache, parse_assignments
 from src.eval import episodes as E
 from src.eval.sweep import Job, Sweep, gpu_name, kill_all_servers, make_server_factory
@@ -86,6 +91,18 @@ def episode_walls(records_by_label: Dict[str, Dict[int, dict]]) -> List[float]:
     return [r["wall_s"] for recs in records_by_label.values() for i, r in recs.items() if i > 0]
 
 
+def model_seconds(records_by_label: Dict[str, Dict[int, dict]]) -> List[float]:
+    """Seconds an episode spends in the model: plans x the median time of a plan (same episodes as `episode_walls`; records without the two numbers are left out).
+    The rest of the wall time is the simulator, the transport and the image handling."""
+    return [r["plans"] * r["plan_ms_median"] / 1000.0 for recs in records_by_label.values() for i, r in recs.items()
+            if i > 0 and r.get("plans") is not None and r.get("plan_ms_median") is not None]
+
+
+def probe_tag(model: str, stamp: str, job_id: Optional[str]) -> str:
+    """The name of this probe's folder and report: the model, the time and the Slurm job (or the process) make it unique to ONE probe."""
+    return f"{model}_{stamp}_{job_id or 'pid' + str(os.getpid())}"
+
+
 def analyse(runs: Dict[int, Dict[str, Dict[int, dict]]], resume: Optional[dict] = None) -> dict:
     """`runs`: W -> label -> records by episode. Compares every replica of every run to the first replica of the first run (`reference`)."""
     first_w = min(runs)
@@ -96,7 +113,9 @@ def analyse(runs: Dict[int, Dict[str, Dict[int, dict]]], resume: Optional[dict] 
         walls = episode_walls(by_label)
         med = statistics.median(walls) if walls else None
         mismatches = {label: differing_episodes(reference, episode_shas(recs)) for label, recs in sorted(by_label.items())}
+        model_s = model_seconds(by_label)
         out["workers"][str(w)] = {"replicas": len(by_label), "episode_wall_s_median": med, "episodes_per_hour": round(3600 * w / med, 1) if med else None,
+                                  "model_s_per_episode_median": round(statistics.median(model_s), 1) if model_s else None,
                                   "identical_to_reference": all(not m for m in mismatches.values()), "differing_episodes": mismatches}
     base = out["workers"][str(first_w)]["episodes_per_hour"]
     for w in out["workers"].values():
@@ -119,13 +138,14 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="configs/model/<name>.yaml (pi05 or pi0_fast)")
     ap.add_argument("--model-set", action="append", metavar="KEY=VALUE", help="override a key of the model YAML: <component>.<key>")
-    ap.add_argument("--workers", type=int, nargs="+", default=[1, 2, 3], help="worker counts to try, each running that many identical checkpoints at once (default 1 2 3)")
-    ap.add_argument("--episodes", type=int, default=4, help="episodes per checkpoint (default 4; each costs about 35 s with one worker)")
+    ap.add_argument("--workers", type=int, nargs="+", default=[1, 2], help="worker counts to try, each running that many identical checkpoints at once (default 1 2)")
+    ap.add_argument("--episodes", type=int, default=4, help="episodes per checkpoint (default 4; measured on an L40S: about 90 s each with one worker for pi0.5, 110 s for pi0-FAST)")
     ap.add_argument("--seed", type=int, default=E.DEFAULT_SEED)
     ap.add_argument("--replan", type=int, help="default: half the model's chunk")
     ap.add_argument("--task-config", default=DEFAULT_TASK)
     ap.add_argument("--no-resume-check", action="store_true", help="skip the cut-and-resume check")
-    ap.add_argument("--output-root", default="runs/sft/probing", help="the probe writes in <output-root>/_probe_eval_parallel_<time>/")
+    ap.add_argument("--no-deterministic-xla", action="store_true", help="leave XLA_FLAGS as they are (no --xla_gpu_deterministic_ops): measures what that flag costs; NOT an evaluation setting")
+    ap.add_argument("--output-root", default="runs/sft/probing", help="the probe writes in <output-root>/_probe_eval_parallel_<model>_<time>_<job id>/")
     ap.add_argument("--ready-timeout", type=float, default=1800.0)
     args = ap.parse_args(argv)
     if args.episodes < 2:
@@ -136,12 +156,14 @@ def main(argv=None) -> int:
     task = task_settings(task_config, [])
     replan = int(args.replan) if args.replan else max(1, int(cfg["action_horizon"]) // 2)
     max_steps = int(task["max_steps_per_episode"])
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    root = ROOT / args.output_root / f"_probe_eval_parallel_{stamp}"
-    root.mkdir(parents=True, exist_ok=True)
+    tag = probe_tag(args.model, time.strftime("%Y%m%d_%H%M%S"), os.environ.get("SLURM_JOB_ID"))
+    root = ROOT / args.output_root / f"_probe_eval_parallel_{tag}"
+    root.mkdir(parents=True, exist_ok=False)                         # one folder per probe: never share one with another
+    lock = acquire_run_lock(root)                                    # noqa: F841  (held until the process ends)
     seeds = E.load_or_create_seeds(root, args.seed, args.episodes)
 
-    os.environ["XLA_FLAGS"] = with_deterministic_xla(os.environ.get("XLA_FLAGS", ""))
+    if not args.no_deterministic_xla:
+        os.environ["XLA_FLAGS"] = with_deterministic_xla(os.environ.get("XLA_FLAGS", ""))
     enable_compilation_cache()
 
     def on_signal(signum, _frame):                          # a probe is not resumable: stop the servers and leave
@@ -164,7 +186,8 @@ def main(argv=None) -> int:
                      prepare=lambda policy, job: None, server_factory=make_server_factory(task_config, [], output_dir / "logs"), attempt=attempt, gpu=gpu,
                      ready_timeout_s=args.ready_timeout, say=say)
 
-    report: dict = {"model": args.model, "model_cfg": cfg, "gpu": gpu, "episodes": args.episodes, "replan": replan, "recipe": RECIPE, "runs": {}}
+    report: dict = {"model": args.model, "model_cfg": cfg, "gpu": gpu, "episodes": args.episodes, "replan": replan, "recipe": RECIPE, "xla_flags": os.environ.get("XLA_FLAGS", ""),
+                    "deterministic_xla": not args.no_deterministic_xla, "runs": {}}
     runs: Dict[int, Dict[str, Dict[int, dict]]] = {}
     failures: List[str] = []
     for w in args.workers:
@@ -203,7 +226,8 @@ def main(argv=None) -> int:
         print("\n=== results")
         for w, a in analysis["workers"].items():
             run = report["runs"][w]
-            print(f"W={w}: episode {a['episode_wall_s_median']:.1f} s (median), {a['episodes_per_hour']} episodes/hour, x{a['speedup_vs_first']} vs W={min(runs)}; "
+            print(f"W={w}: episode {a['episode_wall_s_median']:.1f} s (median, of which {a['model_s_per_episode_median']} s in the model), {a['episodes_per_hour']} episodes/hour, "
+                  f"x{a['speedup_vs_first']} vs W={min(runs)}; "
                   f"GPU memory peak {run['gpu']['memory_peak_mib']} MiB, utilisation {run['gpu']['utilization_mean']} %, wall with start-up {run['wall_s_with_startup']} s; "
                   f"bit-identical to the reference: {a['identical_to_reference']}" + ("" if a["identical_to_reference"] else f" (differing episodes {a['differing_episodes']})"))
         if "resume" in analysis:
@@ -212,7 +236,7 @@ def main(argv=None) -> int:
                   f"({r['differing_after_the_cut']})")
         print(f"all worker counts bit-identical: {analysis['all_workers_identical']}")
     report["failures"] = failures
-    path = ROOT / "reports" / f"probe_eval_parallel_{stamp}.json"
+    path = ROOT / "reports" / f"probe_eval_parallel_{tag}.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(report, indent=1, default=str))
     print(f"report: {path}\ndata: {root}")

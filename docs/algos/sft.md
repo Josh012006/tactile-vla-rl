@@ -16,7 +16,7 @@ checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/alg
 | another rank | `sbatch jobs/job_sft_lora.sh --model pi05 --model-set vlm.lora_rank=8 --model-set action_head.lora_rank=16` |
 | shorter run, smaller micro-batch | `sbatch jobs/job_sft_lora.sh --model pi05 --set steps=1500 --set micro_batch_size=8` |
 | continue a run that stopped | `sbatch jobs/job_sft_lora.sh --resume runs/sft/peg_insert/<run name>` (or `job_sft_full.sh`): see section 6 |
-| the success-rate curve of a run (step 0 and every checkpoint, in the env) | `sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/<run> --n-episodes 200 --workers 3`: `docs/eval/sft_eval.md` |
+| the success-rate curve of a run (step 0 and every checkpoint, in the env) | `sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/<run> --n-episodes 50`: `docs/eval/sft_eval.md` |
 | follow a run | wandb (project `tactile-vla-rl`, section 5b), or `tail -f runs/sft/peg_insert/<run>/metrics.jsonl` (or `logs/slurm/sft_lora_<jobid>.out`) |
 | no wandb, or wandb offline | `--set wandb_mode=disabled`, `--set wandb_mode=offline` (then `wandb sync <run>/wandb/offline-run-*`) |
 

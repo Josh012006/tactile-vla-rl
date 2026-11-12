@@ -150,3 +150,76 @@ def test_the_probe_compares_every_replica_and_run_with_the_reference_and_compute
     assert a["resume"] == {"cut_after": 2, "episodes_after_the_cut": 2, "differing_after_the_cut": [3], "identical_after_the_cut": False}
     same = PE.analyse({1: {"r0": recs(ref)}, 2: {"r0": recs(ref), "r1": recs(ref)}}, resume={"cut_after": 1, "records": recs(ref)})
     assert same["all_workers_identical"] and same["resume"]["identical_after_the_cut"]
+
+
+# -- the probe's folder and its timing split ------------------------------------------------------------------------------------------------
+def test_two_probes_started_in_the_same_second_get_different_folders():
+    tags = {PE.probe_tag(m, "20261112_051441", j) for m in ("pi05", "pi0_fast") for j in ("11667458", "11667459")}
+    assert len(tags) == 4 and PE.probe_tag("pi05", "20261112_051441", "11667458") == "pi05_20261112_051441_11667458"
+    assert PE.probe_tag("pi05", "t", None).startswith("pi05_t_pid")                                  # outside Slurm: the process
+
+
+def test_the_probe_splits_an_episode_between_the_model_and_the_rest_and_leaves_out_the_first_episode():
+    recs_a = {0: {"plans": 19, "plan_ms_median": 9000.0, "wall_s": 200.0}, 1: {"plans": 19, "plan_ms_median": 1000.0, "wall_s": 86.0}, 2: {"plans": 20, "plan_ms_median": 1500.0, "wall_s": 90.0}}
+    recs_b = {0: {"wall_s": 100.0}, 1: {"wall_s": 80.0}}                                            # old records without the two numbers are left out, not an error
+    assert PE.model_seconds({"r0": recs_a, "r1": recs_b}) == [19.0, 30.0]
+    a = PE.analyse({1: {"r0": {0: {"traj_sha": "a", "wall_s": 9.0, "plans": 4, "plan_ms_median": 500.0}, 1: {"traj_sha": "b", "wall_s": 10.0, "plans": 4, "plan_ms_median": 500.0}}}})
+    assert a["workers"]["1"]["model_s_per_episode_median"] == 2.0 and a["workers"]["1"]["episode_wall_s_median"] == 10.0
+
+
+# -- the normalisation statistics of the evaluation are the ones the run was trained with ---------------------------------------------------------
+def run_with_stats(tmp_path, stats_text="{\"norm_stats\": 1}", copies=None):
+    """A run whose model YAML names <tmp>/stats/demo/norm_stats.json; `copies`: step -> the text the checkpoint saved (None: no copy)."""
+    stats = tmp_path / "stats" / "demo"
+    stats.mkdir(parents=True)
+    (stats / "norm_stats.json").write_text(stats_text)
+    run = make_run(tmp_path, steps=tuple(copies or {}))
+    cfg = json.loads((run / "config.json").read_text())
+    cfg["model_cfg"]["norm_stats"] = {"dir": str(tmp_path / "stats"), "asset_id": "demo"}
+    (run / "config.json").write_text(json.dumps(cfg))
+    for step, text in (copies or {}).items():
+        if text is not None:
+            (run / "checkpoints" / str(step) / "assets" / "demo").mkdir(parents=True)
+            (run / "checkpoints" / str(step) / "assets" / "demo" / "norm_stats.json").write_text(text)
+    return run, cfg["model_cfg"]
+
+
+def test_without_a_norm_stats_block_there_is_nothing_to_compare(tmp_path):
+    run = make_run(tmp_path)
+    model_cfg = json.loads((run / "config.json").read_text())["model_cfg"]
+    jobs = ES.select_jobs(ES.discover_checkpoints(run), None, False)
+    assert ES.check_norm_stats(model_cfg, jobs) == {"source": None, "sha256": None, "verified": []}
+    assert ES.build_protocol(args_with(), run, model_cfg, ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, []))["norm_stats_sha"] is None
+
+
+def test_a_checkpoint_trained_with_the_same_statistics_as_the_yaml_names_is_accepted(tmp_path):
+    run, model_cfg = run_with_stats(tmp_path, copies={500: "{\"norm_stats\": 1}", 1000: "{\"norm_stats\": 1}"})
+    jobs = ES.select_jobs(ES.discover_checkpoints(run), None, False)                                # step 0 (no checkpoint) and the two others
+    checked = ES.check_norm_stats(model_cfg, jobs)
+    assert checked["verified"] == [500, 1000] and checked["source"].endswith("stats/demo/norm_stats.json") and len(checked["sha256"]) == 64
+
+
+def test_statistics_that_changed_since_the_training_or_a_checkpoint_without_a_copy_are_refused_before_anything_starts(tmp_path):
+    run, model_cfg = run_with_stats(tmp_path, copies={500: "{\"norm_stats\": 1}", 1000: "{\"norm_stats\": 2}", 1500: None})
+    with pytest.raises(SystemExit) as e:
+        ES.check_norm_stats(model_cfg, ES.select_jobs(ES.discover_checkpoints(run), None, True))
+    message = str(e.value)
+    assert "step 1000" in message and "is not the file the YAML names" in message and "step 1500: no copy" in message and "step 500" not in message
+    with pytest.raises(SystemExit, match="step 1000"):                                               # the script refuses too, a dry run included
+        ES.main(["--run", str(run), "--dry-run"])
+    ES.main(["--run", str(run), "--steps", "500", "--dry-run"])                                      # only the checkpoints to evaluate are compared
+
+
+def test_the_statistics_are_part_of_the_protocol_a_folder_is_resumed_with(tmp_path, capsys):
+    run, model_cfg = run_with_stats(tmp_path, copies={500: "{\"norm_stats\": 1}"})
+    ES.main(["--run", str(run), "--dry-run"])
+    out = capsys.readouterr().out
+    assert "normalisation statistics:" in out and "identical to the copy saved in 1 checkpoint" in out
+    task = ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, [])
+    protocol = ES.build_protocol(args_with(), run, model_cfg, task)
+    E.atomic_write_json(run / "eval" / E.PROTOCOL_FILE, {**protocol, "attempts": []})
+    (tmp_path / "stats" / "demo" / "norm_stats.json").write_text("{\"norm_stats\": 3}")             # the file moved on: the saved protocol no longer matches (and neither does the checkpoint's copy)
+    with pytest.raises(SystemExit):
+        ES.main(["--run", str(run), "--dry-run"])
+    with pytest.raises(ValueError, match="norm_stats_sha"):
+        E.check_protocol({**protocol, "attempts": []}, ES.build_protocol(args_with(), run, model_cfg, task))
