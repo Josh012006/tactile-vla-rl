@@ -7,11 +7,12 @@
 # Everything after the model name goes to `python -m scripts.sft` (see its --help). Added here, except with --resume: `--full`, a micro-batch of 8 and
 # a resume snapshot every 1000 steps (29 GiB each for pi0-FAST, see configs/algo/sft.yaml). A later --set wins.
 # Measured on the A100 (docs/algos/sft.md, section 4), pi0-FAST: peak 61 GiB of the 75 the allocator may use (0.95 of the card; the default 0.75 killed the first probes), 7.3 s per step,
-# so 4001 steps are about 8.1 h (about 8.6 h with the evaluations, saves and snapshots, hence the 12 h below). pi0.5: first step measured only (peak 67.5 GiB, it fits). A failure writes an `error` line.
+# so 4001 steps are about 8.1 h (about 8.6 h with the evaluations, saves and snapshots, hence the 12 h below). pi0.5: peak 68 GiB, 7.2 s per step, so about 8.7 h in all. A failure writes an `error` line.
+# A preemption by Slurm (job state PREEMPTED) leaves about 30 s, less than a snapshot takes (77 s pi0-FAST, 160 s pi0.5): only the periodic snapshots survive it, then `--resume <run name>`.
 # Before the first run, on the login node (fetch_models, wandb login): see jobs/job_sft_lora.sh.
-# Output: runs/sft/<run name>/ (a checkpoint holds the whole model in bfloat16: 4.3 GiB for pi0-FAST, written in 17 s; a save every 200 steps is 20 of them, 87 GiB: raise
+# Output: runs/sft/<run name>/ (a checkpoint holds the whole model in bfloat16: 4.3 GiB for pi0-FAST, written in 17 s, 4.9 GiB and 41 s for pi0.5; a save every 200 steps is 20 of them, 87 to 98 GiB: raise
 # save_interval with `--set save_interval=1000` when the disk matters; resume/ holds one snapshot, 29 GiB for pi0-FAST, twice that while it is swapped), logs/slurm/sft_full_<jobid>.out
-# Time limit: 10 minutes before it, Slurm sends a SIGTERM; the run writes its snapshot after the current step (77 s measured for pi0-FAST) and stops cleanly.
+# Time limit: 10 minutes before it, Slurm sends a SIGTERM; the run writes its snapshot after the current step (77 s measured for pi0-FAST, 160 s for pi0.5) and stops cleanly.
 #
 #SBATCH --job-name=sft_full
 #SBATCH --ntasks=1

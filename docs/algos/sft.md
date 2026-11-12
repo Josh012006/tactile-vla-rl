@@ -2,7 +2,7 @@
 
 `python -m scripts.sft --model <pi05 | pi0_fast>` fine-tunes a VLA on the demonstrations of `docs/demos.md` (the same as expo-ft's). The result is a
 checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/algos/demos.py` (data), `src/algos/sft.py` (loop, checkpoints), `src/algos/tracking.py` (wandb),
-`scripts/sft.py` (command line). **Status: tested on a tiny model on the CPU; probed 30 steps on the cluster (LoRA pi0.5 complete on both cards; full and pi0-FAST ran out of memory, corrected, to be re-probed: section 4)** (section 9).
+`scripts/sft.py` (command line). **Status: tested on a tiny model on the CPU; probed 30 steps on the cluster, complete for pi0.5 LoRA (both cards), pi0-FAST LoRA, pi0-FAST full and pi0.5 full, wandb online included (section 4)** (section 9).
 
 ## 1. Commands
 
@@ -108,21 +108,26 @@ Round 3 (after the cap was raised, the policy's copy of the weights freed and th
 
 Round 4 (with that correction), 30 steps, batch 64, A100:
 
-| | pi0-FAST full | pi0.5 full |
+| | pi0-FAST full | pi0.5 full (round 5, below) |
 |---|---|---|
 | state once loaded | 33.2 GiB | 38.1 GiB |
-| after a step (`in_use`) | **33.7 GiB** (was 55.7) | 38.6 GiB |
-| peak | **61.0 GiB** of 75.3 (was 72.1) | 67.5 GiB (first step) |
-| first step | 77 s | 97 s |
-| seconds per step | 6.5, then 7.3: 4001 steps about **8.1 h**, about 8.6 h with the evaluations, saves and snapshots | not seen |
-| evaluation (16 chunks) | 56 s; 0 decoding failures, 11.4 tokens per chunk | not seen |
-| checkpoint (the whole model, bfloat16) | 4.3 GiB, 17 s | not seen |
-| resume snapshot | **29.0 GiB, 77 s** | not seen |
-| `param_norm` | 1819.6, moving in the 3rd decimal | |
+| after a step (`in_use`) | **33.7 GiB** (was 55.7) | **38.6 GiB** |
+| peak | **61.0 GiB** of 75.3 (was 72.1) | **68.1 GiB** of 75.3 (69,733 MiB of 77,094 at step 30) |
+| first step | 77 s | 99 s |
+| seconds per step | 6.5, then 7.3: 4001 steps about **8.1 h**, about 8.6 h with the evaluations, saves and snapshots | 6.4, then 7.1 to 7.3: 4000 steps about **8.0 h**, about **8.7 h** with the evaluations, saves and snapshots |
+| evaluation (16 chunks) | 56 s; 0 decoding failures, 11.4 tokens per chunk | 54 s (compilation included); 16/16 valid chunks |
+| checkpoint (the whole model, bfloat16) | 4.3 GiB, 17 s | 4.9 GiB (5,008 MiB), 41 s |
+| resume snapshot | **29.0 GiB, 77 s** | **29.0 GiB (29,722 MiB), 160 s** |
+| `param_norm` | 1819.6, moving in the 3rd decimal | 1832.708 -> 1832.721, moving in the 3rd decimal |
 
-- The hypothesis is confirmed: `in_use` after a step is the state again, the peak fell by 11 GiB and the evaluation fits. pi0.5 full has room too (peak 67.5 of 75.3 GiB at its first step); its later lines were not in the file received.
-- Disk of a full run (pi0-FAST): 20 checkpoints of 4.3 GiB = 87 GiB, plus the snapshot, 29 GiB and twice that while it is swapped (58 GiB): `--set save_interval=1000` when the disk matters. A snapshot written in 77 s is far inside the 10 minutes
-  between the SIGTERM and the end of the job.
+- The hypothesis is confirmed: `in_use` after a step is the state again, the peak fell by 11 GiB and the evaluation fits.
+- Round 5 (pi0.5 full, A100, job 11665035, 30 steps, batch 64, micro-batch 8) is complete: the first attempt of round 4 had been **preempted by Slurm** after 3 minutes (state PREEMPTED, no error in the log: not a failure of the code).
+  Loss 1.08 (step 10) -> 0.070 -> 0.014 (step 30); gradient norm 11.7 -> 3.4 -> 1.1; at step 30 the evaluation (16 training rows) gives a loss of 0.0054, 0.0105 rad mean error over the 7 joints of the whole chunk (0.0084 at its first step) and 0.043 on the gripper.
+  The peak grows slowly (69,086 -> 69,733 MiB over 30 steps) and leaves 7.3 GiB under the allocator's limit.
+- Disk of a full run: pi0-FAST 20 checkpoints of 4.3 GiB = 87 GiB; pi0.5 20 of 4.9 GiB = 98 GiB. Plus the snapshot (29 GiB, twice that while it is swapped): `--set save_interval=1000` when the disk matters.
+  The snapshot sizes were measured after 30 steps, when the AdamW moments compress well; the upper bound is 3 times the float32 parameters (37.5 GiB for pi0.5, 32.6 GiB for pi0-FAST), and a longer run may write more
+  and take longer than the 160 s measured (pi0.5). Even at twice that it is far inside the 10 minutes between the SIGTERM and the end of the job. It is longer than the roughly 30 seconds Slurm leaves after a
+  **preemption**: a preempted full run only has the periodic snapshots (every 1000 steps, about 2 h), not a final one.
 
 ## 5. What a run writes
 
@@ -166,7 +171,7 @@ has to be repeated: the model, its overrides, the demonstrations and the setting
 
 What is written, in `<run>/resume/` (the checkpoints cannot do it: they are bfloat16 and hold no optimiser state):
 
-- the trainable parameters **in float32**, the whole **AdamW state** and the step. Size: about 3 times the float32 trainable parameters, i.e. 4.5 GiB measured with LoRA (15 s to write) and 29 GiB measured for pi0-FAST full fine-tuning (77 s to write; pi0.5 about 33 GiB).
+- the trainable parameters **in float32**, the whole **AdamW state** and the step. Size: about 3 times the float32 trainable parameters, i.e. 4.5 GiB measured with LoRA (15 s to write) and 29 GiB measured for pi0-FAST full fine-tuning (77 s to write) and 29 GiB measured for pi0.5 full fine-tuning (160 s to write).
   full fine-tuning. It is written aside and swapped in when complete, so the disk holds twice that for a moment, and a crash while writing leaves the previous snapshot usable;
 - when: every `resume_interval` steps (500 in the YAML, 1000 in the full job; 0 = never), at the last step (so that `--set steps=<larger>` can train further), and **when the job gets a
   SIGTERM**.
@@ -219,7 +224,6 @@ that does not fit, the resume (2 + 2 steps end in the state of 4 in one go, the 
 
 **Not checked, to be seen in the first runs:**
 
-- wandb ONLINE from a compute node (the tests are offline or fake);
-- pi0.5 full fine-tuning beyond its first step (memory fits: peak 67.5 of 75.3 GiB): seconds per step, evaluation, checkpoint and snapshot (pi0-FAST full is measured, section 4);
+- the memory, the time per step and the snapshot size of the full runs after the first 30 steps (measured at 30 steps; the snapshots may grow towards 3 times the float32 parameters);
 - pi0-FAST training on real FAST tokens: the path through the real tokenizer (the tests use a stub) has only been exercised by `scripts/fast_tokens.py` for the lengths;
 - that the 4000 steps and the learning rate give a policy as good as expo-ft's SFT (success rate in the env: this is the RL's evaluation, not this file's);
