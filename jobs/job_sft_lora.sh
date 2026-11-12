@@ -10,7 +10,7 @@
 #   uv sync --group vla && source .venv/bin/activate && python -m scripts.fetch_models
 #   python -m scripts.sft --model <model> --dry-run                         # reads the demonstrations, loads no model
 #   wandb login                                                             # once; the job logs to wandb (--set wandb_mode=offline | disabled to change)
-# Output: runs/sft/<run name>/ (metrics.jsonl, wandb_id.txt, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out
+# Output: runs/sft/<run name>/ (metrics.jsonl, wandb_id.txt, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out, logs/slurm/gpu_<jobid>.csv (the card's utilisation every 30 s)
 # Time: 4000 steps are about 10 h on an L40S (8.7 s per step, measured) and 7 h on an A100 (6.0 s; `sbatch --gres=gpu:a100l:1 jobs/job_sft_lora.sh ...`), hence 14 h. Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (4.5 GiB with LoRA) and stops cleanly.
 #
 #SBATCH --job-name=sft_lora
@@ -38,6 +38,9 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false      # allocate what is used (the def
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9      # XLA's allocator stops at 75 % of the card by default (a failure 'RESOURCE_EXHAUSTED' with 15 of 46 GB in use): 0.9, as openpi recommends
 export WANDB__SERVICE_WAIT=300                  # wandb's helper process can be slow to start on a loaded node
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1  # everything was fetched by scripts.fetch_models: a missing file fails instead of downloading
+# What the card does during the run: utilisation and memory every 30 s in logs/slurm/gpu_<jobid>.csv (the cluster's mails about under-used resources come from the same counters).
+nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv,noheader -l 30 > "logs/slurm/gpu_${SLURM_JOB_ID:-local}.csv" 2>/dev/null &
+smi=$!
 # Run in the background and forward the SIGTERM Slurm sends 5 minutes before the time limit (--signal=B:TERM@300): the SFT then writes a resume
 # snapshot after its current step and exits 0 ("stopped at step N ... continue with ..."). `wait` returns early on a trapped signal: wait again.
 python -m scripts.sft --model "$MODEL" "$@" &
@@ -46,5 +49,6 @@ trap 'kill -TERM $child 2>/dev/null' TERM
 wait $child; status=$?
 while kill -0 $child 2>/dev/null; do wait $child; status=$?; done
 trap - TERM
+kill $smi 2>/dev/null
 nvidia-smi --query-gpu=memory.used --format=csv,noheader | sed 's/^/GPU memory still in use at the end: /'
 exit $status

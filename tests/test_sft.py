@@ -92,6 +92,7 @@ def test_the_run_trains_the_trainable_part_only_and_writes_its_log(run):
     assert events.count("train") == 2 and events.count("eval") == 2 and events.count("checkpoint") == 2
     assert all(np.isfinite(line["loss"]) and line["grad_norm"] > 0 for line in lines if line["event"] == "train")
     assert all(np.isfinite(line["param_norm"]) and line["param_norm"] > 0 for line in lines if line["event"] == "train")     # openpi's param_norm
+    assert all(line["batch_prep_s"] > 0 for line in lines if line["event"] == "train")                                        # what the feed thread costs per batch
     evals = [line for line in lines if line["event"] == "eval"]
     assert set(evals[0]) >= {"train", "val"} and np.isfinite(evals[0]["val"]["loss"]) and evals[0]["train"]["chunks"] == 2
     assert all("elapsed_s" in line for line in lines) and evals[0]["eval_s"] > 0                  # time and size of what a run costs

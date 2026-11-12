@@ -225,3 +225,16 @@ def test_resume_on_the_command_line_takes_everything_from_the_run(tmp_path, fold
             cli.main(["--model", "pi05", "--resume", str(run), *extra])
     with pytest.raises(SystemExit, match="not of pi0_fast"):
         cli.main(["--model", "pi0_fast", "--resume", str(run)])
+
+
+def test_the_compilation_cache_is_openpis_unless_the_environment_names_another(monkeypatch):
+    import jax
+    from scripts import sft as cli
+    seen = {}
+    monkeypatch.setattr(jax.config, "update", lambda name, value: seen.update({name: value}))
+    monkeypatch.setenv("JAX_COMPILATION_CACHE_DIR", "/somewhere/else")
+    cli.enable_compilation_cache()
+    assert seen == {}                                                                                       # jax reads that variable itself
+    monkeypatch.delenv("JAX_COMPILATION_CACHE_DIR")
+    cli.enable_compilation_cache()
+    assert seen["jax_compilation_cache_dir"].endswith("/.cache/jax")

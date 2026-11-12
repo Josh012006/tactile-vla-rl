@@ -129,6 +129,38 @@ Round 4 (with that correction), 30 steps, batch 64, A100:
   and take longer than the 160 s measured (pi0.5). Even at twice that it is far inside the 10 minutes between the SIGTERM and the end of the job. It is longer than the roughly 30 seconds Slurm leaves after a
   **preemption**: a preempted full run only has the periodic snapshots (every 1000 steps, about 2 h), not a final one.
 
+## 4b. Where the GPU waits (the cluster's under-use notice, 2026-11-12)
+
+The 30-step probes are short, and most of their time is not training: the pi0.5 full probe (job 11665035) ran 605 s on the card; the nvidia-smi report gave 37 % utilisation, and the 210 s of its 30 steps
+are 35 % of that. Compilation (99 s), the evaluation (54 s), the checkpoint (41 s) and the snapshot (160 s) keep the card nearly idle, and so does the loading of the model before them. A notice about such a job
+measures the probe, not the real run. For a real run of 4000 steps, from the measured times:
+
+| | steps | compilation | evaluations | checkpoints | snapshots | card busy |
+|---|---|---|---|---|---|---|
+| pi0.5 LoRA, L40S | 9.7 h | 108 s, once | 20, at most 34 s each | 20 x 2.5 s | 8 x 15 s | about 97 % |
+| pi0.5 full, A100 | 8.0 h | 99 s, once | 20, at most 54 s each | 20 x 41 s | 4 x 160 s | about 91 % |
+
+During the steps the card is busy: the batches are prepared by a thread ahead of the step (`prefetch`), JAX dispatches without waiting (the first host synchronisation is at the first `log_interval`), and a rough count of
+the work (about 770 tokens per sample through the 2 B Gemma and the three SigLIP image slots, the forward done twice because of openpi's remat, once more backwards) gives about half of the A100's bf16 peak during a full step, which is
+what XLA reaches on such models. So the loop has no large margin left; what remains is below.
+
+Done (no change to what is trained or computed):
+
+- **Compilation cache.** `scripts/sft.py` turns on JAX's persistent cache (`~/.cache/jax`, openpi's and expo-ft's folder; `JAX_COMPILATION_CACHE_DIR` to choose another): the 100 s of the first step, and of the first
+  evaluation, are paid once per program and per type of card, not at every launch and every resume.
+- **Measures, to see the real run instead of guessing.** Each `train` line has `batch_prep_s` (seconds the feed thread takes to prepare one batch; the GPU waits for data only if it exceeds `step_s`), and both SFT jobs write
+  the card's utilisation and memory every 30 s to `logs/slurm/gpu_<jobid>.csv`.
+
+Looked at and not done:
+
+- **Saving in the background.** Checkpoints and snapshots stop the card for about 25 minutes of a full run (3 % of its time) and for 3 minutes of a LoRA run (0.5 %): the experiments are LoRA, and the change (host copies of 29 GiB,
+  a thread to join at every stop) is not worth that.
+- **Two runs on one card.** The steps are compute-bound: two LoRA runs on one A100 would each take about twice as long.
+- **A larger micro-batch.** The noise and the augmentation of a micro-batch come from `fold_in(key, step * n_micro + i)`: a different number of micro-batches draws other numbers, so the run would no longer be the same one.
+- **Remat policy (needs a decision).** openpi's Gemma recomputes the forward pass in the backward (`nothing_saveable`, hard-coded in `gemma.py` of the pinned fork). Keeping activations would remove that
+  recomputation, a quarter to a third of the step if the memory allows it (LoRA on an A100 has room, the L40S probably not), with the same maths. It means changing the pinned openpi commit (checked by `tests/test_models_pin.py`),
+  so it is not done; a probe on the cluster would tell the gain and the memory.
+
 ## 5. What a run writes
 
 `runs/sft/<model>_<demos>_<lora|full>_<date>/` (`runs` is a link to the scratch disk; `--run-name` chooses the folder):
@@ -136,7 +168,7 @@ Round 4 (with that correction), 30 steps, batch 64, A100:
 | File | Content |
 |---|---|
 | `config.json` | the algorithm settings and the model YAML as run (overrides included); read back by `--resume` |
-| `metrics.jsonl` | one JSON line per event: `start` (parameter counts, sizes), `error` (the exception and the memory, when the run fails), `first_step` (seconds including the compilation, memory), `train` (every `log_interval`: loss, gradient norm, learning rate, seconds per step, memory), `eval` (with `eval_s`), `checkpoint` (with `save_s` and `size_mib`), `resume_snapshot` (same), `resume`, `done` or `stopped`; every line has `elapsed_s` |
+| `metrics.jsonl` | one JSON line per event: `start` (parameter counts, sizes), `error` (the exception and the memory, when the run fails), `first_step` (seconds including the compilation, memory), `train` (every `log_interval`: loss, gradient norm, `param_norm`, learning rate, seconds per step, `batch_prep_s`, memory), `eval` (with `eval_s`), `checkpoint` (with `save_s` and `size_mib`), `resume_snapshot` (same), `resume`, `done` or `stopped`; every line has `elapsed_s` |
 | `wandb_id.txt` | the id of the wandb run of this training (section 5b); `--resume` reads it to continue the same run |
 | `wandb/` | the local files of wandb (the whole run when it is offline) |
 | `resume/` | the training state to resume from (section 6), replaced at each snapshot |

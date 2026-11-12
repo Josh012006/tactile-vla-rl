@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -92,6 +93,15 @@ def print_dry_run(train, val, cfg, model_cfg, mode) -> None:
           f"{bool((target[2] == target[2, -1]).all())}")
 
 
+def enable_compilation_cache() -> None:
+    """JAX's persistent compilation cache, as openpi's scripts/train.py and so expo-ft have it (~/.cache/jax): the first step of every launch compiled for about 100 s
+    (97 to 99 s measured for pi0.5 full, and again in the first evaluation), and so does every resume. The cache only stores what XLA compiled: results do not change.
+    JAX_COMPILATION_CACHE_DIR, when set, is the folder instead."""
+    import jax
+    if not os.environ.get("JAX_COMPILATION_CACHE_DIR"):
+        jax.config.update("jax_compilation_cache_dir", str(Path("~/.cache/jax").expanduser()))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="configs/model/<name>.yaml")
@@ -130,6 +140,7 @@ def main(argv=None) -> int:
         print_dry_run(train, val, cfg, model_cfg, mode)
         return 0
 
+    enable_compilation_cache()
     from src.models import load_model
     if not args.resume:
         run_dir = ROOT / cfg.output_root / (args.run_name or run_name_of(args.model, cfg.demos, mode))

@@ -35,6 +35,7 @@ wandb (src/algos/tracking.py): the events of metrics.jsonl are also logged to a 
 """
 from __future__ import annotations
 
+import collections
 import dataclasses
 import functools
 import json
@@ -561,8 +562,17 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
     except ValueError:                                      # not the main thread: nothing to catch
         previous_handler = None
     base_key = jax.random.key(cfg.seed)
-    feed = prefetch((micro_batches(policy, train_set, rows, cfg.micro_batch_size)
-                     for rows in row_batches(len(train_set), cfg.batch_size, cfg.steps, cfg.seed, skip=start_step)), cfg.prefetch)
+    # Seconds the feed thread takes to prepare one batch (openpi's transforms on CPU), logged as `batch_prep_s`: as long as it stays under `step_s` the GPU never waits for data.
+    prep_s: collections.deque = collections.deque()
+    last_prep: Optional[float] = None
+
+    def timed_micro_batches(rows):
+        t_prep = time.monotonic()
+        out = micro_batches(policy, train_set, rows, cfg.micro_batch_size)
+        prep_s.append(time.monotonic() - t_prep)
+        return out
+
+    feed = prefetch((timed_micro_batches(rows) for rows in row_batches(len(train_set), cfg.batch_size, cfg.steps, cfg.seed, skip=start_step)), cfg.prefetch)
     t_start, t_window, losses, grad_norms, checkpoints, last_loss = time.monotonic(), time.monotonic(), [], [], [], float("nan")
     stopped, last_snapshot = False, start_step
     for step, micros in enumerate(feed, start=start_step + 1):
@@ -590,8 +600,12 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
                 except Exception as error:                  # noqa: BLE001
                     frozen_sq = None
                     print(f"[sft] param_norm not computed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+            prepared = [prep_s.popleft() for _ in range(len(prep_s))]       # the thread runs ahead: a short window may hold none (the last value is repeated)
+            if prepared:
+                last_prep = float(np.mean(prepared))
             log.write(event="train", step=step, loss=last_loss, grad_norm=float(np.mean(jax.device_get(grad_norms))), **norm, lr=float(schedule(step - 1)),
-                      step_s=round((now - t_window) / len(losses), 3), memory_mib=device_memory_mib())
+                      step_s=round((now - t_window) / len(losses), 3), batch_prep_s=round(last_prep, 3) if last_prep is not None else None,
+                      memory_mib=device_memory_mib())
             losses, grad_norms, t_window = [], [], now
         if step % cfg.eval_interval == 0 or step == cfg.steps:
             evaluate(step)
