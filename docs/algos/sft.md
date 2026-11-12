@@ -66,9 +66,13 @@ Which statistics the SFT normalises with is the `norm_stats` block of the model 
   expo-ft (`configs/task/isaaclab/peg_insert_forge_sft_robotiq_*.yaml` there): the same file for the three runs, so that the demonstrations are the only difference
   between them; the noisy set was the one that covered the other two best. The six experiment files carry the block for pi0.5 (`model_set: norm_stats.*`). The file is
   the one expo-ft wrote (`scripts/demos/compute_demo_norm_stats.py`, identical in both repositories); copy it, do not recompute it.
-- **pi0-FAST: the checkpoint's own (DROID's, from the PolaRiS checkpoint)**, for now. Those statistics are computed on pi0.5's targets (offsets from the chunk-start state over 16
-  steps); pi0-FAST's are absolute joint targets over 10 steps, so the same file does not fit. Statistics for it would need their own computation and a check of the FAST
-  token lengths (`docs/models/pi0_fast.md`: 62 tokens at most with the DROID ones, limit 256), because a wider normalised range lengthens the sequences.
+- **pi0-FAST: the checkpoint's own (DROID's, from the PolaRiS checkpoint) until the measurement below decides.** Its openpi pipeline normalises OFFSETS from the chunk-start state too
+  (`RLDSDroidDataConfig`, JOINT_POSITION: `DeltaActions` before `Normalize`, `AbsoluteActions` after the inverse), so statistics computed on the demonstrations have the same kind as
+  pi0.5's and only the chunk length differs (10 steps): `compute_demo_norm_stats --horizon 10 --droid-stats <the polaris checkpoint's norm_stats.json>`. What is not known is what they do to
+  the FAST tokens (a wider normalised range lengthens the sequences: 62 tokens at most with DROID's, `max_token_len` 180, 256 generated at most) and to the reconstruction error of
+  FAST (0.011 rad with DROID's). `scripts/fast_tokens.py` measures both with either set of statistics (`--norm-stats-dir`, `--norm-stats-asset-id`), CPU only. If the measurement
+  does not settle it, the criterion is the success rate in the environment of a pair of pi0-FAST SFTs on the noisy demonstrations, one with each set (a loss or an error computed with
+  other statistics is not comparable).
 - **The checkpoints carry them**: `checkpoints/<step>/assets/<asset_id>/norm_stats.json` (as openpi does) and the block in `meta.json` (`model_cfg`). A policy that loads
   such a checkpoint (evaluation, RL) must be built with the same `norm_stats` block, otherwise the actions come back un-normalised with the wrong scale. A resume refuses a run
   whose model YAML differs. The dry run prints which file is used and stops if it is missing.
@@ -301,6 +305,6 @@ that does not fit, the resume (2 + 2 steps end in the state of 4 in one go, the 
 **Not checked, to be seen in the first runs:**
 
 - the memory, the time per step and the snapshot size of the full runs after the first 30 steps (measured at 30 steps; the snapshots may grow towards 3 times the float32 parameters);
-- statistics for pi0-FAST computed on the demonstrations (absolute targets over 10 steps), and what they do to the FAST token lengths and to the 0.011 rad reconstruction error;
+- statistics for pi0-FAST computed on the demonstrations (offsets over 10 steps), and what they do to the FAST token lengths and to the 0.011 rad reconstruction error;
 - pi0-FAST training on real FAST tokens: the path through the real tokenizer (the tests use a stub) has only been exercised by `scripts/fast_tokens.py` for the lengths;
 - that the 4000 steps and the learning rate give a policy as good as expo-ft's SFT (success rate in the env: this is the RL's evaluation, not this file's);

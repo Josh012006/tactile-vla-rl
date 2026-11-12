@@ -16,6 +16,10 @@ What is computed (exactly what openpi's compute_norm_stats.py would see with the
                          episode (chunk_offsets of convert_waypoint_demos_to_lerobot.py, same function)
 and per dimension mean, std, q01, q99 (pi05 normalizes with the quantiles: (x - q01) / (q99 - q01) * 2 - 1).
 
+--horizon H            the chunk length (default 16: pi0.5). pi0-FAST: --horizon 10. Its openpi pipeline (RLDSDroidDataConfig, JOINT_POSITION) normalises OFFSETS from the
+                         chunk-start state too (DeltaActions before Normalize; the policy's output is absolute only AFTER the inverse AbsoluteActions), so the statistics
+                         have the same kind, and only the length of the chunk differs. Give --droid-stats the checkpoint's own file then (polaris/pi0_fast_droid_jointpos_polaris).
+
 Two safeguards, because a dimension that hardly moves in 50 scripted demos gets a tiny range and the
 normalization divides by it, which amplifies any noise (and by ~1e-6 for a constant dimension):
     --min-range-frac F   the range q99 - q01 (and the std) of a joint dimension is at least F times the DROID one
@@ -41,7 +45,7 @@ KEYS = ("state", "actions")
 FIELDS = ("mean", "std", "q01", "q99")
 
 
-def read_demos(files):
+def read_demos(files, horizon=ACTION_HORIZON):
     """state (N, 8) and chunk offsets (N * horizon, 8) of all the demos."""
     states, chunks = [], []
     for f in files:
@@ -55,7 +59,7 @@ def read_demos(files):
         if q.shape != (len(act), 7) or act.shape[1] != 8 or len(grip) != len(act):
             raise SystemExit(f"{f.name}: unexpected shapes q {q.shape}, gripper {grip.shape}, actions {act.shape}")
         states.append(np.concatenate([q, grip], axis=1))
-        chunks.append(chunk_offsets(q, act, ACTION_HORIZON).reshape(-1, 8))
+        chunks.append(chunk_offsets(q, act, horizon).reshape(-1, 8))
     return np.concatenate(states).astype(np.float64), np.concatenate(chunks).astype(np.float64)
 
 
@@ -97,6 +101,8 @@ def main():
                    help="Assets folder: the file is written to <output-dir>/<asset-id>/norm_stats.json. "
                         "Relative paths are relative to the repo root.")
     p.add_argument("--asset-id", default="forge_demos", help="Sub-folder name (openpi 'asset id').")
+    p.add_argument("--horizon", type=int, default=ACTION_HORIZON,
+                   help="Chunk length: 16 for pi0.5 (default), 10 for pi0-FAST (also normalises offsets from the chunk-start state).")
     p.add_argument("--max-episodes", type=int, default=None,
                    help="Use only the first N demos (sorted by name). Give the SFT's num_data_sft (the dataset "
                         "conversion keeps the same order). Default: all.")
@@ -133,8 +139,8 @@ def main():
                      "(or --no-droid for the raw demo statistics, without safeguards).")
         droid = load_droid(args.droid_stats)
 
-    state, chunks = read_demos(files)
-    print(f"{len(files)} demos from {demos_dir}: {len(state)} frames, {len(chunks)} chunk rows (horizon {ACTION_HORIZON})")
+    state, chunks = read_demos(files, args.horizon)
+    print(f"{len(files)} demos from {demos_dir}: {len(state)} frames, {len(chunks)} chunk rows (horizon {args.horizon})")
     demo = {"state": stats_of(state), "actions": stats_of(chunks)}
     final, floored = apply_safeguards(demo, droid, args.min_range_frac, not args.demo_gripper)
 

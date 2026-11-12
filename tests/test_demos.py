@@ -344,3 +344,16 @@ def test_teleop_client_names_what_to_change_on_a_wrongly_started_server():
     assert "num_envs=1" in msg and "success_hold_steps=5" in msg and "gripper_can_open=false" in msg
     env.spec = {"num_envs": 1, "success_hold_steps": 5, "robot": {"gripper_can_open": False}}
     env.check_server()
+
+
+def test_the_demo_norm_stats_take_the_chunk_length_of_the_model(tmp_path):
+    from scripts.demos import compute_demo_norm_stats as cns
+    rng = np.random.default_rng(0)
+    for i in range(2):
+        np.savez(tmp_path / f"ep_{i:04d}_seed{i}.npz", joint_position=rng.normal(size=(12, 7)).astype(np.float32), gripper_position=np.full(12, 0.87, np.float32),
+                 actions=rng.normal(size=(12, 8)).astype(np.float32))
+    files = sorted(tmp_path.glob("ep_*.npz"))
+    state, chunks = cns.read_demos(files)                      # pi0.5: 16 steps
+    assert state.shape == (24, 8) and chunks.shape == (24 * 16, 8)
+    _, short = cns.read_demos(files, 10)                       # pi0-FAST: 10 steps, offsets from the chunk-start state too
+    assert short.shape == (24 * 10, 8)

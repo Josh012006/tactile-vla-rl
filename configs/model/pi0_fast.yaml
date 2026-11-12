@@ -26,8 +26,9 @@ vlm:
   force_mode: measured
 
 # Normalisation statistics: the checkpoint's own (the PolaRiS one's `assets/droid`) unless a `norm_stats` block (`dir`, `asset_id`) names others (see configs/model/pi05.yaml).
-# The statistics computed on the demonstrations (scripts/demos/compute_demo_norm_stats.py) are those of pi0.5's OFFSETS over 16 steps: they do not fit this model, whose
-# targets are absolute over 10 steps (docs/algos/sft.md, section 2b).
+# This model's pipeline normalises OFFSETS from the chunk-start state (DeltaActions before Normalize), like pi0.5's, over 10 steps: statistics of the demonstrations for it are
+# `python -m scripts.demos.compute_demo_norm_stats --horizon 10 --droid-stats <this checkpoint's assets/droid/norm_stats.json>`. Whether they help is measured with scripts/fast_tokens.py
+# (token lengths, reconstruction error) before any SFT uses them (docs/algos/sft.md, section 2b).
 
 # weight_loader: the checkpoint weights + the LoRA parameters from the model's own initialisation (normal(0.01) for lora_a AND lora_b, as
 # openpi has it). Without LoRA nothing is missing and the result is the checkpoint itself. `strict` is openpi's `create_trained_policy`:

@@ -200,3 +200,18 @@ def test_main_writes_the_report_and_prints_the_recommendation(tmp_path, capsys):
 def test_main_refuses_a_model_that_is_not_pi0_fast(capsys):
     assert ft.main(["--model", "pi05"], pipeline=identity_pipeline()) == 2
     assert "pi0_fast" in capsys.readouterr().err
+
+
+def test_main_names_the_normalisation_statistics_and_needs_both_keys(tmp_path, capsys):
+    folder = tmp_path / "demos"
+    folder.mkdir()
+    d = demo(seed=0)
+    np.savez(folder / "ep_0000_seed0.npz", prompt=np.array(d["prompt"]), **{k: d[k] for k in ("joint_position", "gripper_position", "actions")})
+    out = tmp_path / "report.json"
+    assert ft.main(["--demos-dir", str(folder), "--out", str(out)], pipeline=identity_pipeline()) == 0
+    assert json.loads(out.read_text())["norm_stats"] == "the checkpoint's own"
+    assert ft.main(["--demos-dir", str(folder), "--out", str(out), "--norm-stats-dir", str(tmp_path / "a"), "--norm-stats-asset-id", "mine"],
+                   pipeline=identity_pipeline()) == 0
+    assert json.loads(out.read_text())["norm_stats"] == str(tmp_path / "a" / "mine" / "norm_stats.json")
+    with pytest.raises(ValueError, match="norm_stats"):
+        ft.main(["--demos-dir", str(folder), "--out", str(out), "--norm-stats-dir", str(tmp_path / "a")], pipeline=identity_pipeline())

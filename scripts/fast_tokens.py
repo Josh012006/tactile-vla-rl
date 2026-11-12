@@ -18,6 +18,9 @@ how much of the chunk survives (error in rad after `AbsoluteActions`).
     python -m scripts.fast_tokens                                 # the three demo folders, the YAML's horizon and limits
     python -m scripts.fast_tokens --horizon 10 --horizon 16 --max-token-len 250 --demos-dir demos/isaaclab/ForgePegInsert_Robotiq_teleop
 
+    # with other normalisation statistics than the checkpoint's (the `norm_stats` block of the model YAML: <dir>/<asset id>/norm_stats.json)
+    python -m scripts.fast_tokens --norm-stats-dir assets/forge_demo_norm --norm-stats-asset-id forge_demos_robotiq_noisy_h10 --out reports/fast_tokens_demo_stats.json
+
 CPU only, about a minute. Needs the `vla` dependency group (openpi, transformers) and the files cached by scripts.fetch_models.
 """
 from __future__ import annotations
@@ -123,16 +126,13 @@ def openpi_pipeline(model_cfg: dict, measure_len: int) -> Pipeline:
     """The real pipeline of configs/model/<model>.yaml: its openpi TrainConfig (data transforms), the DROID statistics of the YAML's
     checkpoint, and a FAST tokenizer long enough that nothing is truncated while measuring."""
     from openpi.models import tokenizer as _tokenizer
-    from openpi.training import checkpoints as _checkpoints
     from openpi.training import config as _config
 
-    from src.models.loading import _download
+    from src.models.loading import _download, load_norm_stats
 
     train_cfg = _config.get_config(model_cfg["openpi_config"])
     data_config = train_cfg.data.create(train_cfg.assets_dirs, train_cfg.model)
-    if data_config.asset_id is None:
-        raise ValueError("asset id is required to load the norm stats")
-    norm_stats = _checkpoints.load_norm_stats(_download(model_cfg["checkpoint"]) / "assets", data_config.asset_id)
+    norm_stats = load_norm_stats(model_cfg, train_cfg, _download(model_cfg["checkpoint"]))       # the YAML's `norm_stats` block, else the checkpoint's
     kwargs = getattr(train_cfg.model, "fast_model_tokenizer_kwargs", None) or {}
     tokenizer = _tokenizer.FASTTokenizer(measure_len, **kwargs)
     return make_pipeline(data_config.data_transforms, norm_stats, data_config.use_quantile_norm, tokenizer)
@@ -252,11 +252,15 @@ def main(argv: Optional[Sequence[str]] = None, pipeline: Optional[Pipeline] = No
     ap.add_argument("--limit-demos", type=int, default=0, help="only the first N demos of each folder (0 = all)")
     ap.add_argument("--margin", type=float, default=0.2, help="safety margin of the recommended max_token_len")
     ap.add_argument("--measure-len", type=int, default=1024, help="length of the measuring tokenizer: must be above every chunk, nothing is truncated")
+    ap.add_argument("--norm-stats-dir", default=None, help="other normalisation statistics than the checkpoint's: <dir>/<asset id>/norm_stats.json (with --norm-stats-asset-id)")
+    ap.add_argument("--norm-stats-asset-id", default=None)
     ap.add_argument("--out", default="reports/fast_tokens.json", help="JSON report")
     a = ap.parse_args(argv)
 
-    from src.models.interface import load_model_cfg
+    from src.models.interface import apply_overrides, load_model_cfg, norm_stats_source
     cfg = load_model_cfg(a.model)
+    if a.norm_stats_dir or a.norm_stats_asset_id:
+        cfg = apply_overrides(cfg, {"norm_stats.dir": a.norm_stats_dir, "norm_stats.asset_id": a.norm_stats_asset_id})        # refused unless both are given
     if cfg.get("family") != "pi0_fast":
         print(f"configs/model/{a.model}.yaml is a '{cfg.get('family')}' model: this measures FAST tokens (family pi0_fast)", file=sys.stderr)
         return 2
@@ -265,6 +269,9 @@ def main(argv: Optional[Sequence[str]] = None, pipeline: Optional[Pipeline] = No
     folders = a.demos_dir or list(DEFAULT_DEMO_DIRS)
     pipe = pipeline if pipeline is not None else openpi_pipeline(cfg, a.measure_len)
     report = run(cfg, pipe, folders, horizons, max_token_len, a.max_decoding_steps, a.tail, a.limit_demos, a.margin)
+    source = norm_stats_source(cfg)
+    report["norm_stats"] = str(source[0] / source[1] / "norm_stats.json") if source else "the checkpoint's own"
+    print(f"normalisation statistics: {report['norm_stats']}")
     print_report(report)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
