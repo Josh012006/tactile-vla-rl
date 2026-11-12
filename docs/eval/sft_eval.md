@@ -52,9 +52,11 @@ a requeue, send the command again. Resources for one worker: 1 L40S, 8 CPUs, 48 
 
 The aim is that the same weights give the same episodes, bit for bit. **Measured on 12 Nov. 2026, this is NOT reached end to end**: two evaluations of the same initial state (pi0.5, one worker, a fresh server, same seeds,
 same XLA flags, same GPU) gave different `eval_sha` (`1d6af170...` and `aba0a88d...`). The first observation of an episode was bit-identical in 3 episodes out of 4 (`start_sha`; the 4th started 0.003 mm
-elsewhere: N1), then the trajectories diverged by tens of millimetres at the end of 150 steps (the untrained model moves the arm far, which amplifies any difference). So the model's determinism below is by
-construction, not yet shown bit for bit on the GPU, and the physics was shown bit-identical over 20 steps only (G1); where the divergence starts is what `scripts/probe_determinism.py` isolates (section 6). Until then
-an evaluation is **statistically** reproducible (fixed seeds, fixed starts, a standard error), not bit-reproducible. The sources of randomness, and what is done about each:
+elsewhere: N1), then the trajectories diverged by tens of millimetres at the end of 150 steps (the untrained model moves the arm far, which amplifies any difference). `scripts/probe_determinism.py` (section 6) then isolated the two halves, on an L40S: **the model is bit-reproducible** (the same observation and seed give the same action chunk,
+bit for bit, in the same object, after other calls, in a fork, in several threads at once and in fresh processes, for pi0.5 and pi0-FAST) and **the physics is bit-reproducible over 150 scripted steps** from fresh servers
+(joints, gripper, peg-socket offset and force identical in 3 servers). What differs is the input of the model that the first test did not cover: **the camera images** (N3: never compared bit for bit); the next
+run of `--part env` compares them. A second reset of the same seed in the same server starts from a state that differs from the first (0.0256 at the end of the same scripted play) **identically in every server**, so it is reproducible
+for a given sequence of episodes, and it is the history dependence of N1. Until the images are settled an evaluation is **statistically** reproducible (fixed seeds, fixed starts, a standard error), not bit-reproducible. The sources of randomness, and what is done about each:
 
 | source | pi0.5 | pi0-FAST | what the evaluation does |
 |---|---|---|---|
@@ -150,8 +152,9 @@ Every probe writes in its own folder (`runs/sft/probing/_probe_eval_parallel_<mo
 - `--part policy --model pi05 --processes 2` (and pi0_fast): no simulator. The same observation and seed through the real model, five ways (the same policy re-seeded, the same calls without re-seeding done twice, a `fork`,
   several forks in several threads, fresh Python processes), comparing the bits of the action chunk. All identical: the model is bit-reproducible and the physics diverges.
 - `--part env --servers 3`: no model. The same 150 open-loop joint targets (start pose plus a fixed sinusoid) played on fresh servers, each twice, comparing the readings step by step: the first step that differs and
-  how far apart the traces are at 1, 5, 10, 25, 50, 100, 150 steps. Identical: the physics is reproducible over 150 steps and the model is to blame; different: the physics is not, and the first step says whether it is
-  the contact solver (early) or chaos amplifying float noise (late and growing).
+  how far apart the traces are at 1, 5, 10, 25, 50, 100, 150 steps; and, for the first play of every server, the two camera images (first differing step, fraction of pixel values that differ, largest difference).
+  Measured (12 Nov. 2026): the readings are identical across 3 fresh servers over 150 steps; the second play in each server differs from the first, by the same amount in all three (N1, reproducible). The images are
+  compared by the version of the script that adds them.
 
 **First measurements (L40S, 12 Nov. 2026, initial state, 4 episodes, XLA deterministic ops on, read from the two jobs' logs).** Seconds per episode of one worker, and throughput:
 

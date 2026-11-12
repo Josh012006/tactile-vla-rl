@@ -19,8 +19,11 @@ class FakeEnv:
         self.actions = []
 
     def _res(self, done):
+        image = np.zeros((1, 8, 8, 3), np.uint8)
+        if self.noise and self.t >= self.noise_from:
+            image[0, 0, 0, 0] = 3                                           # one pixel value, once the perturbation has started
         obs = {P.JOINT_POSITION: self.q[None].astype(np.float32), P.GRIPPER_POSITION: np.full((1, 1), 0.9, np.float32), P.PEG_SOCKET_OFFSET: np.full((1, 3), 0.01, np.float32),
-               P.FT_FORCE: np.zeros((1, 3), np.float32)}
+               P.FT_FORCE: np.zeros((1, 3), np.float32), P.EXTERIOR_IMAGE: image, P.WRIST_IMAGE: image.copy()}
         return types.SimpleNamespace(obs=obs, all_done=done)
 
     def reset(self, seed, round):
@@ -86,3 +89,16 @@ def test_the_model_is_the_same_bits_every_way_it_is_called_on_the_tiny_policy(po
     assert len(result["threads"]) == 4 and len(set(result["repeat"] + [result["reference"], result["fork"]])) == 1
     pol.seed(6)
     assert PD.chunk_sha(pol.plan(PD.synthetic_obs(), "insert the peg")) != result["reference"]         # another seed is another chunk: the check can tell
+
+
+def test_the_camera_frames_of_two_plays_are_compared_by_first_step_pixels_and_size_of_the_difference():
+    a, b, c = {}, {}, {}
+    PD.run_trace(FakeEnv(), 1, 10, images=a)
+    PD.run_trace(FakeEnv(), 1, 10, images=b)
+    PD.run_trace(FakeEnv(noise=1e-6, noise_from=4), 1, 10, images=c)
+    assert len(a[P.EXTERIOR_IMAGE]) == 11 and a[P.EXTERIOR_IMAGE][0].shape == (8, 8, 3)
+    same = PD.compare_images(a, b)
+    assert all(v["identical"] and v["first_differing_step"] is None for v in same.values())
+    diff = PD.compare_images(a, c)[P.EXTERIOR_IMAGE]
+    assert not diff["identical"] and diff["first_differing_step"] == 4 and diff["max_abs_diff_at"]["5"] == 3
+    assert diff["differing_fraction_at"]["5"] == pytest.approx(1 / (8 * 8 * 3)) and "25" not in diff["max_abs_diff_at"]

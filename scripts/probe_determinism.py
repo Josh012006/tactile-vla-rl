@@ -14,12 +14,14 @@ differs over 150 steps (docs/envs/isaaclab_env.md G1 was measured over 20 steps 
                     fork     a `fork` of the policy (what the sweep gives each worker);
                     threads  several forks called at the same time from several threads;
                     process  `--processes N`: N more fresh Python processes (a new compilation each): the reference chunk of each.
-                  All identical: the model is bit-reproducible and the divergence is the physics. Some different: the model is not, and which of the ways differ says where to look.
+                  All identical: the model is bit-reproducible, so its inputs (images, state) are what differ between evaluations. Some different: the model is not, and which of the ways differ says where to look.
   --part env      (no model) The same open-loop sequence of 150 joint targets (the first observation's joint positions plus a fixed sinusoid: the arm moves, the peg stays in the
                   gripper, as in an episode) played on `--servers` FRESH servers, each one twice in a row (a second reset of the same seed in the same server). Per-step readings of every
                   trace (joints, gripper, peg-socket offset, force) are compared with the first: the first step that differs, and how far apart they are at 1, 5, 10, 25, 50, 100, 150 steps.
-                  Identical across fresh servers: the physics is reproducible over 150 steps and the model is to blame. Different: the physics is not, and the first step says when (an
-                  early step: the contact solver; growing slowly from a late step: chaos amplifying float noise).
+                  Identical across fresh servers: the physics is reproducible over 150 steps. Different: the physics is not, and the first step says when (an early step: the contact
+                  solver; growing slowly from a late step: chaos amplifying float noise). The two CAMERA IMAGES of the first play of every server are compared the same way (first differing
+                  step, fraction of pixels that differ, largest difference): the model sees the images, so images that differ between fresh servers change its actions (docs/envs/isaaclab_env.md N3).
+                  A second play in the same server starts from a (reproducibly) different state: N1.
 
 The verdict is printed and stored in reports/probe_determinism_<part>_<model or env>_<time>_<job id>.json; the data (server logs) in runs/sft/probing/_probe_determinism_<same tag>/.
 """
@@ -48,6 +50,7 @@ from src.eval.sweep import gpu_name, kill_all_servers, make_server_factory
 from src.models.interface import ROOT, apply_overrides, load_model_cfg
 
 TRACE_KEYS = HASHED_KEYS + (P.FT_FORCE,)         # what every step of a trace holds (environment 0): no image
+IMAGE_KEYS = (P.EXTERIOR_IMAGE, P.WRIST_IMAGE)   # compared separately (`compare_images`): they are what the model sees
 CHECK_STEPS = (1, 5, 10, 25, 50, 100, 150)
 PROMPT = "insert the peg"
 
@@ -132,17 +135,27 @@ def reading(obs: dict) -> np.ndarray:
     return np.concatenate([np.asarray(obs[k], np.float64)[0].ravel() for k in TRACE_KEYS if k in obs])
 
 
-def run_trace(env, seed: int, steps: int, amplitude: float = 0.15, period: int = 60) -> np.ndarray:
-    """reset(seed, round 0) then `steps` steps of the scripted targets; returns (steps + 1, D): the reading after the reset and after every step (shorter if the episode ends)."""
+def run_trace(env, seed: int, steps: int, amplitude: float = 0.15, period: int = 60, images: Optional[Dict[str, list]] = None) -> np.ndarray:
+    """reset(seed, round 0) then `steps` steps of the scripted targets; returns (steps + 1, D): the reading after the reset and after every step (shorter if the episode ends).
+    `images`, a dict, is filled with the list of environment 0's camera frames of every reading, by image key."""
     res = env.reset(seed=seed, round=0)
     targets = scripted_targets(np.asarray(res.obs[P.JOINT_POSITION][0][:7]), steps, amplitude, period)
     rows = [reading(res.obs)]
+
+    def keep(obs: dict) -> None:
+        if images is not None:
+            for key in IMAGE_KEYS:
+                if key in obs:
+                    images.setdefault(key, []).append(np.array(np.asarray(obs[key])[0], copy=True))
+
+    keep(res.obs)
     for t in range(steps):
         action = np.zeros((env.num_envs, P.ACTION_DIM), np.float32)
         action[:, :7] = targets[t]
         action[:, 7] = 1.0                                                # ignored while the task YAML has gripper_can_open: false
         res = env.step(action, auto_reset=False)
         rows.append(reading(res.obs))
+        keep(res.obs)
         if res.all_done:
             break
     return np.stack(rows)
@@ -159,6 +172,19 @@ def compare_traces(traces: Dict[str, np.ndarray], reference: str, check_steps=CH
         out["traces"][name] = {"length": int(len(trace)), "identical": bool(same.all() and len(trace) == len(ref)), "first_differing_step": first,
                                "max_abs_diff_at": {str(s): float(np.abs(ref[s] - trace[s]).max()) for s in check_steps if s < n},
                                "max_abs_diff_final": float(np.abs(ref[n - 1] - trace[n - 1]).max())}
+    return out
+
+
+def compare_images(reference: Dict[str, list], other: Dict[str, list], check_steps=CHECK_STEPS) -> dict:
+    """Per camera: whether the frames are bit-identical, the first frame that differs, and at `check_steps` the fraction of pixel values that differ and the largest difference (0-255)."""
+    out: dict = {}
+    for key, ref in reference.items():
+        frames = other.get(key, [])
+        n = min(len(ref), len(frames))
+        differs = [bool(not np.array_equal(ref[i], frames[i])) for i in range(n)]
+        out[key] = {"frames": n, "identical": not any(differs) and len(ref) == len(frames), "first_differing_step": differs.index(True) if any(differs) else None,
+                    "differing_fraction_at": {str(s): float(np.mean(ref[s] != frames[s])) for s in check_steps if s < n},
+                    "max_abs_diff_at": {str(s): int(np.abs(ref[s].astype(np.int16) - frames[s].astype(np.int16)).max()) for s in check_steps if s < n}}
     return out
 
 
@@ -230,7 +256,7 @@ def policy_part(args) -> int:
         print(f"  {f[:-10]:<9} {'-' if result[f] is None else ('identical' if result[f] else 'DIFFERENT')}")
     if processes:
         print(f"  other processes: {processes}")
-    verdict = "the model is bit-reproducible here: the divergence of an evaluation comes from the physics" if all(result[f] in (True, None) for f in flags) \
+    verdict = "the model is bit-reproducible here: what differs between two evaluations is its input (the images or the state), not the model" if all(result[f] in (True, None) for f in flags) \
         else "the model is NOT bit-reproducible in the ways marked DIFFERENT"
     print(verdict)
     write_report(args, {"part": "policy", "model": args.model, "xla_flags": os.environ.get("XLA_FLAGS", ""), "gpu": gpu_name(), "result": result, "verdict": verdict}, args.model)
@@ -256,6 +282,7 @@ def env_part(args) -> int:
     factory = make_server_factory(task_config, [], root / "logs")
     print(f"simulator determinism on {gpu_name()}: {args.servers} fresh servers x {args.replays} plays of {steps} scripted steps (seed {args.seed})", flush=True)
     traces: Dict[str, np.ndarray] = {}
+    frames: Dict[str, Dict[str, list]] = {}                                 # the camera frames of the first play of every server
     for i in range(args.servers):
         server = factory(f"s{i}")
         env = None
@@ -265,7 +292,10 @@ def env_part(args) -> int:
             env = VectorEnvClient([server.endpoint], connect_timeout_s=120.0)
             for k in range(args.replays):
                 t0 = time.monotonic()
-                traces[f"s{i}.r{k}"] = run_trace(env, args.seed, steps, args.amplitude, args.period)
+                collected: Optional[Dict[str, list]] = {} if k == 0 else None
+                traces[f"s{i}.r{k}"] = run_trace(env, args.seed, steps, args.amplitude, args.period, images=collected)
+                if collected is not None:
+                    frames[f"s{i}.r0"] = collected
                 print(f"{time.strftime('%H:%M:%S')} server {i}, play {k}: {len(traces[f's{i}.r{k}']) - 1} steps in {time.monotonic() - t0:.0f} s", flush=True)
         finally:
             if env is not None:
@@ -278,12 +308,21 @@ def env_part(args) -> int:
             print(f"  {name} against {result['fresh_servers']['reference']}: " + ("identical" if t["identical"] else f"first differing step {t['first_differing_step']}, max difference {t['max_abs_diff_at']} (final {t['max_abs_diff_final']:.3g})"))
     for name, t in result["same_server_replays"].items():
         print(f"  {name} against {name[:-3]}.r0 (same server, second reset): " + ("identical" if t["identical"] else f"first differing step {t['first_differing_step']}, final difference {t['max_abs_diff_final']:.3g}"))
-    verdict = ("the physics is bit-reproducible over this sequence from fresh servers: the divergence of an evaluation comes from the model" if result["fresh_servers_identical"]
+    verdict = ("the physics is bit-reproducible over this sequence from fresh servers" if result["fresh_servers_identical"]
                else "the physics is NOT bit-reproducible from fresh servers over this sequence: see the first differing step")
+    result["images"] = {name: compare_images(frames["s0.r0"], frames[name]) for name in sorted(frames) if name != "s0.r0"}
+    print("\n=== camera images of the first play of each server, against server 0")
+    for name, cams in result["images"].items():
+        for key, c in cams.items():
+            print(f"  {name} {key.split('/')[-1]}: " + ("identical" if c["identical"] else f"first differing step {c['first_differing_step']}, differing pixel values {c['differing_fraction_at']}, "
+                                                                                       f"largest difference {c['max_abs_diff_at']}"))
+    images_identical = all(c["identical"] for cams in result["images"].values() for c in cams.values())
+    result["images_identical"] = images_identical
+    verdict += ("; the camera images are bit-identical too" if images_identical else "; the CAMERA IMAGES differ between fresh servers (the model's input is not reproducible)")
     print(verdict)
     np.savez_compressed(root / "traces.npz", **{k.replace(".", "_"): v for k, v in traces.items()})
     write_report(args, {"part": "env", "gpu": gpu_name(), "steps": steps, "seed": args.seed, "result": result, "verdict": verdict, "data": str(root)}, "env", tag)
-    return 0 if result["fresh_servers_identical"] else 1
+    return 0 if result["fresh_servers_identical"] and images_identical else 1
 
 
 def write_report(args, report: dict, name: str, tag: Optional[str] = None) -> None:
