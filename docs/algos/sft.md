@@ -116,7 +116,7 @@ gripper. For pi0-FAST the line also has `decode`: the failures of the FAST decod
 ## 5b. wandb
 
 The events of `metrics.jsonl` are also logged to Weights & Biases (`src/algos/tracking.py`, settings `wandb_mode` and `wandb_project` in `configs/algo/sft.yaml`; the run is named after its folder),
-as expo-ft did: `train/*` (loss, `grad_norm`, `lr`, `step_s`, `memory_mib/*`), `eval/<train|val>/*` (loss, own-chunk errors, FAST decoding statistics), `checkpoint/*`, `snapshot/*` (`save_s`, `size_mib`),
+as expo-ft did (openpi's `loss`, `grad_norm`, `param_norm`, and the `camera_views` of 5 training rows at the start of a fresh run): `train/*` (loss, `grad_norm`, `param_norm`, `lr`, `step_s`, `memory_mib/*`), `eval/<train|val>/*` (loss, own-chunk errors, FAST decoding statistics), `checkpoint/*`, `snapshot/*` (`save_s`, `size_mib`),
 `perf/*` (the first step, compilation included), and the parameter counts and final numbers in the run's summary. The config (settings + model YAML) is the run's config in wandb. Tags: the model and `lora`/`full`.
 
 - **Resume = the same wandb run.** The id is written to `<run>/wandb_id.txt` when the training starts; `--resume` calls `wandb.init(id=..., resume="must")`, in the project the run was created in

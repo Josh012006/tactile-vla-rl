@@ -3,7 +3,7 @@
 Modelled on expo-ft's `init_wandb` (and openpi's): the id of the wandb run is written to <run>/wandb_id.txt when the run starts, and a resumed run
 (`--resume`) re-attaches to THAT run with `resume="must"`, so one training is one wandb run, however many times it was stopped and continued.
 
-The events of metrics.jsonl are forwarded as they are written (WandbSink): `train/*`, `eval/<train|val>/*`, `checkpoint/*`, `snapshot/*`, `perf/*`.
+The events of metrics.jsonl are forwarded as they are written (WandbSink): `train/*`, `eval/<train|val>/*`, `checkpoint/*`, `snapshot/*`, `perf/*`, and, like openpi's SFT, `camera_views` (5 training rows as the model sees them) at the start of a fresh run.
 Every point carries our own `step` and the x axis of every metric is `step` (`define_metric`), not wandb's internal counter: a resumed run goes back to
 the step of its snapshot (some steps after it were already logged by the attempt that died), and wandb's own step may only increase, it drops the points
 that go back. The steps that were run twice therefore appear twice on the curve; with a SIGTERM stop (snapshot at the stop step) there are none.
@@ -117,6 +117,20 @@ class WandbSink:
                     flatten(f"{PREFIX[event]}/{key}", value, metrics)
             if metrics:
                 self.run.log({"step": step, **metrics})
+
+    def log_camera_views(self, step: int, images: Mapping[str, Any], count: int = 5) -> None:
+        """openpi's `camera_views`: for the first `count` rows, one picture with the cameras side by side. `images`: name -> (rows, H, W, 3), uint8 or in [-1, 1]."""
+        import numpy as np
+        import wandb
+
+        def to_uint8(x):
+            x = np.asarray(x)
+            return x if x.dtype == np.uint8 else np.clip((x.astype(np.float32) + 1.0) * 127.5, 0, 255).astype(np.uint8)
+
+        names = list(images)
+        rows = min(count, len(images[names[0]]))
+        pictures = [wandb.Image(np.concatenate([to_uint8(images[name][i]) for name in names], axis=1)) for i in range(rows)]
+        self.run.log({"step": step, "camera_views": pictures})
 
     def close(self, exit_code: int = 0) -> None:
         self.run.finish(exit_code=exit_code)

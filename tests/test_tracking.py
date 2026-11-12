@@ -3,6 +3,7 @@ import json
 import sys
 import types
 
+import numpy as np
 import pytest
 
 from src.algos import sft, tracking
@@ -31,6 +32,7 @@ class FakeWandb(types.ModuleType):
     def __init__(self, fail=()):
         super().__init__("wandb")
         self.calls, self.fail, self.runs, self.finish_calls = [], set(fail), [], []
+        self.Image = lambda array: ("image", array.shape, str(array.dtype))
 
     def init(self, **kwargs):
         self.calls.append(kwargs)
@@ -137,6 +139,15 @@ def test_the_events_of_metrics_jsonl_become_wandb_points_on_the_step_axis(fake, 
     assert len(run.logs) == 6
     sink.close()
     assert run.finished == [0]
+
+
+def test_camera_views_put_the_cameras_side_by_side_one_picture_per_row(fake, tmp_path):
+    sink = tracking.start_tracking(tmp_path, False, "proj", "name", "online")
+    images = {"base": np.full((7, 4, 6, 3), -1.0, np.float32), "wrist": np.ones((7, 4, 6, 3), np.float32)}      # the model's input: floats in [-1, 1]
+    sink.log_camera_views(0, images)
+    point = fake.runs[0].logs[-1]
+    assert point["step"] == 0 and len(point["camera_views"]) == 5                           # openpi's five rows
+    assert point["camera_views"][0] == ("image", (4, 12, 3), "uint8")                       # two cameras of 6 pixels, side by side, as 8-bit pictures
 
 
 def test_a_failing_sink_is_dropped_and_the_log_goes_on(tmp_path, capsys):

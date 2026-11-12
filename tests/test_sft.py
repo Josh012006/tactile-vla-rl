@@ -4,6 +4,7 @@ vision tower is FROZEN (the freeze filter of the policy) and only the language m
 the loop (micro-batches, accumulation, optimiser, evaluation, checkpoints), not the size of the model.
 
 Needs the `vla` dependency group (skipped otherwise)."""
+import gc
 import importlib.util
 import json
 import os
@@ -41,6 +42,25 @@ def vision_frozen_policy(seed_offset=0):
     return policy
 
 
+def release_memory():
+    """Drop the compiled programs and garbage of the runs that are over: every `train` compiles its own (the test machine has 7 GB)."""
+    jax.clear_caches()
+    gc.collect()
+
+
+def fingerprint(state):
+    """Per parameter its sum and its first values: enough to see whether it moved, without a second copy of the model in memory (the test machine has 7 GB)."""
+    out = {}
+    for k, v in tu.flatten_dict(state.to_pure_dict()).items():
+        x = np.asarray(v).astype(np.float32)
+        out[k] = (float(x.sum(dtype=np.float64)), x.ravel()[:64].copy())
+    return out
+
+
+def same(a, b):
+    return a[0] == b[0] and np.array_equal(a[1], b[1])
+
+
 @pytest.fixture(scope="module")
 def sets(tmp_path_factory):
     folder = tmp_path_factory.mktemp("demos")
@@ -53,9 +73,10 @@ def sets(tmp_path_factory):
 def run(sets, tmp_path_factory):
     """One short run, shared by the tests below (the compilation is the slow part)."""
     train_set, val_set = sets
+    release_memory()
     policy = vision_frozen_policy()
     trainable0, frozen0 = sft.split_state(policy)
-    before = {k: np.asarray(v) for k, v in tu.flatten_dict(policy.state.to_pure_dict()).items()}
+    before = fingerprint(policy.state)
     cfg = sft.load_config(overrides={"wandb_mode": "disabled", "demos": ["x"], "steps": 4, "batch_size": 4, "micro_batch_size": 2, "lr": 1e-3, "lr_end": 1e-3, "log_interval": 2,
                                      "eval_interval": 2, "eval_samples": 2, "save_interval": 2, "resume_interval": 2, "prefetch": 1})
     run_dir = tmp_path_factory.mktemp("run") / "r"
@@ -70,19 +91,20 @@ def test_the_run_trains_the_trainable_part_only_and_writes_its_log(run):
     assert events[0] == "start" and events[1] == "first_step" and events[-1] == "done"
     assert events.count("train") == 2 and events.count("eval") == 2 and events.count("checkpoint") == 2
     assert all(np.isfinite(line["loss"]) and line["grad_norm"] > 0 for line in lines if line["event"] == "train")
+    assert all(np.isfinite(line["param_norm"]) and line["param_norm"] > 0 for line in lines if line["event"] == "train")     # openpi's param_norm
     evals = [line for line in lines if line["event"] == "eval"]
     assert set(evals[0]) >= {"train", "val"} and np.isfinite(evals[0]["val"]["loss"]) and evals[0]["train"]["chunks"] == 2
     assert all("elapsed_s" in line for line in lines) and evals[0]["eval_s"] > 0                  # time and size of what a run costs
     assert all(line["save_s"] >= 0 and line["size_mib"] > 0 for line in lines if line["event"] == "checkpoint")
     assert lines[0]["trainable_m"] > 0 and lines[0]["frozen_m"] > 100                       # SigLIP (frozen) is the bulk of this tiny model
-    after = {k: np.asarray(v) for k, v in tu.flatten_dict(policy.state.to_pure_dict()).items()}
+    after = fingerprint(policy.state)
     assert all(x.is_deleted() for x in jax.tree.leaves(trainable0))        # the policy's own copy of the trainable weights was freed during the run (memory)
     assert not any(x.is_deleted() for x in jax.tree.leaves(policy.state))   # and the policy ends with valid weights
     frozen_keys = {k for k in tu.flatten_dict(frozen0.to_pure_dict())}
     trainable_keys = {k for k in tu.flatten_dict(trainable0.to_pure_dict())}
     assert frozen_keys and trainable_keys and not frozen_keys & trainable_keys
-    assert all(np.array_equal(after[k], before[k]) for k in frozen_keys)                      # the vision tower did not move
-    assert any(not np.allclose(after[k].astype(np.float32), before[k].astype(np.float32)) for k in trainable_keys)
+    assert all(same(after[k], before[k]) for k in frozen_keys)                                # the vision tower did not move
+    assert any(not same(after[k], before[k]) for k in trainable_keys)
     assert (run_dir / "config.json").exists() and json.loads((run_dir / "summary.json").read_text())["steps"] == 4
 
 
@@ -142,6 +164,7 @@ def snapshot_leaves(run_dir):
 def resumed(sets, tmp_path_factory):
     """The run of `run` (4 steps in one go) done in two parts: 2 steps, then a resume to 4."""
     train_set, val_set = sets
+    release_memory()
     run_dir = tmp_path_factory.mktemp("resumed") / "r"
     # wandb offline (when installed), the second attempt asking for another project: what tracking.start_tracking gets is recorded
     mode, started, real = ("offline" if HAS_WANDB else "disabled"), [], tracking.start_tracking
@@ -155,6 +178,7 @@ def resumed(sets, tmp_path_factory):
     try:
         first = sft.train(vision_frozen_policy(), train_set, val_set,
                           sft.load_config(overrides={**COMMON, "wandb_mode": mode, "wandb_project": "proj_a", "steps": 2}), run_dir, META)
+        release_memory()
         second = sft.train(vision_frozen_policy(), train_set, val_set,
                            sft.load_config(overrides={**COMMON, "wandb_mode": mode, "wandb_project": "proj_b", "steps": 4}), run_dir, META, resume=True)
     finally:

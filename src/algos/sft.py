@@ -38,6 +38,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import math
 import queue
 import shutil
 import signal
@@ -392,6 +393,15 @@ class MetricsLog:
                 print(f"[wandb] logging stopped: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
                 self.sink = None
 
+    def camera_views(self, step: int, images: Mapping[str, Any]) -> None:
+        """A few training rows as the model sees them, one picture per row with its cameras side by side (openpi's `camera_views`), to wandb only."""
+        if self.sink is None:
+            return
+        try:
+            self.sink.log_camera_views(step, images)
+        except Exception as error:                          # noqa: BLE001
+            print(f"[wandb] camera_views not logged: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+
     def close(self, exit_code: int = 0) -> None:
         self.file.close()
         if self.sink is not None:
@@ -469,6 +479,10 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
               micro_batch_size=cfg.micro_batch_size, memory_mib=device_memory_mib())
     if resume:
         log.write(event="resume", from_step=start_step, snapshot=str(snapshot_found[0]), target_steps=cfg.steps)
+    elif log.sink is not None:                              # a fresh run shows what the model gets (the first rows of the run's wandb page, like openpi's)
+        picture_rows = np.random.default_rng(cfg.seed).choice(len(train_set), min(5, len(train_set)), replace=False)
+        (picture_obs, _), = micro_batches(policy, train_set, picture_rows, len(picture_rows))
+        log.camera_views(0, picture_obs.images)
 
     @jax.jit
     def grad_fn(trainable, frozen, rng, observation, actions):
@@ -486,6 +500,22 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         grads = jax.tree.map(lambda g: g / n_micro, grads)
         updates, opt_state = tx.update(grads, opt_state, trainable)
         return optax.apply_updates(trainable, updates), opt_state, optax.global_norm(grads)
+
+    # openpi's `param_norm`: the global norm of the kernels of the WHOLE model (not the biases, scales or embeddings), at the logged steps only. The frozen part
+    # never changes: its sum of squares is computed once (leaf by leaf, so that no float32 copy of the model exists), the trainable part at each log.
+    # A failure here (a filter that was only tested on a tiny model) must not stop a training: the value is then left out.
+    import openpi.shared.nnx_utils as nnx_utils
+    kernels = nnx.All(nnx.Param, nnx.Not(nnx_utils.PathRegex(".*/(bias|scale|pos_embedding|input_embedding)")), lambda _, x: x.value.ndim > 1)
+
+    def kernel_sq(state):
+        return sum((jnp.sum(jnp.square(x.astype(jnp.float32))) for x in jax.tree.leaves(state.filter(kernels))), jnp.zeros((), jnp.float32))
+
+    trainable_sq_fn = jax.jit(kernel_sq)
+    try:
+        frozen_sq = float(kernel_sq(frozen))
+    except Exception as error:                              # noqa: BLE001
+        frozen_sq = None
+        print(f"[sft] param_norm not computed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
 
     @jax.jit
     def eval_loss_fn(state, rng, observation, actions):
@@ -550,7 +580,14 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         if step % cfg.log_interval == 0 or step == cfg.steps:
             last_loss = float(np.mean(jax.device_get(losses)))
             now = time.monotonic()
-            log.write(event="train", step=step, loss=last_loss, grad_norm=float(np.mean(jax.device_get(grad_norms))), lr=float(schedule(step - 1)),
+            norm = {}
+            if frozen_sq is not None:
+                try:
+                    norm["param_norm"] = math.sqrt(frozen_sq + float(trainable_sq_fn(trainable)))
+                except Exception as error:                  # noqa: BLE001
+                    frozen_sq = None
+                    print(f"[sft] param_norm not computed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+            log.write(event="train", step=step, loss=last_loss, grad_norm=float(np.mean(jax.device_get(grad_norms))), **norm, lr=float(schedule(step - 1)),
                       step_s=round((now - t_window) / len(losses), 3), memory_mib=device_memory_mib())
             losses, grad_norms, t_window = [], [], now
         if step % cfg.eval_interval == 0 or step == cfg.steps:
