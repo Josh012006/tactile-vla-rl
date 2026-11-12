@@ -18,7 +18,8 @@ the episode lasts at most `max_steps_per_episode` of the task YAML.
 
 Deterministic evaluation (docs/eval/sft_eval.md). pi0-FAST decodes greedily; pi0.5's flow noise restarts from the episode's seed at every episode; the model is always called with a
 batch of 1; XLA's GPU kernels are set deterministic (XLA_FLAGS --xla_gpu_deterministic_ops=true, added here); each checkpoint gets a FRESH env server (the physics is bit-identical for
-an identical sequence of calls from a fresh server, on the same GPU model). Every episode records `start_sha` and `traj_sha`, every checkpoint an `eval_sha`: two evaluations are
+an identical sequence of calls from a fresh server over the 20 steps tested, on the same GPU model). End to end, 150-step episodes were NOT bit-reproducible in the first measurements
+(docs/eval/sft_eval.md section 3; scripts/probe_determinism.py isolates the cause). Every episode records `start_sha` and `traj_sha`, every checkpoint an `eval_sha`: two evaluations are
 identical when these are.
 
 Resume. Re-run the SAME command. Each finished episode is a line of <output-dir>/results/<step>.jsonl: a checkpoint that was cut is continued from its missing episodes only, and its

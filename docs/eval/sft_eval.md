@@ -2,8 +2,8 @@
 
 `python -m scripts.eval_sft --run <SFT run>` evaluates the initial state of a run (step 0) and every checkpoint of it in the FORGE environment, on the same fixed episodes, and draws the
 success rate against the training step. Code: `src/eval/episodes.py` (seeds, one episode, the log, the numbers), `src/eval/sweep.py` (several checkpoints at once: threads, env servers),
-`src/eval/curve.py` (the plot), `scripts/eval_sft.py` (command line), `scripts/probe_eval_parallel.py` (measures the parallelism), `jobs/job_eval_sft.sh`,
-`jobs/job_probe_eval_parallel.sh`. Tests: `tests/test_eval_episodes.py`, `tests/test_eval_sweep.py`, `tests/test_eval_sft_script.py`, and the two `fork` tests of
+`src/eval/curve.py` (the plot), `scripts/eval_sft.py` (command line), `scripts/probe_eval_parallel.py` (measures the parallelism), `scripts/probe_determinism.py` (model alone, simulator alone), `jobs/job_eval_sft.sh`,
+`jobs/job_probe_eval_parallel.sh`, `jobs/job_probe_determinism.sh`. Tests: `tests/test_eval_episodes.py`, `tests/test_eval_sweep.py`, `tests/test_eval_sft_script.py`, `tests/test_probe_determinism.py`, and the two `fork` tests of
 `tests/test_openpi_policy.py` and `tests/test_sft.py`. **Status: tested on CPU (fake simulator over real sockets, real subprocesses); a first probe ran on an L40S on 12 Nov. 2026 (cost and parallelism, section 6); no real checkpoint has been evaluated yet** (section 9).
 
 It follows expo-ft's `scripts/eval_curve.py` (fixed seeds generated from `--seed` 42, `--n-episodes`, a curve in % with one standard error, curve.json / png / pdf) and adds what that script does not
@@ -50,7 +50,11 @@ a requeue, send the command again. Resources for one worker: 1 L40S, 8 CPUs, 48 
 
 ## 3. Deterministic evaluation
 
-The evaluation is deterministic when the same weights give the same episodes, bit for bit. The sources of randomness, and what is done about each:
+The aim is that the same weights give the same episodes, bit for bit. **Measured on 12 Nov. 2026, this is NOT reached end to end**: two evaluations of the same initial state (pi0.5, one worker, a fresh server, same seeds,
+same XLA flags, same GPU) gave different `eval_sha` (`1d6af170...` and `aba0a88d...`). The first observation of an episode was bit-identical in 3 episodes out of 4 (`start_sha`; the 4th started 0.003 mm
+elsewhere: N1), then the trajectories diverged by tens of millimetres at the end of 150 steps (the untrained model moves the arm far, which amplifies any difference). So the model's determinism below is by
+construction, not yet shown bit for bit on the GPU, and the physics was shown bit-identical over 20 steps only (G1); where the divergence starts is what `scripts/probe_determinism.py` isolates (section 6). Until then
+an evaluation is **statistically** reproducible (fixed seeds, fixed starts, a standard error), not bit-reproducible. The sources of randomness, and what is done about each:
 
 | source | pi0.5 | pi0-FAST | what the evaluation does |
 |---|---|---|---|
@@ -59,7 +63,7 @@ The evaluation is deterministic when the same weights give the same episodes, bi
 | GPU kernels | reductions and scatters may differ from run to run | the same | `XLA_FLAGS=--xla_gpu_deterministic_ops=true` (added by the script and the jobs) |
 | compilation | autotuning could pick another algorithm in another compilation | the same | all the workers share **one** compiled sampler (`OpenPIPolicy.fork`) |
 | LoRA initialisation (step 0) | `build_params_like_expo_ft(seed=0)`: fixed | the same | nothing to do |
-| physics of the environment | bit-identical for an identical sequence of calls from a **fresh server** on the same machine (G1 of `docs/envs/isaaclab_env.md`); after other episodes the start of an episode can differ slightly (N1) | the same | a **fresh server for every checkpoint**; one GPU model for a whole curve |
+| physics of the environment | bit-identical for an identical sequence of calls from a **fresh server** over the 20 steps that were tested (G1 of `docs/envs/isaaclab_env.md`); **not measured over 150 steps, and an evaluation of 150 steps was not reproducible** (above); after other episodes the start of an episode can differ slightly (N1) | the same | a **fresh server for every checkpoint**; one GPU model for a whole curve (kept: it is what G1 needs, and costs nothing) |
 | images | not compared bit for bit between two servers (N3) | the same | the fingerprints below do not cover them |
 
 **Answer to "is pi0-FAST purely deterministic and pi0.5 not?"** On the policy side both are, with this protocol: pi0-FAST because it has no randomness at all, pi0.5 because its noise is restarted from the
@@ -142,6 +146,13 @@ report (`reports/probe_eval_parallel_<model>_<time>_<jobid>.json`, printed at th
 
 Every probe writes in its own folder (`runs/sft/probing/_probe_eval_parallel_<model>_<time>_<jobid>/`, under a lock).
 
+**Where the divergence comes from: `jobs/job_probe_determinism.sh`** (`scripts/probe_determinism.py`).
+- `--part policy --model pi05 --processes 2` (and pi0_fast): no simulator. The same observation and seed through the real model, five ways (the same policy re-seeded, the same calls without re-seeding done twice, a `fork`,
+  several forks in several threads, fresh Python processes), comparing the bits of the action chunk. All identical: the model is bit-reproducible and the physics diverges.
+- `--part env --servers 3`: no model. The same 150 open-loop joint targets (start pose plus a fixed sinusoid) played on fresh servers, each twice, comparing the readings step by step: the first step that differs and
+  how far apart the traces are at 1, 5, 10, 25, 50, 100, 150 steps. Identical: the physics is reproducible over 150 steps and the model is to blame; different: the physics is not, and the first step says whether it is
+  the contact solver (early) or chaos amplifying float noise (late and growing).
+
 **First measurements (L40S, 12 Nov. 2026, initial state, 4 episodes, XLA deterministic ops on, read from the two jobs' logs).** Seconds per episode of one worker, and throughput:
 
 | | W = 1 | W = 2 | W = 3 |
@@ -156,7 +167,12 @@ An episode is 86 s for pi0.5 and 107 s for pi0-FAST, not the 35 s of expo-ft (a 
 What part of it is the model, and whether XLA's deterministic ops cost anything, is what the next probe prints. The 0/4 successes are expected (nothing is trained), and the `Error decoding tokens ... shape (0, 8)`
 lines of pi0-FAST are openpi's message for an initial-state model that writes no action tokens: the chunk is counted as not decoded (`decode_failed`) and the previous one is kept.
 
-**The determinism part of that first probe is void.** The two jobs (pi0.5 and pi0-FAST) started in the same second and so wrote in the same folder: their episodes were mixed in the same files (the log's
+**The second probe (separate folders, valid) confirmed the speeds and measured the rest.** pi0.5, one worker: 89 s per episode of which 1.8 s in the model; pi0-FAST: 107 s of which 17.9 s. **The simulator is
+the cost** (about 0.58 s per step, 150 steps, the same for both models; the env server alone uses about 80 % of the GPU): this is the measured cost model of `docs/envs/isaaclab_env.md` (a step is 531 ms fixed plus 2.29 ms per
+environment), and why two servers on one GPU take twice as long each. XLA's deterministic ops cost nothing (89.2 s with and without). Bit-identity failed: the two replicas of two workers differ from one worker and from each other
+from episode 0 on, for both models, and a third run with one worker alone differs from the first (above). Not concurrency, then. Next: `jobs/job_probe_determinism.sh` (below).
+
+**The determinism part of the very first probe is void.** The two jobs (pi0.5 and pi0-FAST) started in the same second and so wrote in the same folder: their episodes were mixed in the same files (the log's
 "1 episodes appear twice", the pi0-FAST job's crash on the existing `resume/` folder), and every "bit-identical: False" compares one model with the other. It has to be run again (the probe now refuses to
 share a folder); the speeds above do not depend on it, they are the per-episode times of each job's own log lines.
 
@@ -199,8 +215,8 @@ policy untouched and the frozen weights shared.
 **Not checked, to be seen on the cluster:**
 - everything that needs Isaac Sim and the real models together: a first evaluation of a real checkpoint, the server subprocess started from the learner's venv through `jobs/env_server.sh`, the `ready` line, the
   clean-up of Isaac's child processes;
-- that `--xla_gpu_deterministic_ops` gives the same bits in two compilations and two threads, and its cost (the corrected probe compares replicas, `--no-deterministic-xla` the cost);
-- that two servers and a model on one GPU give episodes bit-identical to one alone (G1 was measured with one server); the speed-up is measured (none on an L40S); the host memory of an Isaac server
+- that the model gives the same bits in two compilations, two threads and two processes (`--part policy`); its flag `--xla_gpu_deterministic_ops` costs nothing (measured);
+- the physics over 150 steps from a fresh server (`--part env`); the speed-up of several workers is measured (none on an L40S); the host memory of an Isaac server
   (`--mem=48G` for one worker is an estimate, to be checked with `sacct` after the first evaluation job);
 - the size of N1 for resumed episodes (the probe's cut-and-resume check), and the effect on a success rate over hundreds of episodes (N6 of the env's reproducibility section);
 - the compilation of the shared sampler by several threads at once;
