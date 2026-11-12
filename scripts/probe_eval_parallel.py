@@ -175,7 +175,7 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, on_signal)
     from src.models import load_model
     gpu = gpu_name()
-    print(f"probe of the parallel evaluation: {args.model} on {gpu}, workers {args.workers}, {args.episodes} episodes, replan {replan}, XLA_FLAGS={os.environ['XLA_FLAGS']}", flush=True)
+    print(f"probe of the parallel evaluation: {args.model} on {gpu}, workers {args.workers}, {args.episodes} episodes, replan {replan}, XLA_FLAGS='{os.environ.get('XLA_FLAGS', '')}'", flush=True)
     base = load_model(cfg, seed=0)
 
     def say(msg: str) -> None:
