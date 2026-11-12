@@ -104,6 +104,17 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         policy, train_cfg = load_policy(cfg)
         return cls(policy, train_cfg, cfg, seed)
 
+    def fork(self, seed: int = 0) -> "OpenPIPolicy":
+        """A second policy over the same model, for another thread (the evaluation of several checkpoints at once, src/eval/sweep.py). It SHARES what is heavy and stateless: the
+        openpi `Policy` (transforms, norm stats), the jitted sampler (one compilation, and so one arithmetic, for all the forks) and, until `set_state` replaces them, the weights
+        in device memory (`load_checkpoint` on a fork replaces the trainable parameters only: the frozen ones stay shared, so N forks hold one base model). It does NOT share what
+        a call mutates: its own random stream (`seed`), its own weights reference (`set_state`) and its own `decode_stats` / `last_valid`."""
+        other = copy.copy(self)
+        other.decode_stats = DecodeStats()
+        other.last_valid = None
+        other.seed(seed)
+        return other
+
     # -- randomness, weights ----------------------------------------------------------------------------------------------
     def seed(self, seed: int) -> None:
         import jax

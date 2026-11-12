@@ -274,3 +274,21 @@ def test_a_failing_run_writes_an_error_line_with_the_reason_and_raises(sets, tmp
     events = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert events[-1]["event"] == "error" and "RESOURCE_EXHAUSTED" in events[-1]["error"] and "RuntimeError" in events[-1]["error"]
     assert "done" not in [e["event"] for e in events] and not (run_dir / "summary.json").exists()
+
+
+def test_a_checkpoint_loaded_into_a_fork_leaves_the_base_policy_alone_and_shares_the_frozen_weights(run):
+    """The evaluation of several checkpoints at once (src/eval/sweep.py): each worker's fork gets its checkpoint, the initial state stays the base policy's."""
+    _, run_dir, *_ = run
+    base = vision_frozen_policy()
+    fork = base.fork(1)
+    before = fingerprint(base.state)
+    initial = base.state
+    sft.load_checkpoint(fork, run_dir / "checkpoints" / "4")
+    after = fingerprint(base.state)
+    assert base.state is initial and all(same(before[k], after[k]) for k in before)          # the base is untouched
+    frozen_base, frozen_fork = (tu.flatten_dict(sft.split_state(p)[1].to_pure_dict()) for p in (base, fork))
+    assert frozen_base and all(frozen_base[k] is frozen_fork[k] for k in frozen_base)         # the frozen weights are the same device arrays: no second base model
+    trained_base, trained_fork = (tu.flatten_dict(sft.split_state(p)[0].to_pure_dict()) for p in (base, fork))
+    assert any(not np.array_equal(np.asarray(trained_base[k]).astype(np.float32), np.asarray(trained_fork[k]).astype(np.float32)) for k in trained_base)
+    fork.set_state(initial)                                                                   # and a worker goes back to the initial state for the next job
+    assert all(same(fingerprint(fork.state)[k], before[k]) for k in before)

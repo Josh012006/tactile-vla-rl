@@ -121,12 +121,16 @@ def test_set_state_changes_what_is_sampled_without_rebuilding_the_policy(pol):
     zeroed = {k: (jnp.zeros_like(v) if "action_out_proj" in k else v) for k, v in flat.items()}
     new = nnx.state(nnx.merge(pol.graphdef, pol.state))
     new.replace_by_pure_dict(tu.unflatten_dict(zeroed))
+    original = pol.state
     pol.set_state(new)
-    pol.seed(5)
-    after = pol.plan(obs, "p").raw
-    assert np.abs(before - after).max() > 1e-4
-    with pytest.raises(ValueError, match="structure"):
-        pol.set_state({"not": "a state"})
+    try:
+        pol.seed(5)
+        after = pol.plan(obs, "p").raw
+        assert np.abs(before - after).max() > 1e-4
+        with pytest.raises(ValueError, match="structure"):
+            pol.set_state({"not": "a state"})
+    finally:
+        pol.set_state(original)                                                      # the policy is shared by the module: the next tests start from the same weights
 
 
 def test_the_training_batch_puts_the_targets_in_the_models_own_space_and_pads_them(pol):
@@ -228,3 +232,29 @@ def test_pi0_fast_counts_the_token_strings_it_writes_and_marks_the_chunks_it_cou
 
 def test_a_flow_matching_model_has_no_token_statistics(pol):
     assert pol._fast is None and pol.last_valid is None and pol.decode_stats.summary()["chunks"] == 0      # noqa: SLF001
+
+
+def test_a_fork_shares_the_compiled_sampler_and_the_weights_but_has_its_own_stream_weights_reference_and_statistics(pol):
+    """What the evaluation of several checkpoints at once relies on (src/eval/sweep.py): one compilation and one base model for all the forks, a stream and weights each."""
+    fork = pol.fork(seed=11)
+    assert fork._sample is pol._sample and fork.policy is pol.policy and fork.graphdef is pol.graphdef and fork.info == pol.info       # noqa: SLF001
+    assert fork.decode_stats is not pol.decode_stats and fork.state is pol.state                                                       # the weights are shared until set_state
+    obs = env_obs(1)
+    pol.seed(11)
+    base_chunk = pol.plan(obs, "p").raw
+    np.testing.assert_array_equal(fork.plan(obs, "p").raw, base_chunk)                      # same seed, same weights, same compiled program: the same bits
+    fork.plan(obs, "p")                                                                      # the fork's stream goes on ...
+    pol.seed(11)
+    np.testing.assert_array_equal(pol.plan(obs, "p").raw, base_chunk)                        # ... without touching the base's
+    flat = tu.flatten_dict(fork.state.to_pure_dict())
+    changed = {k: (jnp.zeros_like(v) if "action_out_proj" in k else v) for k, v in flat.items()}
+    new = nnx.state(nnx.merge(fork.graphdef, fork.state))
+    new.replace_by_pure_dict(tu.unflatten_dict(changed))
+    before = fork.state
+    fork.set_state(new)
+    assert pol.state is before and fork.state is new                                         # the base keeps its weights
+    fork.seed(11)
+    pol.seed(11)
+    assert np.abs(fork.plan(obs, "p").raw - pol.plan(obs, "p").raw).max() > 1e-4
+    shared = [a is b for a, b in zip(jax.tree.leaves(pol.state), jax.tree.leaves(fork.state))]
+    assert sum(shared) > 0.9 * len(shared)                                                   # all but the replaced parameters are the SAME device arrays: N forks hold one base model
