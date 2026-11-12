@@ -18,7 +18,9 @@
 # the episodes in progress are dropped, the servers are killed, the finished episodes are kept, and the same command continues from there.
 # Requeue: the job is requeueable (a preemption or a node failure restarts the script, which is the same command: the evaluation continues where it stopped). A time limit is not
 # a requeue: send the same command again.
-# Resources, for ONE worker: 8 CPUs and 48 G of host memory (an Isaac server and the model); the GPU memory is the 17 GB above. `sacct -j <jobid> --format=JobID,Elapsed,AllocCPUS,TotalCPU,MaxRSS,ReqMem`
+# Resources, for ONE worker: 6 CPUs and 40 G of host memory (an Isaac server and the model); the GPU memory is the 17 GB above. Measured (12 Nov. 2026, sacct): an Isaac server alone peaks at 8.3 GB
+# of host memory and uses about 1.4 cores on average; the model alone (pi0.5 / pi0-FAST, load and sampling) peaks at 21.7 / 19.9 GB and uses about 1.7 cores: together about 30 GB and 3 cores,
+# the rest is margin (Kit start-up and the XLA compilation use more cores for a short time). Check on the first real evaluation. `sacct -j <jobid> --format=JobID,Elapsed,AllocCPUS,TotalCPU,MaxRSS,ReqMem`
 # after a job says what it really used; logs/slurm/gpu_<jobid>.csv has the card's utilisation every 30 s.
 # Output: <run>/eval/ (eval_protocol.json, episode_seeds.json, results/, logs/server_<step>.log, curve.json / curve.png / curve.pdf), logs/slurm/eval_sft_<jobid>.out,
 # logs/slurm/gpu_<jobid>.csv.
@@ -26,8 +28,8 @@
 #SBATCH --job-name=eval_sft
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:l40s:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=40G
 #SBATCH --time=14:00:00
 #SBATCH --signal=B:TERM@300
 #SBATCH --output=logs/slurm/%x_%j.out
