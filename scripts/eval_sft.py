@@ -63,7 +63,7 @@ from src.models.interface import ROOT, norm_stats_source
 RECIPE = "batched-v1"                        # K environments per server, one reset per checkpoint, pi0.5 noise per (episode, chunk), model batch of K, fresh server per checkpoint
 DEFAULT_ENVS_PER_SERVER = 100
 # Most rows of one model call (`OpenPIPolicy.max_rows`): a larger batch is split in equal calls. Measured on an L40S with the policy limited to half the card (12 Nov. 2026, scripts/probe_batch_cost.py):
-# pi0.5 fits 64 rows (14.2 GiB) and not 100; pi0-FAST fits 8 rows (9.4 GiB) and not 32 (prefill logits); the pi0-FAST default is NOT measured (to be set from the probe's numbers).
+# pi0.5 fits 64 rows (14.2 GiB) and not 100; pi0-FAST fits 16 rows (13.3 GiB) and not 20 (prefill logits).
 DEFAULT_MODEL_BATCH = {"pi05": 64, "pi0": 64, "pi0_fast": 16}
 DEFAULT_TASK = "configs/task/peg_insert_forge.yaml"
 XLA_DETERMINISTIC = "--xla_gpu_deterministic_ops=true"

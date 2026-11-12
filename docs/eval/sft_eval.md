@@ -24,7 +24,7 @@ have: a resume at the episode, a deterministic policy for both models, several c
 | redo a checkpoint from scratch | `--force --steps 1000` (its files are set aside as `.prev1`, never overwritten) |
 | videos | `--save-videos` (every episode) or, by default, the first `--video-episodes` 5 episodes of each batch: `<output-dir>/videos/<step>/ep_<i>_seed<seed>.mp4`, `--video-dir <dir>` |
 | environments per server (part of the protocol, default 100) | `--envs-per-server K` |
-| most rows of one model call (part of the protocol; default 64 for pi0.5 / pi0, 16 for pi0-FAST, the latter not measured) | `--model-batch M` |
+| most rows of one model call (part of the protocol; default 64 for pi0.5 / pi0, 16 for pi0-FAST: both the largest that fit, section 6.1) | `--model-batch M` |
 | the plot only (no GPU, no server) | `python -m scripts.eval_sft --run <run> --plot-only --title "Teleop demos, pi0.5"` |
 | where the files go | `--output-dir` (data, default `<run>/eval`), `--curve-dir` (curve.json / png / pdf, default the output folder) |
 | what a worker costs, and whether more workers pay off (measured: they do not on one L40S) | `sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 --episodes 4` (section 6) |
@@ -196,23 +196,24 @@ share a folder); the speeds above do not depend on it, they are the per-episode 
 
 ### 6.1 Cost of K environments per server
 
-`jobs/job_probe_batch_cost.sh` (`scripts/probe_batch_cost.py`, no simulator), 12 Nov. 2026, L40S, policy limited to half the card (22.3 GiB), XLA deterministic ops:
+`jobs/job_probe_batch_cost.sh` (`scripts/probe_batch_cost.py`, no simulator), 12 Nov. 2026, L40S, policy limited to half the card (22.3 GiB), XLA deterministic ops. Median ms per call (ms per row), peak memory:
 
-| | B=1 | B=8 | B=32 | B=64 | B=100 |
-|---|---|---|---|---|---|
-| pi0.5, ms per call (ms per row) | 102 (102) | 680 (85) | 2 782 (87) | 5 707 (89) | **out of memory** (an 11.8 GiB allocation) |
-| pi0.5, peak memory | 6.7 GiB | 7.6 | 10.4 | 14.2 | |
-| pi0-FAST, ms per call (ms per row) | 439 (439) | 1 109 (139) | **out of memory** (a 15.3 GiB allocation) | | |
-| pi0-FAST, peak memory | 6.2 GiB | 9.4 | | | |
+| rows in the call | 1 | 8 | 12 | 16 | 20 | 32 | 50 | 64 | 100 |
+|---|---|---|---|---|---|---|---|---|---|
+| pi0.5 | 102 (102) | 680 (85) | | | | 2 731 (85), 10.4 GiB | 4 425 (88), 12.6 GiB | 5 748 (90), 14.2 GiB | **out of memory** in one call (11.8 GiB allocation) |
+| pi0-FAST | 439 | 1 108 (139), 9.4 GiB | 1 582 (132), 11.4 GiB | 1 007 (63), 13.3 GiB | **out of memory** (9.6 GiB allocation) | out of memory | | | |
 
-- pi0.5's time is **linear in the rows** (about 87 ms per row: the card is saturated from B = 8), so grouping rows does not make the model faster, and splitting a batch costs nothing. The compilation is 10-15 s.
-- pi0-FAST's failure is the prefill logits (rows x 948 tokens x 257,152 words in bf16: 15.6 GB for 32 rows); the cost per row falls with the rows (439 -> 139 ms) but only 1 and 8 were measured.
+**100 rows split by `--model-batch` (what the evaluation does):** pi0.5 (64 -> two calls of 50): **9.19 s per plan** (92 ms per row), 14.2 GiB peak. pi0-FAST (16 -> seven calls of 15): 41.2 s per plan, 13.3 GiB peak, **not representative** (below).
+- pi0.5's time is **linear in the rows** (about 90 ms per row: the card is saturated from B = 8), so grouping rows does not make the model faster and splitting costs nothing.
+- pi0-FAST: the logits of the prefill (rows x 948 tokens x 257,152 words in bf16) limit one call to **16 rows** (13.3 GiB; 20 fails): `--model-batch 16` (the default) gives 100 rows as 7 calls of 15. Its **time is not a function of the rows**: a call lasts as long as the longest
+  token string it generates (up to 256 steps), and the probe feeds random-noise images, whose strings are unpredictable (12 rows took longer than 16; the 7 calls of 15 took 5.9 s each against 1.0 s for 16). So the probe's 41 s per plan is NOT an estimate of an evaluation (the SFT models write about 11 tokens);
+  only a real batch says it.
 - Host memory of the model alone: 4.9 GB (pi0.5) and 6.6 GB (pi0-FAST), about one core (`sacct`).
-- **Several servers per checkpoint do not pay off on one card**: the model is about 60 % of a batch and is compute-bound; the simulator's fixed cost (about 80 s) is paid once per batch.
-- Estimate of a checkpoint of 100 episodes (simulator from `docs/envs/isaaclab_env.md`, not measured with K = 100; every episode running its 150 steps, so an upper bound for the model): pi0.5 about 114 s + 19 plans x 100 rows x 87 ms = 165 s, **about 4.7 min** (86 s alone before: 2.4 h);
-  pi0-FAST (replan 5: 30 plans) about 114 s + 30 x 100 x 0.12-0.14 s, **about 8-9 min** (not measured beyond B = 8).
-To measure next: `--batch-sizes 32 50 64 --split 64 100` (pi0.5) and `--batch-sizes 8 12 16 20 24 --split 16 100` (pi0-FAST: the largest `--model-batch` that fits), then a real batch:
-`sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir <probe dir>`: the log prints the wall time of the batch, `sacct` the host memory, `gpu_<jobid>.csv` the card's memory and utilisation.
+- **Several servers per checkpoint do not pay off on one card**: pi0.5's model is about 60 % of a batch and compute-bound; the simulator's fixed cost (about 80 s) is paid once per batch.
+- **Estimate of a checkpoint of 100 episodes** (simulator from `docs/envs/isaaclab_env.md`: 150 steps x (0.53 + 0.0023 x 100) s = 114 s, not measured with K = 100; every episode running its 150 steps, so an upper bound; about one minute more to start the server and load the checkpoint):
+  pi0.5: 114 s + 19 plans x 9.19 s = 175 s = **4.8 min, about 5.8 min with the start** (86 s alone before: 2.4 h); 21 checkpoints (step 0 and a save every 200 of 4000 steps) **about 2 h**.
+  pi0-FAST (30 plans): 114 s + 30 x (7 calls of 1.0-1.6 s if the strings are short = 210-340 s) = 5.4-7.5 min, **21 checkpoints about 2.2-3 h**; if its strings are long like the probe's, 22 min per checkpoint, about 8 h. The 14 h limit of the job holds either way.
+To measure the real thing (the simulator at K = 100, the strings of a real pi0-FAST): `sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir <probe dir>`: the log prints the wall time of the batch, `sacct` the host memory, `gpu_<jobid>.csv` the card's memory and utilisation.
 
 ## 7. What is written
 
