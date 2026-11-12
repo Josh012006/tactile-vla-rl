@@ -24,6 +24,7 @@ have: a resume at the episode, a deterministic policy for both models, several c
 | redo a checkpoint from scratch | `--force --steps 1000` (its files are set aside as `.prev1`, never overwritten) |
 | videos | `--save-videos` (every episode) or, by default, the first `--video-episodes` 5 episodes of each batch: `<output-dir>/videos/<step>/ep_<i>_seed<seed>.mp4`, `--video-dir <dir>` |
 | environments per server (part of the protocol, default 100) | `--envs-per-server K` |
+| most rows of one model call (part of the protocol; default 64 for pi0.5 / pi0, 16 for pi0-FAST, the latter not measured) | `--model-batch M` |
 | the plot only (no GPU, no server) | `python -m scripts.eval_sft --run <run> --plot-only --title "Teleop demos, pi0.5"` |
 | where the files go | `--output-dir` (data, default `<run>/eval`), `--curve-dir` (curve.json / png / pdf, default the output folder) |
 | what a worker costs, and whether more workers pay off (measured: they do not on one L40S) | `sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 --episodes 4` (section 6) |
@@ -47,7 +48,9 @@ a requeue, send the command again. Resources for one worker: 1 L40S, 6 CPUs, 40 
   **K environments per server** (`--envs-per-server`, default 100, frozen in `eval_protocol.json` as `num_envs`). Episode *i* is environment `i % K` of batch `i // K`; a batch is one
   `reset(seed=master seed, round=batch)` of a **fresh** server: the start state of environment *e* is a function of (master seed, K, e) (`docs/envs/isaaclab_env.md` N2), the same for every checkpoint on the same GPU
   model. The K episodes of a batch play **together**: one physics step for all of them, one model call per replan for the environments that need a chunk (`plan(..., pad_to=K)`: always the same batch shape, so one
-  compilation and the same arithmetic whichever episodes are still running). An episode that has ended is no longer planned for; one that is not played (already done in an earlier attempt) is **held** where it is (its
+  compilation and the same arithmetic whichever episodes are still running). The K rows are **split in equal model calls of at most `--model-batch` rows** (`OpenPIPolicy.max_rows`:
+  100 rows with 64 are two calls of 50; the last call is padded, one that would hold only padding is not made), because the model's memory grows with the rows of ONE call (section 6.1); the time does not
+  suffer (it is linear in the rows) and a row's noise is its own seed's whichever call it falls in. An episode that has ended is no longer planned for; one that is not played (already done in an earlier attempt) is **held** where it is (its
   joint targets are its own joint positions) and the others do not notice. The rollout ends when every played episode has ended. With `--n-episodes` N: N <= K is one batch (the others of the K environments are held); N > K
   several batches, the first of them in the first reset, the next ones after other episodes in the same server (N1: their starts can differ slightly, reproducibly for the same sequence; a script prints a WARNING when N > K, and N <= K is recommended).
   The **noise** of the model for episode *i*: `plan_seed(seed_i, k)` for its *k*-th chunk, a function of the episode alone (section 3), whichever episodes share the call.
@@ -191,14 +194,25 @@ from episode 0 on, for both models, and a third run with one worker alone differ
 "1 episodes appear twice", the pi0-FAST job's crash on the existing `resume/` folder), and every "bit-identical: False" compares one model with the other. It has to be run again (the probe now refuses to
 share a folder); the speeds above do not depend on it, they are the per-episode times of each job's own log lines.
 
-### 6.1 Cost of K environments per server (to measure)
+### 6.1 Cost of K environments per server
 
-Before `batched-v1`, an episode took 86 s (pi0.5) or 107 s (pi0-FAST) alone in a server, 531 ms of simulator per step being fixed (`docs/envs/isaaclab_env.md`: step = 531 ms + 2.29 ms per environment). With K environments
-one step costs about 0.53 s + 0.0023 K s, and the model is called once for the environments that need a chunk. **That is an estimate from the earlier figures, not a measurement.** Two things to measure, in this order:
-1. `jobs/job_probe_batch_cost.sh` (`scripts/probe_batch_cost.py`, no simulator): the model's time per call and the memory for batch sizes 1, 8, 32, 64, 100 (first call = compilation, then medians), and the estimate of a batch it prints from the simulator's figures.
-2. A real batch: `sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir <probe dir>`: the log prints the wall time of the batch, `sacct` the host memory, `gpu_<jobid>.csv` the card's memory and utilisation.
-**Risk to check first for pi0-FAST:** its prefill logits are rows x 948 tokens x 257,152 words in bf16 (`docs/algos/sft.md`: 7.8 GB for 16 rows), i.e. about 49 GB for 100 rows, more than the half of the card the policy is allowed: the model may not fit at batch 100 (the probe records the largest batch that fits). If so, the model call has to be split in sub-batches (the simulator keeps its K environments); not written, to be decided on the probe's numbers.
-Whether several servers per checkpoint are then worth it (more episodes at once than one server's K, or the simulator being the bottleneck) is decided from these numbers.
+`jobs/job_probe_batch_cost.sh` (`scripts/probe_batch_cost.py`, no simulator), 12 Nov. 2026, L40S, policy limited to half the card (22.3 GiB), XLA deterministic ops:
+
+| | B=1 | B=8 | B=32 | B=64 | B=100 |
+|---|---|---|---|---|---|
+| pi0.5, ms per call (ms per row) | 102 (102) | 680 (85) | 2 782 (87) | 5 707 (89) | **out of memory** (an 11.8 GiB allocation) |
+| pi0.5, peak memory | 6.7 GiB | 7.6 | 10.4 | 14.2 | |
+| pi0-FAST, ms per call (ms per row) | 439 (439) | 1 109 (139) | **out of memory** (a 15.3 GiB allocation) | | |
+| pi0-FAST, peak memory | 6.2 GiB | 9.4 | | | |
+
+- pi0.5's time is **linear in the rows** (about 87 ms per row: the card is saturated from B = 8), so grouping rows does not make the model faster, and splitting a batch costs nothing. The compilation is 10-15 s.
+- pi0-FAST's failure is the prefill logits (rows x 948 tokens x 257,152 words in bf16: 15.6 GB for 32 rows); the cost per row falls with the rows (439 -> 139 ms) but only 1 and 8 were measured.
+- Host memory of the model alone: 4.9 GB (pi0.5) and 6.6 GB (pi0-FAST), about one core (`sacct`).
+- **Several servers per checkpoint do not pay off on one card**: the model is about 60 % of a batch and is compute-bound; the simulator's fixed cost (about 80 s) is paid once per batch.
+- Estimate of a checkpoint of 100 episodes (simulator from `docs/envs/isaaclab_env.md`, not measured with K = 100; every episode running its 150 steps, so an upper bound for the model): pi0.5 about 114 s + 19 plans x 100 rows x 87 ms = 165 s, **about 4.7 min** (86 s alone before: 2.4 h);
+  pi0-FAST (replan 5: 30 plans) about 114 s + 30 x 100 x 0.12-0.14 s, **about 8-9 min** (not measured beyond B = 8).
+To measure next: `--batch-sizes 32 50 64 --split 64 100` (pi0.5) and `--batch-sizes 8 12 16 20 24 --split 16 100` (pi0-FAST: the largest `--model-batch` that fits), then a real batch:
+`sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir <probe dir>`: the log prints the wall time of the batch, `sacct` the host memory, `gpu_<jobid>.csv` the card's memory and utilisation.
 
 ## 7. What is written
 
@@ -239,7 +253,7 @@ policy untouched and the frozen weights shared.
 - everything that needs Isaac Sim and the real models together: a first evaluation of a real checkpoint, the server subprocess started from the learner's venv through `jobs/env_server.sh`, the `ready` line, the
   clean-up of Isaac's child processes;
 - that the model gives the same bits in two compilations, two threads and two processes (`--part policy`); its flag `--xla_gpu_deterministic_ops` costs nothing (measured);
-- the cost of K environments per server on the real simulator and models (section 6.1), and the model's GPU memory at batch K;
+- the cost of K environments per server on the real simulator (section 6.1: the model's side is measured, the simulator's at K = 100 is the docs' figure), pi0-FAST's `--model-batch`;
 - the physics over 150 steps from a fresh server (`--part env`); the speed-up of several workers is measured (none on an L40S); the host memory of an Isaac server
   (`--mem=48G` for one worker is an estimate, to be checked with `sacct` after the first evaluation job);
 - the size of N1 for resumed episodes (the probe's cut-and-resume check), and the effect on a success rate over hundreds of episodes (N6 of the env's reproducibility section);

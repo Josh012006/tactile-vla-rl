@@ -47,7 +47,7 @@ def test_the_default_list_is_the_initial_state_then_every_checkpoint_and_steps_p
 # -- protocol ---------------------------------------------------------------------------------------------------------------------------------------
 def args_with(**kw):
     import argparse
-    return argparse.Namespace(**{"seed": 42, "replan": None, "envs_per_server": ES.DEFAULT_ENVS_PER_SERVER, **kw})
+    return argparse.Namespace(**{"seed": 42, "replan": None, "envs_per_server": ES.DEFAULT_ENVS_PER_SERVER, "model_batch": None, **kw})
 
 
 def test_the_protocol_has_k_environments_the_episode_length_of_the_task_and_half_the_chunk_as_replan(tmp_path):
@@ -60,6 +60,11 @@ def test_the_protocol_has_k_environments_the_episode_length_of_the_task_and_half
     p = ES.build_protocol(args_with(), tmp_path, cfg, task)
     assert (p["replan"], p["max_steps"], p["num_envs"], p["master_seed"], p["recipe"]) == (5, 100, ES.DEFAULT_ENVS_PER_SERVER, 42, ES.RECIPE)
     assert ES.build_protocol(args_with(envs_per_server=64), tmp_path, cfg, task)["num_envs"] == 64
+    assert p["model_batch"] == 64                                                              # a model of unknown family: the general default
+    assert ES.build_protocol(args_with(), tmp_path, {**cfg, "family": "pi0_fast"}, task)["model_batch"] == ES.DEFAULT_MODEL_BATCH["pi0_fast"]
+    assert ES.build_protocol(args_with(model_batch=12), tmp_path, {**cfg, "family": "pi0_fast"}, task)["model_batch"] == 12
+    with pytest.raises(SystemExit, match="at least 1"):
+        ES.build_protocol(args_with(model_batch=0), tmp_path, cfg, task)
     assert ES.build_protocol(args_with(), tmp_path, {**cfg, "action_horizon": 16}, task)["replan"] == 8           # expo-ft's 8 of 16
     assert ES.build_protocol(args_with(replan=10), tmp_path, cfg, task)["replan"] == 10
     with pytest.raises(SystemExit, match="between 1 and"):

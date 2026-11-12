@@ -144,6 +144,41 @@ def test_pad_to_fixes_the_batch_the_model_sees_and_bad_arguments_fail(pol):
         fixed.plan(env_obs(3), "p", row_seeds=[1, 2, 3], pad_to=2)
 
 
+def test_a_large_batch_is_split_in_equal_calls_of_at_most_max_rows_and_gives_the_same_chunks(pol):
+    obs, seeds = env_obs(5), [5, 6, 7, 8, 9]
+    whole = pol.plan(obs, "insert the peg", row_seeds=seeds, pad_to=6)
+    split = pol.fork(0)
+    split.max_rows = 4                                                               # 6 rows: two calls of 3 (the second holds 2 real rows and 1 padding)
+    sizes = []
+    inner = split._call                                                              # noqa: SLF001
+    split._call = lambda transformed, source, seeds_, padded, static_s: (sizes.append((len(source), padded)), inner(transformed, source, seeds_, padded, static_s))[1]    # noqa: SLF001
+    parts = split.plan(obs, "insert the peg", row_seeds=seeds, pad_to=6)
+    assert sizes == [(3, 3), (2, 3)]
+    assert parts.raw.shape == whole.raw.shape and np.allclose(parts.raw, whole.raw, atol=1e-4)      # a row's chunk is its own seed's, whichever call it falls in
+    sizes.clear()
+    split.plan(env_obs(3), "p", row_seeds=[1, 2, 3], pad_to=6)                      # three real rows fill the first call: the second would hold only padding and is not made
+    assert sizes == [(3, 3)]
+    split.max_rows = 0
+    with pytest.raises(ValueError, match="max_rows"):
+        split.plan(obs, "p", row_seeds=seeds, pad_to=6)
+
+
+def test_max_rows_applies_to_pi0_fast_rows_and_a_fork_inherits_it(pol):
+    seen = []
+
+    def stub_sampler(state, rng, observation, num_samples, noise=None):
+        seen.append(observation.state.shape[0])
+        return jnp.zeros((observation.state.shape[0] * num_samples, H, MODEL_DIM))
+
+    shell = types.SimpleNamespace(_model=pol.policy._model, _sample_kwargs={}, _input_transform=pol.policy._input_transform,     # noqa: SLF001
+                                  _output_transform=transforms.compose([StateTag()]))
+    fast = OpenPIPolicy(shell, pol.train_cfg, {**pol.cfg, "family": "pi0_fast"})
+    fast._sample = stub_sampler                                                       # noqa: SLF001
+    fast.max_rows = 4
+    plan = fast.fork(1).plan(env_obs(5), "p", pad_to=10)                              # 10 rows (5 environments x 1 sample) -> calls of 4,4,4 -> only 2 hold real rows: 5 real rows
+    assert seen == [4, 4] and np.allclose(plan.raw[:, 0, 0, 0], env_obs(5)[P.JOINT_POSITION][:, 0])       # every row kept the state of its own environment across the calls
+
+
 def test_set_state_changes_what_is_sampled_without_rebuilding_the_policy(pol):
     """openpi's Policy freezes the weights into its jitted sampler; this one takes them as an argument."""
     obs = env_obs(1)

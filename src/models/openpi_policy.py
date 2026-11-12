@@ -86,6 +86,7 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         # a component that asks for touch needs an injection (src/touch/injection): none is written yet, so this raises rather than ignore it
         self.injections = {name: build_injection(name, spec) for name, spec in self.touch.items()}
         self._native_samples = self.info.family in FAMILIES_WITH_NATIVE_SAMPLES
+        self.max_rows: Optional[int] = None                  # most rows of ONE model call: a larger batch is split in equal calls (see `raw_chunks`); None = never split
         self.decode_stats = DecodeStats()                    # pi0-FAST: what the generated tokens were like (cumulative, reset() to restart)
         self.last_valid: Optional[np.ndarray] = None         # pi0-FAST: (N, S) bool of the last `plan`: False = the chunk could not be decoded
         self._fast = None if self._native_samples else fast_extractor(policy)
@@ -159,12 +160,35 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         batch = jax.tree.map(lambda *xs: jnp.asarray(np.stack(xs)), *items)
         return batch, _model.Observation.from_dict(copy.copy(batch))
 
-    def raw_chunks(self, rows: List[dict], num_samples: int, row_seeds: Optional[Sequence[int]] = None, pad_to: Optional[int] = None):
+    def _call(self, transformed: List[dict], source: List[int], seeds: Optional[List[int]], padded: int, static_s: int):
+        """ONE model call over the rows `source` (indices into `transformed`), padded to `padded` rows by repeating the last one (its noise too). Returns the outputs and the states of the
+        real rows only (padding trimmed) and the time of the call in ms."""
         import jax
         import jax.numpy as jnp
+        real = len(source)
+        source = source + [source[-1]] * (padded - real)
+        batch, observation = self._stack([transformed[i] for i in source])
+        noise = None
+        if seeds is not None and self._native_samples:
+            seeds = seeds + [seeds[-1]] * (padded - real)
+            noise = self._row_noise(jnp.asarray(seeds, dtype=jnp.uint32), (static_s, *self._noise_shape))
+            key = jax.random.key(0)                                                          # unused by the sampler once the noise is given (no augmentation at inference)
+        else:
+            self._key, key = jax.random.split(self._key)
+        t0 = time.monotonic()
+        out = np.asarray(self._sample(self._state, key, observation, num_samples=static_s, **({} if noise is None else {"noise": noise})))   # asarray waits for the device
+        return out[:real * static_s], np.asarray(batch["state"])[:real], 1e3 * (time.monotonic() - t0)
+
+    def raw_chunks(self, rows: List[dict], num_samples: int, row_seeds: Optional[Sequence[int]] = None, pad_to: Optional[int] = None):
+        """The batch is `pad_to` rows (default: the next power of two). If `max_rows` is set and the batch is larger, it is split in `ceil(batch / max_rows)` calls of EQUAL size
+        `ceil(batch / calls)` (100 rows, `max_rows` 64: two calls of 50), the last one padded; a call that would hold only padding is not made. The model's time is linear in the number of
+        rows (measured), so the split costs nothing; it exists because the memory of one call grows with its rows (pi0-FAST: the prefill logits). The noise of a row is its own seed's,
+        whatever call it falls in."""
         n, s = len(rows), num_samples
         if row_seeds is not None and len(row_seeds) != n:
             raise ValueError(f"row_seeds has {len(row_seeds)} entries for {n} rows")
+        if self.max_rows is not None and int(self.max_rows) < 1:
+            raise ValueError(f"max_rows must be 1 or more, got {self.max_rows}")
         transformed = [self.policy._input_transform(copy.deepcopy(r)) for r in rows]          # noqa: SLF001  one per environment
         if self._native_samples:
             source = list(range(n))                                                           # S samples drawn inside the model
@@ -174,21 +198,21 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
             static_s = 1
         if pad_to is not None and pad_to < len(source):
             raise ValueError(f"pad_to={pad_to} is smaller than the {len(source)} rows of the call")
-        padded = int(pad_to) if pad_to is not None else padded_batch_size(len(source))
-        source = source + [source[-1]] * (padded - len(source))
-        batch, observation = self._stack([transformed[i] for i in source])
-        noise = None
-        if row_seeds is not None and self._native_samples:
-            seeds = [int(x) % (2 ** 32) for x in row_seeds]
-            seeds = seeds + [seeds[-1]] * (padded - n)                                       # the padding rows repeat the last row, noise included
-            noise = self._row_noise(jnp.asarray(seeds, dtype=jnp.uint32), (static_s, *self._noise_shape))
-            key = jax.random.key(0)                                                          # unused by the sampler once the noise is given (no augmentation at inference)
+        total = int(pad_to) if pad_to is not None else padded_batch_size(len(source))
+        if self.max_rows is None or total <= int(self.max_rows):
+            size = total
         else:
-            self._key, key = jax.random.split(self._key)
-        t0 = time.monotonic()
-        out = np.asarray(self._sample(self._state, key, observation, num_samples=static_s, **({} if noise is None else {"noise": noise})))   # asarray waits for the device
-        infer_ms = 1e3 * (time.monotonic() - t0)
-        state = np.asarray(batch["state"])
+            size = -(-total // -(-total // int(self.max_rows)))                               # equal calls: ceil(total / ceil(total / max_rows))
+        seeds = None if row_seeds is None else [int(x) % (2 ** 32) for x in row_seeds]
+        outs, states, infer_ms = [], [], 0.0
+        for start in range(0, len(source), size):
+            part = source[start:start + size]
+            part_seeds = seeds[start:start + size] if seeds is not None and self._native_samples else None       # (pi0-FAST decodes greedily: no noise)
+            out, state, ms = self._call(transformed, part, part_seeds, size, static_s)
+            outs.append(out)
+            states.append(state)
+            infer_ms += ms
+        out, state = np.concatenate(outs), np.concatenate(states)
         if self._fast is not None:
             self._record_decoding(out, n * s, n, s)
         chunks = []

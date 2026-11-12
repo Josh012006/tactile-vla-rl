@@ -16,7 +16,8 @@ The episodes. One env server per checkpoint holds `--envs-per-server` K environm
 batch b starts with FORGE's real reset seeded `--seed` + b. With at most K episodes (the normal case) a checkpoint is ONE batch from a fresh server: every checkpoint starts from the very same K
 states, and no start depends on what an earlier episode did. `--seed` (default 42) also generates the `--n-episodes` episode seeds ONCE (the way expo-ft does: episode_seeds.json, kept in the
 output folder), which seed the policy's sampling noise: the noise of pi0.5 for the k-th chunk of episode i depends on (its seed, k) only. A chunk is executed `--replan` steps (default: half the
-model's chunk, as expo-ft's 8 of 16) and the episode lasts at most `max_steps_per_episode` of the task YAML. K is part of the protocol (it fixes the start states): it cannot change in a folder.
+model's chunk, as expo-ft's 8 of 16) and the episode lasts at most `max_steps_per_episode` of the task YAML. K is part of the protocol (it fixes the start states): it cannot change in a folder. The model is called with the K rows, split in equal calls of at most `--model-batch` rows when K is
+larger (memory; the time is linear in the rows, so the split is free); that too is part of the protocol.
 More than K episodes means more batches in the same server: those start after other episodes and carry the small history dependence of docs/envs/isaaclab_env.md N1 (keep K >= --n-episodes).
 
 Comparable evaluation (docs/eval/sft_eval.md). pi0-FAST decodes greedily; pi0.5's noise is per episode; the model is always called with K rows (one shape, rows of finished episodes repeated);
@@ -61,6 +62,9 @@ from src.models.interface import ROOT, norm_stats_source
 
 RECIPE = "batched-v1"                        # K environments per server, one reset per checkpoint, pi0.5 noise per (episode, chunk), model batch of K, fresh server per checkpoint
 DEFAULT_ENVS_PER_SERVER = 100
+# Most rows of one model call (`OpenPIPolicy.max_rows`): a larger batch is split in equal calls. Measured on an L40S with the policy limited to half the card (12 Nov. 2026, scripts/probe_batch_cost.py):
+# pi0.5 fits 64 rows (14.2 GiB) and not 100; pi0-FAST fits 8 rows (9.4 GiB) and not 32 (prefill logits); the pi0-FAST default is NOT measured (to be set from the probe's numbers).
+DEFAULT_MODEL_BATCH = {"pi05": 64, "pi0": 64, "pi0_fast": 16}
 DEFAULT_TASK = "configs/task/peg_insert_forge.yaml"
 XLA_DETERMINISTIC = "--xla_gpu_deterministic_ops=true"
 FORBIDDEN_ENV_SET = ("num_envs", "server_port")                     # num_envs: --envs-per-server
@@ -112,6 +116,14 @@ def task_settings(task_config: Path, env_set: List[str], envs_per_server: int = 
     return task
 
 
+def resolve_model_batch(requested: Optional[int], model_cfg: dict) -> int:
+    """`--model-batch`, or the default of the model's family."""
+    value = DEFAULT_MODEL_BATCH.get(model_cfg.get("family"), 64) if requested is None else int(requested)
+    if value < 1:
+        raise SystemExit("--model-batch must be at least 1")
+    return value
+
+
 def build_protocol(args, run_dir: Path, model_cfg: dict, task: dict) -> dict:
     horizon = int(model_cfg["action_horizon"])
     replan = int(args.replan) if args.replan else max(1, horizon // 2)
@@ -119,7 +131,7 @@ def build_protocol(args, run_dir: Path, model_cfg: dict, task: dict) -> dict:
         raise SystemExit(f"--replan {replan}: between 1 and the model's chunk length ({horizon})")
     stats = norm_stats_path(model_cfg)
     return {"recipe": RECIPE, "master_seed": int(args.seed), "replan": replan, "max_steps": int(task["max_steps_per_episode"]), "num_envs": int(args.envs_per_server),
-            "model_cfg": model_cfg, "norm_stats_sha": file_sha(stats) if stats else None, "task": task, "run": str(run_dir)}
+            "model_batch": resolve_model_batch(args.model_batch, model_cfg), "model_cfg": model_cfg, "norm_stats_sha": file_sha(stats) if stats else None, "task": task, "run": str(run_dir)}
 
 
 def file_sha(path: Path) -> str:
@@ -231,6 +243,8 @@ def main(argv=None) -> int:
     ap.add_argument("--curve-dir", metavar="DIR", help="where curve.json / curve.png / curve.pdf go (default: the output folder)")
     ap.add_argument("--envs-per-server", type=int, default=DEFAULT_ENVS_PER_SERVER, metavar="K",
                     help=f"environments in each server, playing together (default {DEFAULT_ENVS_PER_SERVER}); at least --n-episodes keeps a checkpoint in ONE batch. Fixed by the folder's protocol")
+    ap.add_argument("--model-batch", type=int, metavar="M", help=f"most rows of one model call (default by family: {DEFAULT_MODEL_BATCH}); a batch of K rows is split in equal calls of at most M rows "
+                    "(the model's time is linear in the rows, so it costs nothing; it is the model's memory that limits M). Part of the protocol: it changes the shapes the model is compiled for")
     ap.add_argument("--workers", type=int, default=1, help="checkpoints evaluated at the same time (default 1): one thread, one env server and one policy each")
     ap.add_argument("--replan", type=int, help="steps executed per chunk before the model is called again (default: half the model's chunk)")
     ap.add_argument("--task-config", default=DEFAULT_TASK, help=f"env server YAML (default {DEFAULT_TASK})")
@@ -283,7 +297,7 @@ def main(argv=None) -> int:
         raise SystemExit(str(e))
 
     done = progress_of(output_dir, jobs, seeds)
-    print(f"run {run_dir}\nmodel {model_cfg['name']} ({model_cfg['family']}), chunk {model_cfg['action_horizon']}, replan {protocol['replan']}, episodes of at most {protocol['max_steps']} steps")
+    print(f"run {run_dir}\nmodel {model_cfg['name']} ({model_cfg['family']}), chunk {model_cfg['action_horizon']}, replan {protocol['replan']}, episodes of at most {protocol['max_steps']} steps, at most {protocol['model_batch']} rows per model call")
     print(f"{len(seeds)} episodes per checkpoint, master seed {args.seed}, {args.envs_per_server} environments per server, {args.workers} worker(s); data in {output_dir}, curve in {curve_dir}")
     if len(seeds) > args.envs_per_server:
         print(f"WARNING: {len(seeds)} episodes in servers of {args.envs_per_server} environments: batches after the first start after other episodes (small history dependence, "
@@ -335,6 +349,7 @@ def main(argv=None) -> int:
     print(f"loading the model ({model_cfg['name']}), XLA_FLAGS={os.environ['XLA_FLAGS']}", flush=True)
     base = load_model(model_cfg, seed=0)
     initial = base.state                                                     # the run's initial state: the policy as loaded
+    base.max_rows = protocol["model_batch"]                                   # forks (one per worker) inherit it
 
     def prepare(policy, job: Job) -> None:
         policy.set_state(initial)                                            # the weights of no other checkpoint leak in

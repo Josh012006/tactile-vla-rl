@@ -1,7 +1,7 @@
 #!/bin/bash
 # What does the model cost when it plans for K environments at once? (scripts/probe_batch_cost.py: no simulator, a few minutes)
-#   sbatch jobs/job_probe_batch_cost.sh --model pi05 --batch-sizes 1 8 32 64 100
-#   sbatch jobs/job_probe_batch_cost.sh --model pi0_fast --batch-sizes 1 8 32 64 100
+#   sbatch jobs/job_probe_batch_cost.sh --model pi05 --batch-sizes 32 50 64 --split 64 100        # calls of 32 / 50 / 64 rows, then 100 rows in ONE plan split in equal calls of at most 64 (two of 50)
+#   sbatch jobs/job_probe_batch_cost.sh --model pi0_fast --batch-sizes 8 12 16 20 24 --split 16 100
 # Every option goes to `python -m scripts.probe_batch_cost` (see its --help). Output: logs/slurm/probe_batch_cost_<jobid>.out, reports/probe_batch_cost_<model>_<tag>.json.
 # Use the GPU of the evaluation (an L40S). No mail (not a training job).
 #
@@ -15,7 +15,7 @@
 #SBATCH --requeue
 
 set -u
-[ $# -eq 0 ] && { echo "usage: sbatch jobs/job_probe_batch_cost.sh --model <pi05 | pi0_fast> [--batch-sizes 1 8 32 ...]" >&2; exit 1; }
+[ $# -eq 0 ] && { echo "usage: sbatch jobs/job_probe_batch_cost.sh --model <pi05 | pi0_fast> [--batch-sizes 8 16 ...] [--split M TOTAL]" >&2; exit 1; }
 cd "${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}" || exit 1
 mkdir -p logs/slurm reports
 nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader

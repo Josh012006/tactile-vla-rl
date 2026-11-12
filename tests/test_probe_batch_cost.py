@@ -52,3 +52,13 @@ def test_a_batch_that_does_not_fit_is_recorded_and_the_larger_ones_are_not_tried
     rows = PB.measure(Small(), [1, 8, 32, 64], 2, memory=lambda: {}, say=lambda m: None)
     assert [r["batch"] for r in rows] == [1, 8, 32] and rows[2]["failed"].startswith("RESOURCE_EXHAUSTED") and "median_ms" not in rows[2]
     assert [e["batch"] for e in PB.estimate(rows, 150, 8)] == [1, 8]
+
+
+def test_split_measures_one_plan_of_many_rows_cut_in_equal_calls_and_puts_max_rows_back():
+    policy = Fake()
+    policy.max_rows = 7
+    rows = PB.measure(policy, [100], 2, memory=lambda: {}, say=lambda m: None, max_rows=64)
+    assert policy.max_rows == 7                                                              # the policy's own setting is back
+    assert rows[0]["batch"] == 100 and rows[0]["max_rows"] == 64 and (rows[0]["call_rows"], rows[0]["calls_per_plan"]) == (50, 2)
+    assert PB.split_calls(64, 64) == {"call_rows": 64, "calls_per_plan": 1} and PB.split_calls(24, 16) == {"call_rows": 12, "calls_per_plan": 2}
+    assert PB.split_calls(100, 16) == {"call_rows": 15, "calls_per_plan": 7} and PB.estimate(rows, 150, 8)[0]["batch"] == 100
