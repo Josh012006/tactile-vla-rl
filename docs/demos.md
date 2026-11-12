@@ -40,7 +40,7 @@ below do it themselves.
 | robot: images per phase and taxel video | `sbatch jobs/job_demos.sh robot_check --out reports/robot_check_tsf` |
 | teleoperation | `sbatch jobs/job_teleop_server.sh`, then the two commands it prints (tunnel, `teleop_client.py` on your PC) |
 | LeRobot conversion | `python -m scripts.demos.convert_waypoint_demos_to_lerobot --demos-dir <folder> --output-dir demos/isaaclab/lerobot --repo-name expo_ft/<name>` (`.venv`, needs `lerobot`) |
-| normalisation statistics | `python -m scripts.demos.compute_demo_norm_stats --demos-dir <folder> --output-dir assets/forge_demo_norm --asset-id <name>` |
+| normalisation statistics | `python -m scripts.demos.compute_demo_norm_stats --demos-dir <folder> --output-dir assets/forge_demo_norm --asset-id <name>`; the pi0.5 SFTs use `assets/forge_demo_norm/forge_demos_robotiq_noisy` (the file of expo-ft, copied: docs/algos/sft.md, section 2b) |
 | analyses without a GPU | `scripts.demos.noise_effect`, `analyze_waypoint_failure`, `demo_z_bands` |
 
 Without `--video-dir` and `--report`, `replay` writes its videos and its JSON report **inside the demonstration folder** (`<demos-dir>/replay_videos`,

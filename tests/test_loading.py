@@ -160,3 +160,15 @@ def test_pi0_fast_with_lora_is_structurally_loadable_from_its_checkpoint_without
     assert missing and all(any("lora" in part for part in k) for k in missing)               # only LoRA tensors come from the model
     with pytest.raises(ValueError):                                                         # and the strict structure check would have failed
         at.check_pytree_equality(expected=expected, got=checkpoint, check_shapes=True, check_dtypes=False)
+
+
+def test_the_policy_reads_the_yamls_norm_stats_and_names_a_missing_file(tmp_path):
+    import numpy as np
+    import openpi.shared.normalize as normalize
+    from src.models.loading import load_norm_stats
+    stats = {"state": normalize.NormStats(mean=np.zeros(8), std=np.ones(8), q01=-np.ones(8), q99=np.full(8, 2.0))}
+    normalize.save(tmp_path / "stats" / "mine", stats)
+    got = load_norm_stats({"norm_stats": {"dir": str(tmp_path / "stats"), "asset_id": "mine"}}, None, tmp_path)
+    assert np.allclose(got["state"].q99, 2.0)
+    with pytest.raises(FileNotFoundError, match="normalisation statistics not found"):
+        load_norm_stats({"norm_stats": {"dir": str(tmp_path / "stats"), "asset_id": "absent"}}, None, tmp_path)

@@ -44,29 +44,54 @@ from src.touch.features import TouchSpec
 
 ROOT = Path(__file__).resolve().parents[2]
 SEMANTICS = ("offsets_from_chunk_start_state", "absolute_targets")
+NORM_STATS_FIELDS = ("dir", "asset_id")
 TOUCH_ROW_PREFIX = "touch/"           # a row carries the touch vector of component C under "touch/C" (only for components that use touch)
 
 
 # -- model YAML ---------------------------------------------------------------------------------------------------------------
+def norm_stats_source(cfg: Mapping) -> Optional[Tuple[Path, str]]:
+    """(folder, asset id) of the normalisation statistics the YAML's `norm_stats` block names: <folder>/<asset id>/norm_stats.json, the folder
+    relative to the repository root unless absolute. None (no block): the statistics saved with the checkpoint (DROID's), as openpi has it.
+    The block holds both keys or it is refused. Does not check that the file exists (src/models/loading.py does, where it is read)."""
+    block = cfg.get("norm_stats")
+    if block is None:
+        return None
+    if not isinstance(block, Mapping) or set(block) != set(NORM_STATS_FIELDS) or not all(isinstance(v, str) and v for v in block.values()):
+        raise ValueError(f"norm_stats: a mapping with the two keys {list(NORM_STATS_FIELDS)} (non-empty strings), or nothing for the checkpoint's own, got {block!r}")
+    folder = Path(block["dir"])
+    return (folder if folder.is_absolute() else ROOT / folder), block["asset_id"]
+
+
 def load_model_cfg(name: str) -> dict:
-    """configs/model/<name>.yaml, validated (output semantics, per-component settings)."""
+    """configs/model/<name>.yaml, validated (output semantics, per-component settings, normalisation statistics)."""
     cfg = yaml.safe_load((ROOT / "configs" / "model" / f"{name}.yaml").read_text())
     if cfg["output_semantics"] not in SEMANTICS:
         raise ValueError(f"configs/model/{name}.yaml: output_semantics must be one of {SEMANTICS}, got {cfg['output_semantics']!r}")
     parse_model_settings(cfg)
+    norm_stats_source(cfg)
     return cfg
 
 
 def apply_overrides(cfg: dict, overrides: Optional[Mapping[str, Any]] = None) -> dict:
     """A validated copy of the model config with `overrides` applied: keys `<component>.<key>`, e.g.
-    {"vlm.use_lora": False, "action_head.lora_rank": 8, "action_head.use_tactile": True} (the probe's `--set`, an algorithm's own config)."""
+    {"vlm.use_lora": False, "action_head.lora_rank": 8, "action_head.use_tactile": True} (the probe's `--set`, an algorithm's own config).
+    The normalisation statistics: {"norm_stats.dir": "assets/...", "norm_stats.asset_id": "..."}, or {"norm_stats": None} for the checkpoint's own."""
     cfg = copy.deepcopy(dict(cfg))
     for key, value in (overrides or {}).items():
         component, _, field = key.partition(".")
+        if component == "norm_stats":
+            if not field:
+                cfg["norm_stats"] = value
+                continue
+            if field not in NORM_STATS_FIELDS:
+                raise ValueError(f"override {key!r}: the keys of norm_stats are {list(NORM_STATS_FIELDS)}")
+            cfg["norm_stats"] = {**(cfg.get("norm_stats") or {}), field: value}
+            continue
         if component not in COMPONENTS or field not in BLOCK_FIELDS:
             raise ValueError(f"override {key!r}: expected <component>.<key>, component in {list(COMPONENTS)}, key in {list(BLOCK_FIELDS)}")
         cfg[component] = {**(cfg.get(component) or {}), field: value}
     parse_model_settings(cfg)
+    norm_stats_source(cfg)
     return cfg
 
 

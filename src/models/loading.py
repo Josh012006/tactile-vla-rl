@@ -2,7 +2,8 @@
 
 The YAML names an openpi TrainConfig (`openpi_config`: data pipeline, norm stats), whose Gemma variants are then set by the per-component
 LoRA keys of the YAML (`vlm.use_lora`, `vlm.lora_rank`, `action_head.*`: src/models/settings.py, src/models/openpi_config.py). The
-WEIGHTS are always those of the YAML's `checkpoint`, never those the openpi config happens to name: one source of truth. (Today the two
+NORM STATS are the checkpoint's (DROID's) unless the YAML has a `norm_stats` block (`dir`, `asset_id`: <dir>/<asset_id>/norm_stats.json), see `load_norm_stats`.
+The WEIGHTS are always those of the YAML's `checkpoint`, never those the openpi config happens to name: one source of truth. (Today the two
 agree for pi0.5 and for pi0-FAST PolaRiS; the replacement protects a YAML that is changed to another checkpoint from loading the old one.)
 Two ways to load them (`load:`):
 
@@ -84,16 +85,32 @@ def build_params_like_expo_ft(train_cfg, seed: int = 0):
     return nnx.merge(graphdef, state)
 
 
-def _policy_from(train_cfg, model, checkpoint_dir: pathlib.Path):
-    """The tail of openpi's `create_trained_policy` (same transforms, same norm stats from the checkpoint's assets/), for a model we built."""
+def load_norm_stats(model_cfg: dict, train_cfg, checkpoint_dir: pathlib.Path):
+    """The normalisation statistics of the policy: the YAML's `norm_stats` block when it has one (<dir>/<asset_id>/norm_stats.json, e.g. computed on
+    the demonstrations: scripts/demos/compute_demo_norm_stats.py), otherwise the ones saved with the checkpoint (DROID's), as openpi has it."""
+    import openpi.shared.normalize as normalize
+    from src.models.interface import norm_stats_source
+
+    source = norm_stats_source(model_cfg)
+    if source is None:
+        data_config = train_cfg.data.create(train_cfg.assets_dirs, train_cfg.model)
+        if data_config.asset_id is None:
+            raise ValueError("asset id is required to load the norm stats")
+        folder, asset_id = checkpoint_dir / "assets", data_config.asset_id
+    else:
+        folder, asset_id = source
+    if not (folder / asset_id / "norm_stats.json").is_file():
+        raise FileNotFoundError(f"normalisation statistics not found: {folder / asset_id / 'norm_stats.json'}"
+                                + ("" if source is None else " (the `norm_stats` block of the model YAML; scripts/demos/compute_demo_norm_stats.py writes them)"))
+    return normalize.load(folder / asset_id)                 # what openpi's checkpoints.load_norm_stats does
+
+
+def _policy_from(train_cfg, model, norm_stats):
+    """The tail of openpi's `create_trained_policy` (same transforms), for a model we built, with the given normalisation statistics."""
     import openpi.policies.policy as _policy
     import openpi.transforms as transforms
-    from openpi.training import checkpoints as _checkpoints
 
     data_config = train_cfg.data.create(train_cfg.assets_dirs, train_cfg.model)
-    if data_config.asset_id is None:
-        raise ValueError("asset id is required to load the norm stats")
-    norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
     return _policy.Policy(
         model,
         transforms=[
@@ -136,7 +153,8 @@ def load_policy(model_cfg: dict):
 
     train_cfg = apply_settings(_config.get_config(model_cfg["openpi_config"]), settings)
     checkpoint = _download(model_cfg["checkpoint"])
+    norm_stats = load_norm_stats(model_cfg, train_cfg, checkpoint)
     if mode == "strict":
-        return policy_config.create_trained_policy(train_cfg, checkpoint), train_cfg
+        return policy_config.create_trained_policy(train_cfg, checkpoint, norm_stats=norm_stats), train_cfg
     train_cfg = with_yaml_weights(train_cfg, checkpoint)
-    return _policy_from(train_cfg, build_params_like_expo_ft(train_cfg), checkpoint), train_cfg
+    return _policy_from(train_cfg, build_params_like_expo_ft(train_cfg), norm_stats), train_cfg

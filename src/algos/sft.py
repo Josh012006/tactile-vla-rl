@@ -171,6 +171,19 @@ def save_checkpoint(directory: Path, trainable, meta: Mapping[str, Any]) -> None
     (directory / META_FILE).write_text(json.dumps(dict(meta), indent=2, default=str))
 
 
+def save_norm_stats(model_cfg: Optional[Mapping[str, Any]], directory: Path) -> None:
+    """Copy the normalisation statistics the model YAML names (its `norm_stats` block) into <directory>/assets/<asset id>/, where openpi keeps them
+    next to the weights: the checkpoint then carries what it was trained with. Nothing to copy without the block (the checkpoint's own, DROID's)."""
+    from src.models.interface import norm_stats_source
+    source = norm_stats_source(model_cfg or {})
+    if source is None:
+        return
+    folder, asset_id = source
+    target = Path(directory) / "assets" / asset_id
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(folder / asset_id / "norm_stats.json", target / "norm_stats.json")
+
+
 def load_checkpoint(policy, directory) -> dict:
     """Put the trained parameters of a checkpoint into `policy` (loaded from the same model YAML and overrides). Returns the checkpoint's meta.
     Refuses a checkpoint that does not fit the policy: a parameter the policy lacks, or of another shape (another LoRA rank)."""
@@ -546,6 +559,7 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
             shutil.rmtree(path)
         t_save = time.monotonic()
         save_checkpoint(path, trainable, {**meta, "step": step, "sft": dataclasses.asdict(cfg)})
+        save_norm_stats(meta.get("model_cfg"), path)
         size_mib = round(sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 2**20)
         log.write(event="checkpoint", step=step, path=str(path), save_s=round(time.monotonic() - t_save, 1), size_mib=size_mib)
         return str(path)

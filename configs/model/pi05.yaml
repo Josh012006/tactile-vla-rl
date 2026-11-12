@@ -37,6 +37,13 @@ action_head:                   # the action expert (Gemma 300M)
   use_force: false
   force_mode: measured
 
+# Normalisation statistics. Without this block the ones saved with `checkpoint` are used (DROID's, `assets/droid`): what the base weights were trained with. With it:
+#   norm_stats:
+#     dir: assets/forge_demo_norm                    # <dir>/<asset_id>/norm_stats.json, relative to the repository root unless absolute
+#     asset_id: forge_demos_robotiq_noisy            # written by python -m scripts.demos.compute_demo_norm_stats
+# Set it from an experiment file (`model_set: norm_stats.dir: ...`) or `--model-set norm_stats.dir=... --model-set norm_stats.asset_id=...`; a policy that loads weights
+# trained with other statistics than the base ones must be given the same block (the checkpoints of src/algos/sft.py hold a copy in assets/ and the block in meta.json).
+
 # How the weights are loaded (src/models/loading.py). The checkpoint has NO LoRA tensors, so openpi's strict loading fails with LoRA
 # ("symmetric difference of key sets: {'lora_a', 'lora_b'}"). expo-ft loads through a weight_loader, which keeps the checkpoint weights
 # and takes the LoRA parameters from the model's own initialisation: `load: weight_loader` does the same. openpi initialises lora_a AND

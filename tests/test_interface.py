@@ -1,4 +1,6 @@
 """src/models/interface.py: what an algorithm sees of a model. numpy only (no JAX, no openpi, no GPU)."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -156,6 +158,22 @@ def test_overrides_change_a_copy_not_the_loaded_config():
 @pytest.mark.parametrize("bad", [{"use_lora": False}, {"vlm": 1}, {"vlm.rank": 8}, {"critic.use_lora": True}, {"vlm.use_lora": "false"},
                                  {"action_head.use_tactile": "no"}])
 def test_overrides_are_validated(bad):
+    with pytest.raises(ValueError):
+        I.apply_overrides({"family": "pi05"}, bad)
+
+
+def test_the_normalisation_statistics_are_the_checkpoints_unless_the_yaml_names_others():
+    assert I.norm_stats_source({"family": "pi05"}) is None and I.norm_stats_source({"norm_stats": None}) is None
+    cfg = I.apply_overrides({"family": "pi05"}, {"norm_stats.dir": "assets/x", "norm_stats.asset_id": "demo"})
+    assert cfg["norm_stats"] == {"dir": "assets/x", "asset_id": "demo"}
+    assert I.norm_stats_source(cfg) == (I.ROOT / "assets" / "x", "demo")                      # relative to the repository root
+    assert I.norm_stats_source({"norm_stats": {"dir": "/abs/x", "asset_id": "demo"}}) == (Path("/abs/x"), "demo")
+    assert I.apply_overrides(cfg, {"norm_stats": None}).get("norm_stats") is None             # back to the checkpoint's own
+
+
+@pytest.mark.parametrize("bad", [{"norm_stats.dir": "assets/x"}, {"norm_stats.asset_id": "demo"}, {"norm_stats.path": "x"}, {"norm_stats": "x"},
+                                 {"norm_stats.dir": "", "norm_stats.asset_id": "demo"}, {"norm_stats.dir": 3, "norm_stats.asset_id": "demo"}])
+def test_the_normalisation_statistics_need_both_keys_as_strings(bad):
     with pytest.raises(ValueError):
         I.apply_overrides({"family": "pi05"}, bad)
 

@@ -1,5 +1,9 @@
 # SFT of pi0.5 with LoRA on the FORGE PegInsert noisy scripted (35 percent of the demonstrations with noise injection, clean labels) demonstrations (50 episodes, all of them).
 # Touch is NOT used: this is the SFT of expo-ft (cameras, joints, gripper, prompt), whose checkpoint the RL starts from. The taxels in the demonstrations are ignored.
+# Normalisation statistics: those computed on the NOISY demonstrations (assets/forge_demo_norm/forge_demos_robotiq_noisy), for the three demonstration types, as in the
+# SFT of expo-ft: the DROID ones squeeze FORGE's small motions into a few percent of [-1, 1] (docs/algos/sft.md, section 2b), and the same file for the three runs
+# means that the demonstrations are the only difference between them. The checkpoints carry them (checkpoints/<step>/assets/); an evaluation or an RL run that loads
+# one of them must use the same `norm_stats` block (model_set below).
 # Everything else (steps, batch, learning rate, checkpoints every 200 steps, resume snapshots, wandb) is configs/algo/sft.yaml; the model is configs/model/pi05.yaml (LoRA).
 #
 #   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/pi05_lora_noisy.yaml
@@ -18,3 +22,5 @@ model_set:                       # touch off in every component the model has (i
   vlm.use_force: false
   action_head.use_tactile: false
   action_head.use_force: false
+  norm_stats.dir: assets/forge_demo_norm            # <dir>/<asset_id>/norm_stats.json
+  norm_stats.asset_id: forge_demos_robotiq_noisy

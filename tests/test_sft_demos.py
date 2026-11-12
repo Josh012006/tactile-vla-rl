@@ -248,7 +248,7 @@ def experiment_files():
 
 def test_the_six_sft_experiments_are_the_two_models_times_the_three_demonstration_types():
     from scripts import sft as cli
-    from src.models.interface import apply_overrides, load_model_cfg
+    from src.models.interface import ROOT, apply_overrides, load_model_cfg, norm_stats_source
     from src.models.settings import parse_model_settings
     files = experiment_files()
     assert [f.stem for f in files] == sorted(f"{m}_lora_{d}" for m in ("pi05", "pi0_fast") for d in ("scripted", "noisy", "teleop"))
@@ -264,19 +264,53 @@ def test_the_six_sft_experiments_are_the_two_models_times_the_three_demonstratio
         cfg = load_model_cfg(model)
         settings = parse_model_settings(apply_overrides(cfg, cli.model_overrides(cfg, exp["full"], exp["model_set"])))
         assert settings.any_lora and not settings.active_touch                                           # LoRA, and no touch in any component
+        stats = norm_stats_source(apply_overrides(cfg, cli.model_overrides(cfg, exp["full"], exp["model_set"])))
+        if model == "pi05":                                                                              # the noisy set's statistics for the three, as in expo-ft
+            assert stats == (ROOT / "assets" / "forge_demo_norm", "forge_demos_robotiq_noisy")
+        else:
+            assert stats is None                                                                         # pi0-FAST: the checkpoint's own (offsets' statistics do not fit it)
+
+
+def test_a_checkpoint_carries_the_normalisation_statistics_it_was_trained_with(tmp_path):
+    import json
+    from src.algos.sft import save_norm_stats
+    stats = tmp_path / "assets" / "mine"
+    stats.mkdir(parents=True)
+    (stats / "norm_stats.json").write_text(json.dumps({"norm_stats": {"state": {}}}))
+    cfg = {"norm_stats": {"dir": str(tmp_path / "assets"), "asset_id": "mine"}}
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    save_norm_stats(cfg, ckpt)
+    assert json.loads((ckpt / "assets" / "mine" / "norm_stats.json").read_text()) == {"norm_stats": {"state": {}}}
+    other = tmp_path / "ckpt2"
+    other.mkdir()
+    save_norm_stats({}, other)                                                                           # the checkpoint's own statistics: nothing to copy
+    save_norm_stats(None, other)
+    assert not (other / "assets").exists()
+
+
+def test_a_missing_statistics_file_stops_the_dry_run_before_anything_is_loaded(folder):
+    from scripts import sft as cli
+    with pytest.raises(SystemExit, match="normalisation statistics not found"):
+        cli.main(["--model", "pi05", "--demos", str(folder), "--dry-run", "--model-set", "norm_stats.dir=/nonexistent", "--model-set", "norm_stats.asset_id=x",
+                  "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"])
 
 
 def test_an_experiment_gives_the_run_folder_and_the_command_line_wins(folder, capsys):
     from scripts import sft as cli
     file = next(f for f in experiment_files() if f.stem == "pi05_lora_scripted")
-    assert cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"]) == 0
+    (folder.parent / "stats" / "forge_demos_robotiq_noisy").mkdir(parents=True)                         # the experiment's statistics file is not in the test's tree: a stand-in
+    (folder.parent / "stats" / "forge_demos_robotiq_noisy" / "norm_stats.json").write_text("{}")
+    stats = ["--model-set", f"norm_stats.dir={folder.parent / 'stats'}"]                                # the command line wins over the file here too
+    assert cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", *stats, "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"]) == 0
     out = capsys.readouterr().out
-    assert "runs/sft/peg_insert/peg_insert_pi05_lora_scripted" in out and "EXISTS" not in out
-    cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", "--run-name", "other", "--set", "output_root=runs/sft/probing",
+    assert "runs/sft/peg_insert/peg_insert_pi05_lora_scripted" in out and "EXISTS" not in out and "forge_demos_robotiq_noisy/norm_stats.json" in out
+    cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", *stats, "--run-name", "other", "--set", "output_root=runs/sft/probing",
               "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"])
     assert "runs/sft/probing/other" in capsys.readouterr().out                                          # --run-name and --set win over the file
     cli.main(["--model", "pi0_fast", "--demos", str(folder), "--dry-run", "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"])
-    assert "runs/sft/probing/pi0_fast_" in capsys.readouterr().out                                      # without an experiment: a probe
+    out = capsys.readouterr().out
+    assert "runs/sft/probing/pi0_fast_" in out and "the checkpoint's own (DROID)" in out                                      # without an experiment: a probe
 
 
 def test_a_wrong_experiment_is_refused(tmp_path):

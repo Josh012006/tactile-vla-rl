@@ -39,7 +39,7 @@ import yaml
 
 from src.algos import demos as demos_mod
 from src.algos import sft as sft_mod
-from src.models.interface import ROOT, apply_overrides, load_model_cfg
+from src.models.interface import ROOT, apply_overrides, load_model_cfg, norm_stats_source
 from src.models.settings import FAMILIES_WITH_ACTION_HEAD, parse_model_settings
 
 
@@ -112,9 +112,21 @@ def load_experiment(path) -> dict:
     return raw
 
 
+def stats_description(model_cfg: dict) -> str:
+    """Where the normalisation statistics come from; a file that is not there stops the command before anything heavy is loaded."""
+    source = norm_stats_source(model_cfg)
+    if source is None:
+        return "the checkpoint's own (DROID)"
+    file = source[0] / source[1] / "norm_stats.json"
+    if not file.is_file():
+        raise SystemExit(f"normalisation statistics not found: {file} (the `norm_stats` block of the model YAML)")
+    return str(file)
+
+
 def print_dry_run(train, val, cfg, model_cfg, mode) -> None:
     info = train.describe()
     print(f"model {model_cfg['name']} ({model_cfg['family']}), horizon {train.horizon}, {mode}")
+    print(f"normalisation statistics: {stats_description(model_cfg)}")
     print(f"training set: {info['episodes']} episodes, {info['steps']} steps (min / mean / max per episode: {info['steps_per_episode']}), "
           f"{info['bytes'] / 2**30:.2f} GiB in memory")
     print(f"  observation keys: {info['keys']}\n  prompts: {info['prompts']}")
