@@ -96,7 +96,7 @@ def test_the_state_of_each_row_follows_the_environment_in_both_layouts(pol):
     Native samples (pi0.5 / pi0: S inside the model) and repeated rows (pi0-FAST): environment i, sample s <- the state of environment i."""
     seen = []
 
-    def stub_sampler(state, rng, observation, num_samples):
+    def stub_sampler(state, rng, observation, num_samples, noise=None):
         seen.append((observation.state.shape[0], num_samples))
         return jnp.zeros((observation.state.shape[0] * num_samples, H, MODEL_DIM))
 
@@ -109,6 +109,39 @@ def test_the_state_of_each_row_follows_the_environment_in_both_layouts(pol):
         assert seen[-1] == expected_call, (family, seen)                              # padded to a power of two, samples inside or as rows
         want = np.repeat(env_obs(3)[P.JOINT_POSITION][:, 0], 2).reshape(3, 2)        # the first joint of environment i, for both samples
         assert plan.raw.shape == (3, 2, H, 8) and np.allclose(plan.raw[:, :, 0, 0], want), (family, plan.raw[:, :, 0, 0])
+
+
+def test_the_noise_of_a_row_is_a_function_of_its_own_seed_whatever_the_other_rows(pol):
+    """`row_seeds`: what an evaluation relies on to give the same chunk to an episode whichever episodes share its batch."""
+    obs = env_obs(3)
+    three = pol.plan(obs, "insert the peg", row_seeds=[11, 22, 33], pad_to=4)
+    again = pol.plan(obs, "insert the peg", row_seeds=[11, 22, 33], pad_to=4)
+    assert np.array_equal(three.raw, again.raw)                                        # nothing is drawn from the policy's own stream
+    alone = pol.plan({k: v[1:2] for k, v in obs.items()}, "insert the peg", row_seeds=[22], pad_to=4)     # environment 1 alone, in a batch of the same size
+    assert np.allclose(three.raw[1], alone.raw[0], atol=1e-5)
+    other = pol.plan({k: v[1:2] for k, v in obs.items()}, "insert the peg", row_seeds=[23], pad_to=4)
+    assert not np.allclose(three.raw[1], other.raw[0], atol=1e-3)                      # another seed, another chunk
+
+
+def test_pad_to_fixes_the_batch_the_model_sees_and_bad_arguments_fail(pol):
+    seen = []
+
+    def stub_sampler(state, rng, observation, num_samples, noise=None):
+        seen.append((observation.state.shape[0], num_samples, None if noise is None else tuple(noise.shape)))
+        return jnp.zeros((observation.state.shape[0] * num_samples, H, MODEL_DIM))
+
+    shell = types.SimpleNamespace(_model=pol.policy._model, _sample_kwargs={}, _input_transform=pol.policy._input_transform,     # noqa: SLF001
+                                  _output_transform=pol.policy._output_transform)                                                 # noqa: SLF001
+    fixed = OpenPIPolicy(shell, pol.train_cfg, pol.cfg)
+    fixed._sample = stub_sampler                                                       # noqa: SLF001
+    for n in (1, 3, 5):
+        fixed.plan(env_obs(n), "p", row_seeds=list(range(n)), pad_to=8)
+    assert {(b, s) for b, s, _ in seen} == {(8, 1)}                                    # always eight rows, whatever the number of environments that plan
+    assert {shape[0] for _, _, shape in seen} == {8}                                   # and one noise per row
+    with pytest.raises(ValueError, match="row_seeds"):
+        fixed.plan(env_obs(3), "p", row_seeds=[1, 2], pad_to=8)
+    with pytest.raises(ValueError, match="pad_to"):
+        fixed.plan(env_obs(3), "p", row_seeds=[1, 2, 3], pad_to=2)
 
 
 def test_set_state_changes_what_is_sampled_without_rebuilding_the_policy(pol):
@@ -208,7 +241,7 @@ class FakeFast:
 
 
 def test_pi0_fast_counts_the_token_strings_it_writes_and_marks_the_chunks_it_could_not_decode(pol):
-    def stub_sampler(state, rng, observation, num_samples):
+    def stub_sampler(state, rng, observation, num_samples, noise=None):
         rows = observation.state.shape[0] * num_samples
         tokens = np.zeros((rows, 256), np.float32)
         for r in range(rows):

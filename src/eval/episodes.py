@@ -1,24 +1,24 @@
-"""Evaluation of a policy on FIXED episodes, one environment at a time, deterministic by construction and resumable at the episode.
+"""Evaluation of a policy on FIXED episodes, K environments in ONE server, comparable between checkpoints by construction and resumable at the episode.
 
-What makes an evaluation reproducible, and what this file does about each part:
+What makes two checkpoints comparable, and what this file does about each part:
 
-  * the START of an episode: episode i is `env.reset(seed=seeds[i], round=0)`, with `seeds` generated ONCE from a master seed (default 42,
-    the way expo-ft does it: `np.random.default_rng(master).integers(0, 2**31 - 1, n)`), so every checkpoint sees the same episodes and a
-    longer evaluation extends a shorter one (the first n seeds do not change). One environment per server: the start of an episode
-    depends on (seed, round, num_envs, env index) (docs/envs/isaaclab_env.md N2), and the model is always called with a batch of 1, so the
-    shapes of the jitted model (and therefore its arithmetic) never depend on how many environments are still running.
-  * the POLICY's randomness: `policy.seed(seed)` before every episode. pi0-FAST decodes greedily (no randomness at all); pi0.5 draws its
-    flow-matching noise from the policy's key, which is split at every call and therefore depends on the history: restarting the key at the
-    episode's seed makes the noise a function of the episode alone, whatever ran before it, in which order, or in which thread.
-  * the ENVIRONMENT: bit-identical only for an identical sequence of calls from a fresh server on the same machine (G1 of
-    docs/envs/isaaclab_env.md); the start of an episode after other episodes is almost, not strictly, identical (N1). Each record therefore
-    carries `start_sha` (the first observation) and `traj_sha` (every joint / gripper / peg-socket reading of the episode): two records
-    with the same `traj_sha` ARE the same episode bit for bit, and `summarize` folds them into one `eval_sha` per checkpoint.
+  * the START of an episode: a server holds K environments (the protocol's `num_envs`) that start together, with FORGE's real reset, seeded with the master seed (default 42): the start
+    state of environment e is a function of (master seed, K, e) alone (docs/envs/isaaclab_env.md N2). Episode i is environment i % K of batch i // K: batch 0 is `reset(seed=master, round=0)`
+    from a FRESH server (every checkpoint gets one), so with at most K episodes every checkpoint starts from the very same K states, bit for bit on the same GPU model, and no episode's start
+    depends on what an earlier episode did (the history dependence of N1 only exists from batch 1 on: more than K episodes). The environments that are not needed (K larger than the number of
+    episodes, or episodes already done) are held where they are, so the starts of the others do not depend on which ones play.
+  * the POLICY's randomness: episode i has a seed (`episode_seeds.json`, drawn ONCE from the master seed the way expo-ft does: `np.random.default_rng(master).integers(0, 2**31 - 1, n)`, so a
+    longer evaluation extends a shorter one). The flow noise of pi0.5 for its k-th chunk of episode i is a function of (that seed, k) alone (`plan_seed`, `VLAPolicy.plan(row_seeds=...)`): not
+    of the other episodes in the batch, of how many are still running, or of what ran before. pi0-FAST decodes greedily: no randomness at all. The model is always called with K rows
+    (`pad_to`): one shape, whatever the number of episodes still running.
+  * what is NOT reproducible: the cameras. Two fresh servers render slightly different images from the very first frame (about 0.5 / 255 on average, sensor-level noise;
+    docs/eval/sft_eval.md section 3), so two evaluations of the same weights give different trajectories. This is noise of the same kind for every checkpoint: the comparison is statistical
+    (same starts, same episode seeds, standard error), not bit for bit. Each record carries `start_sha` (the first observation's joints, gripper and peg-socket offset: identical for the
+    same episode on any fresh server) and `traj_sha` (the same readings at every step, which the image noise makes differ from one evaluation to the next).
 
-Resume. Each finished episode is one line of `results/<label>.jsonl` (flushed and fsynced). A restart reads the file, skips the episodes
-that are there, runs the others and recomputes everything from the file: the numbers are those of an evaluation that was never cut.
-A line cut by a kill is dropped. A checkpoint evaluated in several attempts is statistically equivalent to one evaluated in one go, not
-bit-identical (N1): `attempt` is recorded in every line and `single_attempt` in the summary.
+Resume. Each finished episode is one line of `results/<label>.jsonl` (flushed and fsynced the moment its episode ends, even while the others of its batch still run). A restart reads the
+file, runs the batch again from a fresh server with only the missing episodes playing, and recomputes everything from the file: the numbers are those of an evaluation that was never cut.
+A line cut by a kill is dropped. `attempt` is recorded in every line and `single_attempt` in the summary.
 
 numpy only (no JAX, no matplotlib): it works with any `VLAPolicy`, openpi or a test double.
 """
@@ -31,7 +31,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -83,19 +83,25 @@ def load_or_create_seeds(output_dir: Path, master_seed: int, n: int) -> List[int
     return seeds
 
 
-# -- one episode ------------------------------------------------------------------------------------------------------------------------
-class TrajectoryHash:
-    """Running sha256 of the readings of an episode (HASHED_KEYS, environment 0). `start` is the hash of the first observation alone."""
+def plan_seed(episode_seed: int, k: int) -> int:
+    """The seed of the sampling noise of the k-th chunk (0-based) of the episode with `episode_seed`: a function of the two alone (32 bits, what `VLAPolicy.plan(row_seeds=...)` takes)."""
+    return int(np.random.SeedSequence([int(episode_seed), int(k)]).generate_state(1, np.uint32)[0])
 
-    def __init__(self):
+
+# -- one batch of episodes --------------------------------------------------------------------------------------------------------------
+class TrajectoryHash:
+    """Running sha256 of the readings of an episode (HASHED_KEYS, environment `env_index`). `start` is the hash of the first observation alone."""
+
+    def __init__(self, env_index: int = 0):
         self._h = hashlib.sha256()
         self.start: Optional[str] = None
+        self.env_index = int(env_index)
 
     def update(self, obs: Mapping[str, np.ndarray]) -> None:
         step = hashlib.sha256()
         for key in HASHED_KEYS:
             if key in obs:
-                step.update(np.ascontiguousarray(np.asarray(obs[key])[0]).tobytes())
+                step.update(np.ascontiguousarray(np.asarray(obs[key])[self.env_index]).tobytes())
         digest = step.digest()
         if self.start is None:
             self.start = digest.hex()[:16]
@@ -105,46 +111,66 @@ class TrajectoryHash:
         return self._h.hexdigest()[:16]
 
 
-def run_episode(env, policy, *, episode: int, seed: int, replan: int, max_steps: int, stop: Optional[threading.Event] = None,
-                video_path: Optional[Path] = None, fps: int = 15) -> dict:
-    """One episode of `episode`'s `seed` on `env` (a VectorEnvClient with ONE environment), driven by `policy` (src/models/interface.py). The policy's random stream
-    is restarted at `seed` first. Returns the record that goes in the JSONL (see `summarize` for what is read back). Raises EvalAborted when `stop` is set
-    during the episode, and RuntimeError when the episode did not end within `max_steps` (it is never recorded as a failure it did not make)."""
-    if env.num_envs != 1:
-        raise ValueError(f"an evaluation episode runs in a server with ONE environment, this one has {env.num_envs}")
-    policy.seed(seed)
-    decode = getattr(policy, "decode_stats", None)
-    if decode is not None:
-        decode.reset()
-    hasher = TrajectoryHash()
-    frames: Optional[list] = [] if video_path is not None else None
-
-    def on_step(t, res, plans):
-        if stop is not None and stop.is_set():
-            raise EvalAborted(f"episode {episode} stopped at step {t}")
-        hasher.update(res.obs)
-        if frames is not None:
-            from src.eval import video
-            from src.eval.progress import progress_sample
-            frames.append(video.compose_frame(res.obs, 0, t, plans[0], progress_sample(res.obs, 0), bool(res.success[0])))
-
+def run_batch(env, policy, episodes: Mapping[int, Tuple[int, int]], *, master_seed: int, batch: int, replan: int, max_steps: int,
+              on_episode: Callable[[dict], None], stop: Optional[threading.Event] = None, pad_to: Optional[int] = None,
+              videos: Optional[Mapping[int, Path]] = None, fps: int = 15) -> dict:
+    """One batch: the real reset of round `batch` of `master_seed` in every environment of `env` (a VectorEnvClient with K environments), then the episodes in `episodes` -- {environment index:
+    (episode index, episode seed)} -- played together, the other environments held. `on_episode(record)` is called with the record of each episode the moment it ends (the JSONL line,
+    minus what the caller adds). The policy's noise for the k-th chunk of an episode is `plan_seed(its seed, k)` (see the top of the file) and the model is called with `pad_to` rows
+    (default: all K). `videos`: {environment index: path} of the episodes to film. Raises EvalAborted when `stop` is set (what has ended has been reported; the rest is dropped) and
+    RuntimeError when an episode did not end within `max_steps`. Returns {"wall_s", "steps_run", "plans"} of the batch."""
+    k = env.num_envs
+    bad = [e for e in episodes if not 0 <= int(e) < k]
+    if not episodes or bad:
+        raise ValueError(f"episodes must name environments of this server (0..{k - 1}), got {sorted(episodes)}")
+    seeds = {int(e): int(seed) for e, (_, seed) in episodes.items()}
+    hashers = {int(e): TrajectoryHash(int(e)) for e in episodes}
+    finished = np.zeros(k, bool)
+    films: Dict[int, list] = {int(e): [] for e in (videos or {}) if int(e) in hashers}
+    if pad_to is None:
+        pad_to = k
     t0 = time.monotonic()
-    out = run_rollout(env, policy, steps=max_steps, replan=replan, seed=seed, on_step=on_step)
-    wall_s = time.monotonic() - t0
+
+    def on_step(t, res, n_plans):
+        if stop is not None and stop.is_set():
+            raise EvalAborted(f"batch {batch} stopped at step {t}")
+        for e, h in hashers.items():
+            if not finished[e]:
+                h.update(res.obs)
+        for e, frames in films.items():
+            if not finished[e]:
+                from src.eval import video
+                from src.eval.progress import progress_sample
+                frames.append(video.compose_frame(res.obs, e, t, n_plans[e], progress_sample(res.obs, e), bool(res.success[e])))
+        finished[:] = finished | res.done
+
+    done_records: Dict[int, dict] = {}
+
+    def on_env_done(e, summ):
+        if e not in hashers:
+            return
+        episode, seed = episodes[e]
+        walls = summ["plan_wall_ms"]
+        record = {"episode": int(episode), "seed": int(seed), "batch": int(batch), "env": int(e), "success": bool(summ["success"]), "terminated": bool(summ["terminated"]),
+                  "truncated": bool(summ["truncated"]), "steps": int(summ["steps"]), "start_sha": hashers[e].start, "traj_sha": hashers[e].hexdigest(), "plans": len(walls),
+                  "plan_ms_median": float(np.median(walls)) if walls else None, "tracking_err_max_rad": summ["tracking_err_max_rad"],
+                  "progress": {key: v for key, v in summ["progress"].items() if key != "success"}, "wall_s": round(time.monotonic() - t0, 2),
+                  "decode": summ.get("decode"), "video": None}
+        if e in films and films[e]:
+            from src.eval import video
+            Path(videos[e]).parent.mkdir(parents=True, exist_ok=True)
+            record["video"] = video.write_video(films[e], Path(videos[e]), fps)
+        done_records[e] = record
+        on_episode(record)
+
+    active = np.zeros(k, bool)
+    active[list(hashers)] = True
+    out = run_rollout(env, policy, steps=max_steps, replan=replan, seed=int(master_seed), round_id=int(batch), active=active,
+                      row_seeds=lambda e, j: plan_seed(seeds.get(e, 0), j), pad_to=pad_to, on_step=on_step, on_env_done=on_env_done)
     if not out["all_done"]:
-        raise RuntimeError(f"episode {episode} (seed {seed}) did not end within {max_steps} steps: is the server's max_steps_per_episode larger than the protocol's?")
-    e = out["envs"][0]
-    walls = [p["wall_ms"] for p in out["plans"]]
-    record = {"episode": int(episode), "seed": int(seed), "success": bool(e["success"]), "terminated": bool(e["terminated"]), "truncated": bool(e["truncated"]),
-              "steps": int(e["steps"]), "start_sha": hasher.start, "traj_sha": hasher.hexdigest(), "plans": len(out["plans"]),
-              "plan_ms_median": float(np.median(walls)) if walls else None, "tracking_err_max_rad": e["tracking_err_max_rad"],
-              "progress": {k: v for k, v in e["progress"].items() if k != "success"}, "wall_s": round(wall_s, 2),
-              "decode": decode.summary() if decode is not None and decode.chunks else None, "video": None}
-    if frames:
-        from src.eval import video
-        Path(video_path).parent.mkdir(parents=True, exist_ok=True)
-        record["video"] = video.write_video(frames, Path(video_path), fps)
-    return record
+        missing = sorted(set(hashers) - set(done_records))
+        raise RuntimeError(f"episodes {[episodes[e][0] for e in missing]} (batch {batch}) did not end within {max_steps} steps: is the server's max_steps_per_episode larger than the protocol's?")
+    return {"wall_s": round(time.monotonic() - t0, 2), "steps_run": out["steps_run"], "plans": len(out["plans"])}
 
 
 # -- the append-only log of a checkpoint ------------------------------------------------------------------------------------------------------
@@ -205,6 +231,16 @@ def wilson95(k: int, n: int) -> Tuple[float, float]:
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
+def wall_total(recs: Sequence[Mapping[str, Any]]) -> float:
+    """Seconds of simulation of these records. The episodes of a batch run together and each one's `wall_s` is the time from the batch's start to its end: a batch lasted as long as its
+    last episode. A record without `batch` (one environment per server) is a batch of its own."""
+    longest: Dict[Any, float] = {}
+    for r in recs:
+        key = r.get("batch", ("episode", r["episode"]))
+        longest[key] = max(longest.get(key, 0.0), float(r["wall_s"]))
+    return sum(longest.values())
+
+
 def summarize(label: str, step: int, records: Mapping[int, dict], seeds: Sequence[int]) -> dict:
     """The result of a COMPLETE checkpoint (an episode for every seed), recomputed from its records only. `eval_sha` fingerprints the whole evaluation: two evaluations
     of the same weights with the same eval_sha are bit-identical episode by episode."""
@@ -227,7 +263,7 @@ def summarize(label: str, step: int, records: Mapping[int, dict], seeds: Sequenc
             "wilson95": list(wilson95(k, n)), "successes": successes, "seeds": [int(s) for s in seeds],
             "steps_mean": float(np.mean([r["steps"] for r in recs])), "steps_mean_success": float(np.mean(won)) if won else None,
             "attempts": attempts, "single_attempt": len(attempts) == 1, "gpus": sorted({str(r.get("gpu", "unknown")) for r in recs}),
-            "wall_s_total": round(sum(r["wall_s"] for r in recs), 1), "eval_sha": shas,
+            "wall_s_total": round(wall_total(recs), 1), "eval_sha": shas,
             "decode_chunks": sum(d["chunks"] for d in decode) if decode else None, "decode_failed": sum(d["failed"] for d in decode) if decode else None,
             "episodes": [{"episode": r["episode"], "seed": r["seed"], "success": r["success"], "steps": r["steps"], "start_sha": r["start_sha"],
                           "traj_sha": r["traj_sha"], "attempt": r.get("attempt", 1)} for r in recs]}

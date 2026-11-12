@@ -16,7 +16,8 @@ What this adds to the `Policy` of openpi, which is built for ONE observation at 
     takes, through the SAME input transforms as inference, the offsets of `output_semantics` included), `loss`, `trainable_filter`.
 
 The random stream is the policy's own (`seed`): the same seed and the same inputs give the same chunks. openpi's Policy starts from
-jax.random.key(0), and so does this class by default.
+jax.random.key(0), and so does this class by default. An evaluation does not use that stream: `plan(..., row_seeds=...)` draws the flow noise of every row from
+that row's own seed (a function of the seed alone, whatever the other rows or the batch size), and `pad_to` fixes the number of rows the model is called with.
 """
 from __future__ import annotations
 
@@ -91,11 +92,19 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         self._graphdef, self._state = nnx.split(policy._model)                      # noqa: SLF001
         graphdef, kwargs, native = self._graphdef, dict(policy._sample_kwargs), self._native_samples   # noqa: SLF001
 
-        def sample(state, rng, observation, num_samples):
+        def sample(state, rng, observation, num_samples, noise=None):
             model = nnx.merge(graphdef, state)
-            return model.sample_actions(rng, observation, num_samples=num_samples, **kwargs) if native else model.sample_actions(rng, observation, **kwargs)
+            if not native:
+                return model.sample_actions(rng, observation, **kwargs)
+            return model.sample_actions(rng, observation, num_samples=num_samples, **({} if noise is None else {"noise": noise}), **kwargs)
+
+        def row_noise(seeds, shape):
+            """(B, *shape) standard normals, row i from the key made of seeds[i] alone."""
+            return jax.vmap(lambda s: jax.random.normal(jax.random.key(s), shape))(seeds)
 
         self._sample = jax.jit(sample, static_argnames=("num_samples",))
+        self._row_noise = jax.jit(row_noise, static_argnames=("shape",))
+        self._noise_shape = (int(policy._model.action_horizon), int(policy._model.action_dim))          # noqa: SLF001
         self.seed(seed)
 
     @classmethod
@@ -150,9 +159,12 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         batch = jax.tree.map(lambda *xs: jnp.asarray(np.stack(xs)), *items)
         return batch, _model.Observation.from_dict(copy.copy(batch))
 
-    def raw_chunks(self, rows: List[dict], num_samples: int):
+    def raw_chunks(self, rows: List[dict], num_samples: int, row_seeds: Optional[Sequence[int]] = None, pad_to: Optional[int] = None):
         import jax
+        import jax.numpy as jnp
         n, s = len(rows), num_samples
+        if row_seeds is not None and len(row_seeds) != n:
+            raise ValueError(f"row_seeds has {len(row_seeds)} entries for {n} rows")
         transformed = [self.policy._input_transform(copy.deepcopy(r)) for r in rows]          # noqa: SLF001  one per environment
         if self._native_samples:
             source = list(range(n))                                                           # S samples drawn inside the model
@@ -160,12 +172,21 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         else:
             source = [i for i in range(n) for _ in range(s)]                                  # FAST: one row per sample
             static_s = 1
-        padded = padded_batch_size(len(source))
+        if pad_to is not None and pad_to < len(source):
+            raise ValueError(f"pad_to={pad_to} is smaller than the {len(source)} rows of the call")
+        padded = int(pad_to) if pad_to is not None else padded_batch_size(len(source))
         source = source + [source[-1]] * (padded - len(source))
         batch, observation = self._stack([transformed[i] for i in source])
-        self._key, key = jax.random.split(self._key)
+        noise = None
+        if row_seeds is not None and self._native_samples:
+            seeds = [int(x) % (2 ** 32) for x in row_seeds]
+            seeds = seeds + [seeds[-1]] * (padded - n)                                       # the padding rows repeat the last row, noise included
+            noise = self._row_noise(jnp.asarray(seeds, dtype=jnp.uint32), (static_s, *self._noise_shape))
+            key = jax.random.key(0)                                                          # unused by the sampler once the noise is given (no augmentation at inference)
+        else:
+            self._key, key = jax.random.split(self._key)
         t0 = time.monotonic()
-        out = np.asarray(self._sample(self._state, key, observation, num_samples=static_s))   # asarray waits for the device
+        out = np.asarray(self._sample(self._state, key, observation, num_samples=static_s, **({} if noise is None else {"noise": noise})))   # asarray waits for the device
         infer_ms = 1e3 * (time.monotonic() - t0)
         state = np.asarray(batch["state"])
         if self._fast is not None:

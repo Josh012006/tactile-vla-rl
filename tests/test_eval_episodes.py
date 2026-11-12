@@ -123,95 +123,134 @@ def test_the_protocol_check_names_what_changed_and_lets_the_free_settings_move()
     assert "replan" in str(e.value) and "task" in str(e.value) and "master_seed" not in str(e.value)
 
 
-# -- one episode on the fake simulator ---------------------------------------------------------------------------------------------------------------
+# -- one batch on the fake simulator ------------------------------------------------------------------------------------------------------------------
 class FakePolicy(VLAPolicy):
-    """Pushes joint 0 to 1.0 when the start state allows it (the fake simulator's tag, read from the observation), after a noise on the holding value that comes from the
-    policy's own random stream, restarted by `seed` and advanced at every call: like pi0.5's flow noise, which is what makes the trajectory depend on it."""
+    """Pushes joint 0 to 1.0 when the start state allows it (the fake simulator's tag, read from the observation), after a noise on the holding value that comes from the row's
+    own seed (`row_seeds`, like pi0.5's per-episode flow noise), which is what makes the trajectory depend on it. `calls` lists (rows, row_seeds, pad_to) of every model call."""
 
     def __init__(self, noise=True):
         self.info = ModelInfo.from_cfg({"name": "fake", "family": "fake", "action_horizon": H, "output_semantics": "absolute_targets"})
-        self.noise, self.seeds = noise, []
+        self.noise, self.seeds, self.calls = noise, [], []
         self._rng = np.random.default_rng(0)
 
     def seed(self, seed):
         self.seeds.append(seed)
         self._rng = np.random.default_rng(seed)
 
-    def raw_chunks(self, rows, num_samples):
+    def raw_chunks(self, rows, num_samples, row_seeds=None, pad_to=None):
+        self.calls.append((len(rows), None if row_seeds is None else list(row_seeds), pad_to))
         out = np.zeros((len(rows), num_samples, H, P.ACTION_DIM), np.float32)
         for i, row in enumerate(rows):
+            rng = np.random.default_rng(row_seeds[i]) if row_seeds is not None else self._rng
             clock, tag = float(row["observation/joint_position"][1]), int(row["observation/joint_position"][2])
             from fakes import trigger
             for k in range(H):
-                out[i, :, k, 0] = 1.0 if clock + k >= trigger(tag) else (0.01 * self._rng.standard_normal() if self.noise else 0.0)
+                out[i, :, k, 0] = 1.0 if clock + k >= trigger(tag) else (0.01 * rng.standard_normal() if self.noise else 0.0)
         return out, 1.0
 
 
-def will_succeed(seed, max_steps=20):
-    """Outcome of the episode of `seed` on the fake simulator. The policy reads the start state's tag from a float32 observation: a large tag is rounded there, and the
-    rounded one is what decides (a real seed is up to 2**31)."""
+def predicted(master, batch, env, max_steps=20):
+    """(length, terminated) of the episode of environment `env` in round `batch` of `master` on the fake simulator. The policy reads the start state's tag from a float32
+    observation: a large tag is rounded there, and the rounded one is what decides (a real seed is up to 2**31)."""
     from fakes import expected_length
-    return expected_length(int(np.float32(tag_of(seed, 0))), max_steps)[1]
+    return expected_length(int(np.float32(tag_of(master + batch, env))), max_steps)
 
 
-def play(server, seed, **kw):
+def will_succeed(master, batch, env, max_steps=20):
+    return predicted(master, batch, env, max_steps)[1]
+
+
+def play(server, policy=None, episodes=None, master=5, batch=0, max_steps=20, **kw):
+    """Run a batch on `server`; returns (records in the order they were reported, what run_batch returned)."""
+    records = []
     with VectorEnvClient([server.endpoint]) as env:
-        return E.run_episode(env, kw.pop("policy", None) or FakePolicy(), episode=kw.pop("episode", 0), seed=seed, replan=4, max_steps=20, **kw)
+        episodes = episodes if episodes is not None else {e: (e, 100 + e) for e in range(env.num_envs)}
+        info = E.run_batch(env, policy or FakePolicy(), episodes, master_seed=master, batch=batch, replan=4, max_steps=max_steps, on_episode=records.append, **kw)
+    return records, info
 
 
-def test_an_episode_gives_its_record_and_the_policy_was_seeded_with_the_episodes_seed(servers):  # noqa: F811
-    seed = next(s for s in range(50) if will_succeed(s))
+def test_a_batch_reports_every_episode_when_it_ends_with_the_start_of_its_environment_and_round(servers):  # noqa: F811
+    recs, info = play(servers(num_envs=6, max_steps=20), master=5, batch=2)
+    assert sorted(r["env"] for r in recs) == list(range(6)) and info["steps_run"] == 20
+    for r in recs:
+        length, terminated = predicted(5, 2, r["env"])
+        assert (r["episode"], r["seed"], r["batch"], r["steps"], r["success"], r["terminated"], r["truncated"]) == (r["env"], 100 + r["env"], 2, length, terminated, terminated, not terminated)
+        assert len(r["start_sha"]) == 16 and len(r["traj_sha"]) == 16 and r["plans"] >= 1 and r["decode"] is None and r["video"] is None
+        assert set(r["progress"]) >= {"xy_mm_start", "xy_mm_end"}
+    assert [r["steps"] for r in recs] == sorted(r["steps"] for r in recs)                  # reported as they end: the short ones first
+    assert [r["wall_s"] for r in recs] == sorted(r["wall_s"] for r in recs)
+    assert len({r["start_sha"] for r in recs}) == 6                                       # six different start states
+
+
+def test_the_same_batch_from_a_fresh_server_is_bit_identical_and_the_environments_that_do_not_play_change_nothing_for_the_others(servers):  # noqa: F811
+    a, _ = play(servers(num_envs=6, max_steps=20))
+    b, _ = play(servers(num_envs=6, max_steps=20))
+    shas = lambda recs: {r["env"]: (r["start_sha"], r["traj_sha"]) for r in recs}               # noqa: E731
+    assert shas(a) == shas(b)
+    subset, _ = play(servers(num_envs=6, max_steps=20), episodes={2: (2, 102), 4: (4, 104)})     # the resume of a cut evaluation: only two episodes play
+    assert shas(subset) == {e: shas(a)[e] for e in (2, 4)}
+    other_seed, _ = play(servers(num_envs=6, max_steps=20), episodes={2: (2, 999)})              # same start, another noise: the start is the environment's, the noise the episode's
+    assert other_seed[0]["start_sha"] == shas(a)[2][0] and other_seed[0]["traj_sha"] != shas(a)[2][1]
+    later, _ = play(servers(num_envs=6, max_steps=20), batch=1)
+    assert all(shas(later)[e][0] != shas(a)[e][0] for e in range(6))                              # another round: another start for every environment
+
+
+def test_the_model_is_called_with_k_rows_and_the_noise_seed_of_each_row_comes_from_its_episode_and_chunk_alone(servers):  # noqa: F811
     policy = FakePolicy()
-    rec = play(servers(num_envs=1, max_steps=20), seed, policy=policy, episode=3)
-    assert (rec["episode"], rec["seed"], rec["success"], rec["terminated"], rec["truncated"]) == (3, seed, True, True, False)
-    assert policy.seeds == [seed] and rec["steps"] <= 20 and len(rec["start_sha"]) == 16 and len(rec["traj_sha"]) == 16 and rec["plans"] >= 1
-    assert rec["decode"] is None and rec["video"] is None and set(rec["progress"]) >= {"xy_mm_start", "xy_mm_end"}
-    failing = next(s for s in range(50) if not will_succeed(s))
-    bad = play(servers(num_envs=1, max_steps=20), failing)
-    assert (bad["success"], bad["truncated"], bad["steps"]) == (False, True, 20)
+    play(servers(num_envs=4, max_steps=20), policy, episodes={1: (0, 11), 3: (1, 13)})
+    rows, seeds, pad = policy.calls[0]
+    assert (rows, pad) == (2, 4) and seeds == [E.plan_seed(11, 0), E.plan_seed(13, 0)]
+    assert all(c[2] == 4 for c in policy.calls) and len(policy.calls) >= 2                      # every call has the same shape, K rows, whatever the number that still run
+    allowed = {E.plan_seed(s, k) for s in (11, 13) for k in range(10)}
+    assert all(set(c[1]) <= allowed for c in policy.calls)
+    again = FakePolicy()
+    play(servers(num_envs=4, max_steps=20), again, episodes={3: (1, 13)})                        # alone, episode 13 asks for the same noise at its first chunk
+    assert again.calls[0][1] == [E.plan_seed(13, 0)]
 
 
-def test_the_same_episode_on_a_fresh_server_is_bit_identical_and_another_seed_is_not(servers):  # noqa: F811
-    a = play(servers(num_envs=1, max_steps=20), 11)
-    b = play(servers(num_envs=1, max_steps=20), 11)
-    c = play(servers(num_envs=1, max_steps=20), 12)
-    assert (a["start_sha"], a["traj_sha"]) == (b["start_sha"], b["traj_sha"])
-    assert c["start_sha"] != a["start_sha"] and c["traj_sha"] != a["traj_sha"]
+def test_plan_seeds_are_32_bit_deterministic_and_differ_by_episode_and_by_chunk():
+    assert E.plan_seed(7, 0) == E.plan_seed(7, 0)
+    seeds = {E.plan_seed(s, k) for s in range(20) for k in range(20)}
+    assert len(seeds) == 400 and all(0 <= x < 2 ** 32 for x in seeds)
 
 
-def test_the_policys_noise_depends_on_the_episode_not_on_what_ran_before(servers):  # noqa: F811
-    """Seeding per episode: episode 12 gives the same trajectory whether or not episode 11 was played before it, on the same policy object."""
-    seed = next(s for s in range(50) if will_succeed(s))
-    alone = play(servers(num_envs=1, max_steps=20), seed)
-    policy = FakePolicy()
-    play(servers(num_envs=1, max_steps=20), seed + 1, policy=policy)
-    after_another = play(servers(num_envs=1, max_steps=20), seed, policy=policy)
-    assert alone["traj_sha"] == after_another["traj_sha"]
-    unseeded = FakePolicy()
-    unseeded.seed = lambda s: None                                               # what pi0.5 would do without the per-episode key: its stream goes on
-    first = play(servers(num_envs=1, max_steps=20), seed, policy=unseeded)
-    second = play(servers(num_envs=1, max_steps=20), seed, policy=unseeded)
-    assert first["traj_sha"] != second["traj_sha"]
+def test_a_stop_drops_the_episodes_still_running_but_keeps_the_ones_that_ended(servers):  # noqa: F811
+    stop, records = threading.Event(), []
 
-
-def test_a_stop_during_an_episode_drops_it_and_an_episode_that_does_not_end_is_an_error(servers):  # noqa: F811
-    stop = threading.Event()
-    policy = FakePolicy()
-    plain = policy.raw_chunks
-
-    def raw_and_stop(rows, n):
+    def on_episode(r):
+        records.append(r)
         stop.set()
-        return plain(rows, n)
 
-    policy.raw_chunks = raw_and_stop
-    with pytest.raises(E.EvalAborted):
-        play(servers(num_envs=1, max_steps=20), 5, policy=policy, stop=stop)
-    with VectorEnvClient([servers(num_envs=1, max_steps=20).endpoint]) as env:
+    with VectorEnvClient([servers(num_envs=4, max_steps=20).endpoint]) as env:                    # tags 15, 16, 17, 18: environment 0 never succeeds, the others do, early
+        with pytest.raises(E.EvalAborted):
+            E.run_batch(env, FakePolicy(), {e: (e, 100 + e) for e in range(4)}, master_seed=5, batch=0, replan=4, max_steps=20, on_episode=on_episode, stop=stop)
+    assert records and 0 not in {r["env"] for r in records}
+
+
+def test_an_episode_that_does_not_end_is_an_error_and_bad_environments_are_refused(servers):  # noqa: F811
+    with VectorEnvClient([servers(num_envs=4, max_steps=20).endpoint]) as env:
         with pytest.raises(RuntimeError, match="did not end"):
-            E.run_episode(env, FakePolicy(), episode=0, seed=3, replan=4, max_steps=5)          # the server's episodes are longer than the protocol's
-    with VectorEnvClient([servers(num_envs=2, max_steps=20).endpoint]) as env:
-        with pytest.raises(ValueError, match="ONE environment"):
-            E.run_episode(env, FakePolicy(), episode=0, seed=3, replan=4, max_steps=20)
+            E.run_batch(env, FakePolicy(), {0: (0, 1)}, master_seed=5, batch=0, replan=4, max_steps=5, on_episode=lambda r: None)      # the server's episodes are longer than the protocol's
+        for bad in ({9: (0, 1)}, {}):
+            with pytest.raises(ValueError, match="environments of this server"):
+                E.run_batch(env, FakePolicy(), bad, master_seed=5, batch=0, replan=4, max_steps=20, on_episode=lambda r: None)
+
+
+def test_the_trajectory_hash_reads_its_own_environment():
+    obs = {P.JOINT_POSITION: np.arange(14, dtype=np.float32).reshape(2, 7), P.GRIPPER_POSITION: np.zeros((2, 1), np.float32)}
+    a, b = E.TrajectoryHash(0), E.TrajectoryHash(1)
+    a.update(obs)
+    b.update(obs)
+    assert a.start != b.start and a.hexdigest() != b.hexdigest()
+    same = E.TrajectoryHash(1)
+    same.update(obs)
+    assert same.hexdigest() == b.hexdigest()
+
+
+def test_the_simulation_time_of_a_checkpoint_counts_a_batch_once():
+    batched = [record(i, batch=0, wall_s=w) for i, w in enumerate((10.0, 20.0, 15.0))] + [record(3, batch=1, wall_s=7.0)]
+    assert E.wall_total(batched) == 27.0
+    assert E.wall_total([record(i, wall_s=5.0) for i in range(3)]) == 15.0                  # no batch: every episode ran alone
 
 
 # -- the curve ------------------------------------------------------------------------------------------------------------------------------------------

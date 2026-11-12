@@ -47,18 +47,19 @@ def test_the_default_list_is_the_initial_state_then_every_checkpoint_and_steps_p
 # -- protocol ---------------------------------------------------------------------------------------------------------------------------------------
 def args_with(**kw):
     import argparse
-    return argparse.Namespace(**{"seed": 42, "replan": None, **kw})
+    return argparse.Namespace(**{"seed": 42, "replan": None, "envs_per_server": ES.DEFAULT_ENVS_PER_SERVER, **kw})
 
 
-def test_the_protocol_has_one_environment_the_episode_length_of_the_task_and_half_the_chunk_as_replan(tmp_path):
-    task = ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, ["max_steps_per_episode=100", "success_hold_steps=2"])
-    assert task["num_envs"] == 1 and task["max_steps_per_episode"] == 100 and task["success_hold_steps"] == 2 and "server_port" not in task
+def test_the_protocol_has_k_environments_the_episode_length_of_the_task_and_half_the_chunk_as_replan(tmp_path):
+    task = ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, ["max_steps_per_episode=100", "success_hold_steps=2"], 7)
+    assert task["num_envs"] == 7 and task["max_steps_per_episode"] == 100 and task["success_hold_steps"] == 2 and "server_port" not in task
     for bad in ("num_envs=4", "server_port=9"):
         with pytest.raises(SystemExit, match="set by this script"):
             ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, [bad])
     cfg = {"name": "pi0_fast", "action_horizon": 10}
     p = ES.build_protocol(args_with(), tmp_path, cfg, task)
-    assert (p["replan"], p["max_steps"], p["num_envs"], p["master_seed"], p["recipe"]) == (5, 100, 1, 42, ES.RECIPE)
+    assert (p["replan"], p["max_steps"], p["num_envs"], p["master_seed"], p["recipe"]) == (5, 100, ES.DEFAULT_ENVS_PER_SERVER, 42, ES.RECIPE)
+    assert ES.build_protocol(args_with(envs_per_server=64), tmp_path, cfg, task)["num_envs"] == 64
     assert ES.build_protocol(args_with(), tmp_path, {**cfg, "action_horizon": 16}, task)["replan"] == 8           # expo-ft's 8 of 16
     assert ES.build_protocol(args_with(replan=10), tmp_path, cfg, task)["replan"] == 10
     with pytest.raises(SystemExit, match="between 1 and"):
@@ -98,13 +99,13 @@ def test_dry_run_lists_the_checkpoints_and_what_is_done_and_writes_nothing(tmp_p
     assert ES.main(["--run", str(run), "--n-episodes", "10", "--dry-run", "--workers", "2"]) == 0
     out = capsys.readouterr().out
     assert "step      0:    0/10" in out and "step    500:    3/10" in out and "step   1500:    0/10" in out and "initial state of the run" in out
-    assert "replan 8" in out and "10 episodes per checkpoint, master seed 42, 2 worker(s)" in out and f"data in {run / 'eval'}" in out
+    assert "replan 8" in out and f"10 episodes per checkpoint, master seed 42, {ES.DEFAULT_ENVS_PER_SERVER} environments per server, 2 worker(s)" in out and f"data in {run / 'eval'}" in out
     assert not (run / "eval" / E.SEEDS_FILE).exists() and not (run / "eval" / E.PROTOCOL_FILE).exists()
 
 
 def test_a_folder_made_with_another_protocol_is_refused_before_anything_starts(tmp_path):
     run = make_run(tmp_path)
-    task = ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, [])
+    task = ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, [], ES.DEFAULT_ENVS_PER_SERVER)
     protocol = ES.build_protocol(args_with(seed=7), run, json.loads((run / "config.json").read_text())["model_cfg"], task)
     E.atomic_write_json(run / "eval" / E.PROTOCOL_FILE, {**protocol, "attempts": []})
     with pytest.raises(SystemExit, match="master_seed"):
@@ -112,6 +113,21 @@ def test_a_folder_made_with_another_protocol_is_refused_before_anything_starts(t
     with pytest.raises(SystemExit, match="master_seed"):                                           # a real run too, and the seed file it did not write
         ES.main(["--run", str(run), "--n-episodes", "5"])
     ES.main(["--run", str(run), "--seed", "7", "--dry-run"])                                      # the protocol it was made with is accepted
+
+
+def test_the_number_of_environments_is_part_of_the_protocol_and_more_episodes_than_environments_is_warned_about(tmp_path, capsys):
+    run = make_run(tmp_path)
+    task = ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, [], 10)
+    protocol = ES.build_protocol(args_with(envs_per_server=10), run, json.loads((run / "config.json").read_text())["model_cfg"], task)
+    E.atomic_write_json(run / "eval" / E.PROTOCOL_FILE, {**protocol, "attempts": []})
+    with pytest.raises(SystemExit, match="num_envs"):                                               # the start states depend on K: no other K in this folder
+        ES.main(["--run", str(run), "--dry-run", "--envs-per-server", "20"])
+    assert ES.main(["--run", str(run), "--dry-run", "--envs-per-server", "10", "--n-episodes", "10"]) == 0
+    assert "WARNING" not in capsys.readouterr().out
+    assert ES.main(["--run", str(run), "--dry-run", "--envs-per-server", "10", "--n-episodes", "30"]) == 0
+    assert "WARNING: 30 episodes in servers of 10 environments" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="at least 1"):
+        ES.main(["--run", str(run), "--dry-run", "--envs-per-server", "0"])
 
 
 def test_a_run_without_checkpoints_and_the_curve_only_mode(tmp_path, capsys):
@@ -189,7 +205,7 @@ def test_without_a_norm_stats_block_there_is_nothing_to_compare(tmp_path):
     model_cfg = json.loads((run / "config.json").read_text())["model_cfg"]
     jobs = ES.select_jobs(ES.discover_checkpoints(run), None, False)
     assert ES.check_norm_stats(model_cfg, jobs) == {"source": None, "sha256": None, "verified": []}
-    assert ES.build_protocol(args_with(), run, model_cfg, ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, []))["norm_stats_sha"] is None
+    assert ES.build_protocol(args_with(), run, model_cfg, ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, [], ES.DEFAULT_ENVS_PER_SERVER))["norm_stats_sha"] is None
 
 
 def test_a_checkpoint_trained_with_the_same_statistics_as_the_yaml_names_is_accepted(tmp_path):
@@ -215,7 +231,7 @@ def test_the_statistics_are_part_of_the_protocol_a_folder_is_resumed_with(tmp_pa
     ES.main(["--run", str(run), "--dry-run"])
     out = capsys.readouterr().out
     assert "normalisation statistics:" in out and "identical to the copy saved in 1 checkpoint" in out
-    task = ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, [])
+    task = ES.task_settings(ES.ROOT / ES.DEFAULT_TASK, [], ES.DEFAULT_ENVS_PER_SERVER)
     protocol = ES.build_protocol(args_with(), run, model_cfg, task)
     E.atomic_write_json(run / "eval" / E.PROTOCOL_FILE, {**protocol, "attempts": []})
     (tmp_path / "stats" / "demo" / "norm_stats.json").write_text("{\"norm_stats\": 3}")             # the file moved on: the saved protocol no longer matches (and neither does the checkpoint's copy)

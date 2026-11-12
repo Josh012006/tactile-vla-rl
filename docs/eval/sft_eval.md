@@ -1,10 +1,10 @@
-# Evaluation of the SFT checkpoints: success-rate curve, deterministic, resumable, parallel
+# Evaluation of the SFT checkpoints: success-rate curve, K environments per server, resumable, parallel
 
 `python -m scripts.eval_sft --run <SFT run>` evaluates the initial state of a run (step 0) and every checkpoint of it in the FORGE environment, on the same fixed episodes, and draws the
-success rate against the training step. Code: `src/eval/episodes.py` (seeds, one episode, the log, the numbers), `src/eval/sweep.py` (several checkpoints at once: threads, env servers),
-`src/eval/curve.py` (the plot), `scripts/eval_sft.py` (command line), `scripts/probe_eval_parallel.py` (measures the parallelism), `scripts/probe_determinism.py` (model alone, simulator alone), `jobs/job_eval_sft.sh`,
-`jobs/job_probe_eval_parallel.sh`, `jobs/job_probe_determinism.sh`. Tests: `tests/test_eval_episodes.py`, `tests/test_eval_sweep.py`, `tests/test_eval_sft_script.py`, `tests/test_probe_determinism.py`, and the two `fork` tests of
-`tests/test_openpi_policy.py` and `tests/test_sft.py`. **Status: tested on CPU (fake simulator over real sockets, real subprocesses); a first probe ran on an L40S on 12 Nov. 2026 (cost and parallelism, section 6); no real checkpoint has been evaluated yet** (section 9).
+success rate against the training step. Code: `src/eval/episodes.py` (seeds, one batch of episodes, the log, the numbers), `src/eval/rollout.py` (the loop over K environments), `src/eval/sweep.py` (several checkpoints at once: threads, env servers),
+`src/eval/curve.py` (the plot), `scripts/eval_sft.py` (command line), `scripts/probe_eval_parallel.py` (measures the parallelism), `scripts/probe_determinism.py` (model alone, simulator alone), `scripts/probe_batch_cost.py` (what the model costs at batch K), `jobs/job_eval_sft.sh`, `jobs/job_probe_batch_cost.sh`,
+`jobs/job_probe_eval_parallel.sh`, `jobs/job_probe_determinism.sh`. Tests: `tests/test_eval_episodes.py`, `tests/test_eval_sweep.py`, `tests/test_eval_sft_script.py`, `tests/test_eval_rollout.py`, `tests/test_probe_determinism.py`, `tests/test_probe_batch_cost.py`, and the two `fork` tests of
+`tests/test_openpi_policy.py` and `tests/test_sft.py`. **Status: tested on CPU (fake simulator over real sockets, real subprocesses); probes ran on an L40S on 12 Nov. 2026 (cost, parallelism, determinism, section 6). The protocol is now `batched-v1` (K environments per server, section 2); its cost on the real simulator and the real models is NOT measured yet (section 6.1); no real checkpoint has been evaluated yet** (section 9).
 
 It follows expo-ft's `scripts/eval_curve.py` (fixed seeds generated from `--seed` 42, `--n-episodes`, a curve in % with one standard error, curve.json / png / pdf) and adds what that script does not
 have: a resume at the episode, a deterministic policy for both models, several checkpoints at the same time, and a record that shows whether two evaluations are bit-identical.
@@ -13,21 +13,24 @@ have: a resume at the episode, a deterministic policy for both models, several c
 
 | What | Command |
 |---|---|
-| the curve of a run, 50 episodes per checkpoint (about 1.2 h per checkpoint for pi0.5, 1.5 h for pi0-FAST) | `sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/<run> --n-episodes 50` |
+| the curve of a run, 50 episodes per checkpoint (all of them in ONE batch of a server of `--envs-per-server` = 100 environments: time to be measured, section 6.1) | `sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/<run> --n-episodes 50` |
+| what the model costs at batch K, and an estimate of a batch (no simulator, a few minutes) | `sbatch jobs/job_probe_batch_cost.sh --model pi05 --batch-sizes 1 8 32 64 100` |
+| the real cost of a batch: one checkpoint (the initial state), 100 episodes, in a folder of its own | `sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir <probe dir>` |
 | what would be evaluated, and what is already done (login node, no GPU, no model, no server) | `python -m scripts.eval_sft --run <run> --n-episodes 200 --dry-run` |
 | continue an evaluation that stopped (time limit, failure, `scancel`) | **the same command again**: only the missing episodes are run (a preemption or a node failure requeues the job, which does it by itself) |
 | only some checkpoints (0 = the run's initial state) | `--steps 0 1000 4000` |
 | more episodes than before | the same command with a larger `--n-episodes`: the first seeds do not change, only the new episodes are run |
 | another seed, another folder | `--seed 7 --output-dir <dir>` (a folder made with another seed is refused) |
 | redo a checkpoint from scratch | `--force --steps 1000` (its files are set aside as `.prev1`, never overwritten) |
-| videos | `--save-videos` (`<output-dir>/videos/<step>/ep_<i>_seed<seed>.mp4`), `--video-dir <dir>` |
+| videos | `--save-videos` (every episode) or, by default, the first `--video-episodes` 5 episodes of each batch: `<output-dir>/videos/<step>/ep_<i>_seed<seed>.mp4`, `--video-dir <dir>` |
+| environments per server (part of the protocol, default 100) | `--envs-per-server K` |
 | the plot only (no GPU, no server) | `python -m scripts.eval_sft --run <run> --plot-only --title "Teleop demos, pi0.5"` |
 | where the files go | `--output-dir` (data, default `<run>/eval`), `--curve-dir` (curve.json / png / pdf, default the output folder) |
 | what a worker costs, and whether more workers pay off (measured: they do not on one L40S) | `sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 --episodes 4` (section 6) |
 
 Before the first run: `uv sync --group vla` (matplotlib is in that group since this file), the models fetched, the Isaac Lab venv (`scripts/setup_isaac_venv.sh`), the SFT run's checkpoints.
 `--run` is a path, or the folder name under `runs/sft/peg_insert/` or `runs/sft/probing/`. The job mails (`--mail-user`, `--mail-type=ALL`, like the SFT jobs) and is requeueable (`--requeue`): a preemption or a node failure restarts the script, which is the same command, so the evaluation continues; a time limit is not
-a requeue, send the command again. Resources for one worker: 1 L40S, 8 CPUs, 48 G, 14 h (`sacct -j <jobid> --format=JobID,Elapsed,AllocCPUS,TotalCPU,MaxRSS,ReqMem` says what a job really used).
+a requeue, send the command again. Resources for one worker: 1 L40S, 6 CPUs, 40 G, 14 h (`sacct -j <jobid> --format=JobID,Elapsed,AllocCPUS,TotalCPU,MaxRSS,ReqMem` says what a job really used).
 
 ## 2. What is evaluated
 
@@ -41,10 +44,15 @@ a requeue, send the command again. Resources for one worker: 1 L40S, 8 CPUs, 48 
 - **Step 0** is the run's own initial state: the same model with the same LoRA initialisation (openpi's, seed 0) and nothing trained. This is the point the curve starts from, and also where an RL run
   starts from SFT's checkpoint. (`--no-initial` leaves it out of the default list; a checkpoint list given with `--steps` is exact.)
 - **The episodes.** `--seed` (default 42) generates the `--n-episodes` seeds once (`np.random.default_rng(seed).integers(0, 2**31 - 1, n)`, expo-ft's recipe), kept in `<output-dir>/episode_seeds.json`.
-  Episode *i* of every checkpoint is `reset(seed=seeds[i], round=0)` in a server with **one** environment. Why one: the start state depends on (seed, round, `num_envs`, env index)
-  (`docs/envs/isaaclab_env.md` N2), the model is then always called with a batch of 1 (so its compiled shapes and arithmetic never depend on how many environments are still running), and the parallelism
-  is across checkpoints, not across environments.
-- **The episode.** A chunk is executed `--replan` steps (default: half of the model's chunk: 8 for pi0.5, 5 for pi0-FAST; expo-ft's ratio is 8 of 16), then the model is called again. At most
+  **K environments per server** (`--envs-per-server`, default 100, frozen in `eval_protocol.json` as `num_envs`). Episode *i* is environment `i % K` of batch `i // K`; a batch is one
+  `reset(seed=master seed, round=batch)` of a **fresh** server: the start state of environment *e* is a function of (master seed, K, e) (`docs/envs/isaaclab_env.md` N2), the same for every checkpoint on the same GPU
+  model. The K episodes of a batch play **together**: one physics step for all of them, one model call per replan for the environments that need a chunk (`plan(..., pad_to=K)`: always the same batch shape, so one
+  compilation and the same arithmetic whichever episodes are still running). An episode that has ended is no longer planned for; one that is not played (already done in an earlier attempt) is **held** where it is (its
+  joint targets are its own joint positions) and the others do not notice. The rollout ends when every played episode has ended. With `--n-episodes` N: N <= K is one batch (the others of the K environments are held); N > K
+  several batches, the first of them in the first reset, the next ones after other episodes in the same server (N1: their starts can differ slightly, reproducibly for the same sequence; a script prints a WARNING when N > K, and N <= K is recommended).
+  The **noise** of the model for episode *i*: `plan_seed(seed_i, k)` for its *k*-th chunk, a function of the episode alone (section 3), whichever episodes share the call.
+  The seeds of `episode_seeds.json` are not used to start the simulator any more (the start is a function of the master seed and the batch); they seed the model's noise.
+- **An episode.** A chunk is executed `--replan` steps (default: half of the model's chunk: 8 for pi0.5, 5 for pi0-FAST; expo-ft's ratio is 8 of 16), then the model is called again. At most
   `max_steps_per_episode` of the task YAML (150) steps; success is the environment's `success` (`success_hold_steps`). An episode that does not end within that length is an error, never a recorded failure.
   `--task-config` / `--env-set KEY=VALUE` change the server's settings; they are part of the protocol (section 5).
 
@@ -64,19 +72,19 @@ for a given sequence of episodes, and it is the history dependence of N1. Until 
 
 | source | pi0.5 | pi0-FAST | what the evaluation does |
 |---|---|---|---|
-| sampling of the action chunk | flow matching: the noise comes from the policy's key, which is **split at every call**, so it depends on everything the policy did before | **none**: greedy decoding (temperature 0: `Pi0FAST.sample_actions` takes the argmax) | `policy.seed(episode seed)` before every episode, for both models: the noise is a function of the episode alone, whatever ran before it, in which order and in which thread |
-| shape of the model call | the batch is padded to a power of two | the same | one environment per server: the batch is always 1 |
+| sampling of the action chunk | flow matching: the noise of the policy's own key is **split at every call**, so it depends on everything the policy did before | **none**: greedy decoding (temperature 0: `Pi0FAST.sample_actions` takes the argmax; `row_seeds` is ignored) | `plan(row_seeds=...)`: the flow noise of every row is drawn from `plan_seed(episode seed, chunk number)` (`jax.random.key(seed)`, a function of that seed alone) and passed to the sampler: a row's chunk does not depend on the other rows, on the batch composition, on what ran before or on the thread |
+| shape of the model call | the batch is padded to a power of two | the same | `pad_to=K`: always K rows (padding repeats the last row), whatever the number of episodes still running |
 | GPU kernels | reductions and scatters may differ from run to run | the same | `XLA_FLAGS=--xla_gpu_deterministic_ops=true` (added by the script and the jobs) |
 | compilation | autotuning could pick another algorithm in another compilation | the same | all the workers share **one** compiled sampler (`OpenPIPolicy.fork`) |
 | LoRA initialisation (step 0) | `build_params_like_expo_ft(seed=0)`: fixed | the same | nothing to do |
-| physics of the environment | bit-identical for an identical sequence of calls from a **fresh server** over the 20 steps that were tested (G1 of `docs/envs/isaaclab_env.md`); **not measured over 150 steps, and an evaluation of 150 steps was not reproducible** (above); after other episodes the start of an episode can differ slightly (N1) | the same | a **fresh server for every checkpoint**; one GPU model for a whole curve (kept: it is what G1 needs, and costs nothing) |
-| images | not compared bit for bit between two servers (N3) | the same | the fingerprints below do not cover them |
+| physics of the environment | bit-identical for an identical sequence of calls from a **fresh server** over the 20 steps that were tested (G1 of `docs/envs/isaaclab_env.md`); **not measured over 150 steps, and an evaluation of 150 steps was not reproducible** (above); after other episodes the start of an episode can differ slightly (N1) | the same | a **fresh server for every checkpoint** (and one real reset for a checkpoint of at most K episodes); one GPU model for a whole curve (kept: it is what G1 needs, and costs nothing) |
+| images | **differ between fresh servers** (sensor-level noise, above) | the same | accepted: kept the default rendering, the comparison is statistical. The fingerprints below do not cover the images |
 
 **Answer to "is pi0-FAST purely deterministic and pi0.5 not?"** On the policy side both are, with this protocol: pi0-FAST because it has no randomness at all, pi0.5 because its noise is restarted from the
 episode's seed. What decides the rest is the environment, the same for both. The difference that remains is in the meaning: a pi0.5 evaluation is *one* fixed draw of the noise per episode, not an average over
 the noise (to average over it, evaluate with several master seeds); pi0-FAST has no noise to average over.
 
-**Fingerprints.** Every episode records `start_sha` (the first observation) and `traj_sha` (every joint, gripper and peg-socket reading of the episode, images excluded); a checkpoint's result carries
+**Fingerprints.** Every episode records `start_sha` (the first observation of its environment: joints, gripper, peg-socket offset, **no image**, so it IS identical for the same episode in two evaluations on one GPU) and `traj_sha` (every joint, gripper and peg-socket reading of the episode, images excluded; it differs between evaluations because the images do); a checkpoint's result carries
 `eval_sha`, one hash over its episodes. Two evaluations of the same weights with the same `eval_sha` are the same episodes bit for bit; a different `eval_sha` says they diverged, and `traj_sha` says where.
 `scripts/probe_eval_parallel.py` uses them to check that parallel evaluations and a resumed one give the same bits (section 6).
 
@@ -88,8 +96,8 @@ the noise (to average over it, evaluate with several master seeds); pi0-FAST has
   GPU than the earlier attempts prints a warning.
 - The determinism flag's cost and the bit-identity between workers on one GPU are **not measured yet** (section 9).
 
-**For the RL evaluation (to keep).** The same rules apply: restart the policy's randomness from the episode's seed (an RL policy's exploration noise too, or its deterministic mode when it has one, as expo-ft's
-`--deterministic`), one environment and a batch of 1, a fresh server per evaluated checkpoint, the fixed seeds of the same `--seed`, one kind of GPU per curve, and the fingerprints. `Sweep`, `run_episode` and
+**For the RL evaluation (to keep).** The same rules apply: the policy's randomness drawn per row from the episode's seed (an RL policy's exploration noise too, or its deterministic mode when it has one, as expo-ft's
+`--deterministic`), K environments in a fresh server per evaluated checkpoint, the same master seed (the same starts), one kind of GPU per curve, and the fingerprints. `Sweep`, `run_batch` and
 `EpisodeLog` are generic: an RL evaluation only supplies its own `prepare(policy, job)` (load an RL checkpoint) and its own step 0 (the SFT checkpoint the RL started from).
 
 ## 4. Resume
@@ -97,34 +105,34 @@ the noise (to average over it, evaluate with several master seeds); pi0-FAST has
 Each finished episode is **one line** of `<output-dir>/results/<step>.jsonl`, appended, flushed and fsynced:
 
 ```
-{"episode": 17, "seed": 1405681631, "success": true, "terminated": true, "truncated": false, "steps": 84, "start_sha": "...", "traj_sha": "...", "plans": 11,
+{"episode": 17, "seed": 1405681631, "batch": 0, "env": 17, "success": true, "terminated": true, "truncated": false, "steps": 84, "start_sha": "...", "traj_sha": "...", "plans": 11,
  "plan_ms_median": 520.1, "tracking_err_max_rad": 0.04, "progress": {...}, "wall_s": 36.4, "decode": null, "video": null, "attempt": 1, "gpu": "NVIDIA L40S"}
 ```
 
 The same command again reads these files:
 
-- the episodes that are there are **skipped**; the missing ones are run, in order, on a fresh server; a line cut by a kill (no newline at its end) is dropped and the file is cut back to the last whole line,
-  so the episode that was in progress when the job stopped is simply run again;
+- the episodes that are there are **skipped**; the missing ones are run on a fresh server, batch by batch (the same rounds, so the same start states; the episodes already done are held); a line is written
+  **the moment its episode ends**, so a stop keeps every episode that had ended and drops the ones still running (a kill of a batch of 100 loses at most the episodes in progress, not the batch); a line cut by a kill (no newline at its end) is dropped and the file is cut back to the last whole line;
 - the checkpoint's result (`results/<step>.json`: success rate, standard error, Wilson 95 % interval, per-episode outcomes, `eval_sha`, attempts, GPUs) and the curve are **recomputed from the files**, so they
   are what an evaluation that was never cut would give (up to N1 above, which `single_attempt` records);
 - a checkpoint whose `.json` exists and whose episodes are all there is not run again (no server is started for it); `--n-episodes` can grow, and only the new episodes are run;
 - a log from another evaluation (an episode whose seed is not the one of the list) and a damaged whole line are errors, not silently dropped; an episode that appears twice keeps its first record, with a warning;
 - one evaluation at a time per output folder (`eval.lock`, `flock`): two would append to the same files.
 
-**What may not change between two runs on a folder** (`eval_protocol.json`): `--seed`, `--replan`, the episode length, the number of environments, the model YAML as the run saved it, the sha256 of its
-normalisation statistics, the task YAML with its `--env-set` overrides, and the recipe name (`deterministic-v1`). A change is refused with the list of what differs. The number of episodes, the checkpoints, `--workers`, the videos and the title may change.
+**What may not change between two runs on a folder** (`eval_protocol.json`): `--seed`, `--replan`, the episode length, the number of environments per server (K), the model YAML as the run saved it, the sha256 of its
+normalisation statistics, the task YAML with its `--env-set` overrides, and the recipe name (`batched-v1`). A change is refused with the list of what differs. The number of episodes, the checkpoints, `--workers`, the videos and the title may change.
 
 ## 5. Parallel evaluation of several checkpoints
 
 `--workers N` evaluates N checkpoints at the same time.
 
-- **One worker is one thread.** It takes the next checkpoint of a queue (by step), puts its weights in its own policy (`OpenPIPolicy.fork`, then `load_checkpoint`), starts a **fresh env server**, runs the missing
-  episodes, stops the server, takes the next one. Fresh for each checkpoint, not one server kept per worker: the physics is bit-identical only for an identical sequence of calls from a fresh server (G1), and
+- **One worker is one thread.** It takes the next checkpoint of a queue (by step), puts its weights in its own policy (`OpenPIPolicy.fork`, then `load_checkpoint`), starts a **fresh env server** of K environments, runs the missing
+  episodes batch by batch, stops the server, takes the next one. Fresh for each checkpoint, not one server kept per worker: the physics is bit-identical only for an identical sequence of calls from a fresh server (G1), and
   a start-up (a few minutes) is small against two hours of episodes.
-- **The server is a subprocess**, not a thread: Isaac Sim allows one `SimulationApp` per process. It runs `jobs/env_server.sh` (one environment, a free port) in its **own process group**, with the learner's
+- **The server is a subprocess**, not a thread: Isaac Sim allows one `SimulationApp` per process. It runs `jobs/env_server.sh` (K environments, a free port) in its **own process group**, with the learner's
   venv and XLA / JAX variables taken out of its environment, its log in `<output-dir>/logs/server_<step>.log`. The threads only supervise the subprocesses and drive the policy.
 - **Memory.** The policies of all the workers share the compiled sampler and the base weights in GPU memory (`fork`; `load_checkpoint` replaces only the trainable parameters; checked in the tests: the frozen
-  weights are the same device arrays): N workers cost about N env servers (about 8 GB each, `docs/envs/isaaclab_env.md` section 6) plus **one** model (about 8 GB for pi0-FAST at inference) plus the LoRA
+  weights are the same device arrays): N workers cost about N env servers (about 8.1 GiB + 26-29.5 MiB per environment each, `docs/envs/isaaclab_env.md` section 6: about 11 GiB for K = 100; the model at batch K needs more than at batch 1: not measured, section 6.1) plus **one** model (about 8 GB for pi0-FAST at inference) plus the LoRA
   parameters of each. The policy stays under half of the card (`XLA_PYTHON_CLIENT_MEM_FRACTION=0.5` in the job) so that the servers have room.
 - **Servers start one at a time** (a lock from the start to the `ready` line): the first start of all builds the Robotiq USD, and two first starts would write it together.
 - **Termination and clean-up.** SIGTERM and SIGINT (a `scancel`, or Slurm's warning 5 minutes before the time limit, forwarded by the job) set a stop flag. It is checked at every step of an episode (an
@@ -183,6 +191,15 @@ from episode 0 on, for both models, and a third run with one worker alone differ
 "1 episodes appear twice", the pi0-FAST job's crash on the existing `resume/` folder), and every "bit-identical: False" compares one model with the other. It has to be run again (the probe now refuses to
 share a folder); the speeds above do not depend on it, they are the per-episode times of each job's own log lines.
 
+### 6.1 Cost of K environments per server (to measure)
+
+Before `batched-v1`, an episode took 86 s (pi0.5) or 107 s (pi0-FAST) alone in a server, 531 ms of simulator per step being fixed (`docs/envs/isaaclab_env.md`: step = 531 ms + 2.29 ms per environment). With K environments
+one step costs about 0.53 s + 0.0023 K s, and the model is called once for the environments that need a chunk. **That is an estimate from the earlier figures, not a measurement.** Two things to measure, in this order:
+1. `jobs/job_probe_batch_cost.sh` (`scripts/probe_batch_cost.py`, no simulator): the model's time per call and the memory for batch sizes 1, 8, 32, 64, 100 (first call = compilation, then medians), and the estimate of a batch it prints from the simulator's figures.
+2. A real batch: `sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir <probe dir>`: the log prints the wall time of the batch, `sacct` the host memory, `gpu_<jobid>.csv` the card's memory and utilisation.
+**Risk to check first for pi0-FAST:** its prefill logits are rows x 948 tokens x 257,152 words in bf16 (`docs/algos/sft.md`: 7.8 GB for 16 rows), i.e. about 49 GB for 100 rows, more than the half of the card the policy is allowed: the model may not fit at batch 100 (the probe records the largest batch that fits). If so, the model call has to be split in sub-batches (the simulator keeps its K environments); not written, to be decided on the probe's numbers.
+Whether several servers per checkpoint are then worth it (more episodes at once than one server's K, or the simulator being the bottleneck) is decided from these numbers.
+
 ## 7. What is written
 
 `<output-dir>/` (default `<run>/eval/`): `eval_protocol.json` (what the results were made with, and one entry per attempt), `episode_seeds.json`, `results/<step>.jsonl` and `.json`,
@@ -200,9 +217,9 @@ font** (9 pt, bold, wrapped to 90 characters per line) so that it stays inside t
 |---|---|---|
 | episode seeds | `episode_seeds.json`, `--seed` 42, `--n-episodes` | the same generation, so the same seeds for the same `--seed` and `--n-episodes`; the file also records the master seed and a longer list extends a shorter one |
 | resume | a checkpoint whose result file exists is skipped; **one cut in the middle is redone whole** | at the episode: a line per episode, only the missing ones are run, the result recomputed from the file |
-| one checkpoint | a subprocess per checkpoint (`eval_policy.py`), episodes one after the other | threads in one process (one shared compiled model), one env server per checkpoint |
+| one checkpoint | a subprocess per checkpoint (`eval_policy.py`), episodes one after the other | threads in one process (one shared compiled model), one env server of K environments per checkpoint, the episodes of a batch in parallel |
 | several checkpoints | one after the other | `--workers N` at the same time |
-| randomness of the policy | not seeded per episode (`--deterministic` only for the RL's residual actor) | restarted from the episode's seed for both models, XLA deterministic ops, batch of 1 |
+| randomness of the policy | not seeded per episode (`--deterministic` only for the RL's residual actor) | per row from the episode's seed for both models, XLA deterministic ops, fixed batch K |
 | bit-level check | none | `start_sha`, `traj_sha`, `eval_sha`, `attempt`, `gpu`, the protocol file and its check on resume |
 | curve and data location | `--output-dir` for everything (default: the checkpoints folder) | `--output-dir` (default `<run>/eval`) and `--curve-dir` |
 | title | 15 pt | 9 pt, wrapped |
@@ -211,9 +228,8 @@ font** (9 pt, bold, wrapped to 90 characters per line) so that it stays inside t
 ## 9. Checked and not checked
 
 Checked (CPU): the seeds (expo-ft's, a longer list extends a shorter one, a seed file of another master seed refused); the log (a line cut by a kill, a damaged line, duplicates, concurrent appends); the
-numbers; the protocol check; one episode on the fake simulator over a real socket (record, reproducible on a fresh server, the noise of the policy a function of the episode and not of the history, a stop in the
-middle of an episode drops it, an episode that does not end is an error); the sweep (every checkpoint on the same seeds, one or three workers give the same results, servers start one at a time, a stopped sweep
-keeps its episodes and the same command finishes it with the results of an uncut one, a finished checkpoint starts no server, more episodes run only the new ones, a failing checkpoint or policy does not stop the
+numbers; the protocol check; a batch of episodes on the fake simulator over a real socket (a record the moment each episode ends, a fresh server gives the same bits, held environments change nothing for the others, the noise of the policy a function of the episode and not of the batch or the history, a stop keeps the episodes that had ended, an episode that does not end is an error); on a tiny pi0.5 that the noise of a row depends only on its seed and that `pad_to` fixes the batch; the sweep (every checkpoint on the same seeds, one or three workers give the same results, servers start one at a time, a stopped sweep
+keeps its episodes and the same command finishes it with the results of an uncut one, several batches use rounds 0, 1, 2 of the master seed and a cut batch is resumed in its own round, a server with another number of environments than the protocol's is refused, a finished checkpoint starts no server, more episodes run only the new ones, a failing checkpoint or policy does not stop the
 others, every server is stopped); the server subprocess (ready line, an old ready line not mistaken, a death, a timeout, a stop while waiting, SIGTERM then SIGKILL, the whole process group killed); the script
 (`--dry-run`, `--plot-only`, the refusal of another protocol, the lock, `--force`); the curve (rebuilt from complete checkpoints only, the title small and inside the figure); the probe's analysis; and
 on a tiny pi0.5 that `OpenPIPolicy.fork` gives the same bits as its parent for the same seed, has its own stream and weights, and shares the device arrays, and that `load_checkpoint` on a fork leaves the base
@@ -223,6 +239,7 @@ policy untouched and the frozen weights shared.
 - everything that needs Isaac Sim and the real models together: a first evaluation of a real checkpoint, the server subprocess started from the learner's venv through `jobs/env_server.sh`, the `ready` line, the
   clean-up of Isaac's child processes;
 - that the model gives the same bits in two compilations, two threads and two processes (`--part policy`); its flag `--xla_gpu_deterministic_ops` costs nothing (measured);
+- the cost of K environments per server on the real simulator and models (section 6.1), and the model's GPU memory at batch K;
 - the physics over 150 steps from a fresh server (`--part env`); the speed-up of several workers is measured (none on an L40S); the host memory of an Isaac server
   (`--mem=48G` for one worker is an estimate, to be checked with `sacct` after the first evaluation job);
 - the size of N1 for resumed episodes (the probe's cut-and-resume check), and the effect on a success rate over hundreds of episodes (N6 of the env's reproducibility section);

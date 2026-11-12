@@ -1,4 +1,5 @@
 #!/bin/bash
+# OBSOLETE since the protocol batched-v1 (K environments per server): the probe still runs with one environment per server (--envs-per-server is not an option of this probe); see jobs/job_probe_batch_cost.sh and docs/eval/sft_eval.md section 6.1.
 # Probe of the parallel evaluation: how many checkpoints one GPU evaluates at the same time, what that costs, and whether the results stay bit-identical.
 #   sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 --episodes 4
 #   sbatch jobs/job_probe_eval_parallel.sh --model pi0_fast --workers 1 2 --episodes 4

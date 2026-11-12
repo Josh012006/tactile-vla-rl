@@ -1,6 +1,6 @@
 """src/eval/sweep.py: the env server as a subprocess (ready line, death, timeout, stop, the whole process group is killed) and the sweep of several checkpoints in
 threads, against the fake simulator over real sockets: resume of what is missing, same results with one or several workers, one server at a time, a failing checkpoint
-that does not stop the others, every server stopped."""
+that does not stop the others, every server stopped. The servers hold K environments that play a checkpoint's episodes together (batches)."""
 import json
 import os
 import signal
@@ -15,7 +15,8 @@ from src.eval import sweep as S
 from test_client_server import Running  # noqa: F401
 from test_eval_episodes import FakePolicy, will_succeed
 
-N = 6
+N = 6                      # episodes per checkpoint, and the environments of a server unless a test says otherwise
+MASTER = 42
 
 
 # -- the subprocess -------------------------------------------------------------------------------------------------------------------------------
@@ -114,8 +115,8 @@ def test_the_server_environment_loses_the_learners_venv_and_the_xla_settings(tmp
 class FakeServer:
     """What a ServerProcess is for the sweep: `start`, `wait_ready`, `stop` and an endpoint, here a fake simulator behind a real socket. The registry counts what runs."""
 
-    def __init__(self, registry, label, max_steps):
-        self.registry, self.label, self.max_steps = registry, label, max_steps
+    def __init__(self, registry, label, max_steps, num_envs):
+        self.registry, self.label, self.max_steps, self.num_envs = registry, label, max_steps, num_envs
         self.running = None
         self.endpoint = None
 
@@ -124,7 +125,7 @@ class FakeServer:
             self.registry.starting += 1
             self.registry.max_starting = max(self.registry.max_starting, self.registry.starting)
         time.sleep(0.05)                                                                   # long enough for two workers to overlap, if nothing serialised them
-        self.running = Running(num_envs=1, max_steps=self.max_steps, seed=0)
+        self.running = Running(num_envs=self.num_envs, max_steps=self.max_steps, seed=0)
         self.endpoint = self.running.endpoint
         with self.registry.lock:
             self.registry.starting -= 1
@@ -136,6 +137,7 @@ class FakeServer:
 
     def stop(self, grace_s=0):
         if self.running is not None:
+            self.registry.reset_calls.append(list(self.running.sim.reset_calls))                 # the seeds of the real resets this server did
             self.running.stop()
             self.running = None
             with self.registry.lock:
@@ -144,43 +146,54 @@ class FakeServer:
 
 
 class Registry:
-    def __init__(self, max_steps=20):
+    def __init__(self, max_steps=20, num_envs=N):
         self.lock = threading.Lock()
         self.starting = self.max_starting = self.stopped = self.started = 0
         self.live = set()
-        self.max_steps = max_steps
+        self.reset_calls = []
+        self.max_steps, self.num_envs = max_steps, num_envs
 
     def factory(self, label):
-        return FakeServer(self, label, self.max_steps)
+        return FakeServer(self, label, self.max_steps, self.num_envs)
 
 
 class CountingPolicy(FakePolicy):
-    """A FakePolicy that counts the episodes it plays (`seed` is called once per episode) in a counter shared by all the workers, and can stop the sweep after a number of them."""
+    """A FakePolicy that counts the episodes it plays (the first chunk of an episode is asked for with the noise seed `plan_seed(episode seed, 0)`: one entry, the episode's seed, per episode)
+    in a counter shared by all the workers, and can stop the sweep after a number of model calls."""
 
-    def __init__(self, shared, stop=None, stop_after=None):
+    def __init__(self, shared, stop=None, stop_after_calls=None):
         super().__init__()
-        self.shared, self.stop, self.stop_after = shared, stop, stop_after
+        self.shared, self.stop, self.stop_after_calls = shared, stop, stop_after_calls
 
-    def seed(self, seed):
-        super().seed(seed)
+    def raw_chunks(self, rows, num_samples, row_seeds=None, pad_to=None):
         with self.shared["lock"]:
-            self.shared["episodes"].append(seed)
-            if self.stop_after is not None and len(self.shared["episodes"]) >= self.stop_after:
+            for s in row_seeds or ():
+                if s in self.shared["firsts"]:
+                    self.shared["episodes"].append(self.shared["firsts"][s])
+            self.shared["calls"] += 1
+            if self.stop_after_calls is not None and self.shared["calls"] >= self.stop_after_calls:
                 self.stop.set()
+        return super().raw_chunks(rows, num_samples, row_seeds, pad_to)
 
 
-def make_sweep(tmp_path, labels, workers, shared, registry, stop=None, stop_after=None, attempt=1, prepare=None, seeds=None, completed=None):
+def make_sweep(tmp_path, labels, workers, shared, registry, stop=None, stop_after_calls=None, attempt=1, prepare=None, seeds=None, completed=None, envs=N):
     stop = stop or threading.Event()
-    seeds = seeds or E.make_seeds(42, N)
+    seeds = seeds or E.make_seeds(MASTER, N)
+    shared["firsts"].update({E.plan_seed(s, 0): s for s in E.make_seeds(MASTER, 50)})
     jobs = [S.Job(label=l, step=int(l)) for l in labels]
     return S.Sweep(output_dir=tmp_path, jobs=jobs, seeds=seeds, replan=4, max_steps=20, workers=workers,
-                   policy_factory=lambda: CountingPolicy(shared, stop, stop_after), prepare=prepare or (lambda policy, job: None),
+                   policy_factory=lambda: CountingPolicy(shared, stop, stop_after_calls), prepare=prepare or (lambda policy, job: None),
                    server_factory=registry.factory, attempt=attempt, gpu="fake gpu", stop=stop, on_complete=(lambda job, s: completed.append(job.label)) if completed is not None else None,
-                   say=lambda m: None, grace_s=5), stop
+                   say=lambda m: None, grace_s=5, master_seed=MASTER, envs_per_server=envs), stop
 
 
 def shared():
-    return {"lock": threading.Lock(), "episodes": []}
+    return {"lock": threading.Lock(), "episodes": [], "firsts": {}, "calls": 0}
+
+
+def outcome(i, envs=N):
+    """Whether episode i succeeds: environment i % envs in round i // envs of the master seed."""
+    return will_succeed(MASTER, i // envs, i % envs)
 
 
 def results(tmp_path, label):
@@ -192,14 +205,15 @@ def test_a_sweep_evaluates_every_checkpoint_on_the_same_episodes_and_writes_what
     sw, _ = make_sweep(tmp_path, ["0", "500", "1000"], 2, sh, reg, completed=done)
     out = sw.run()
     assert out.ok and out.complete == ["0", "500", "1000"] and sorted(done) == ["0", "1000", "500"] and not out.stopped
-    seeds = E.make_seeds(42, N)
+    seeds = E.make_seeds(MASTER, N)
     for label in ("0", "500", "1000"):
         r = results(tmp_path, label)
         assert r["seeds"] == seeds and r["n_episodes"] == N and r["single_attempt"] and r["gpus"] == ["fake gpu"]
-        assert r["successes"] == [will_succeed(s) for s in seeds]                       # the fake simulator's outcome is known from the seed
+        assert r["successes"] == [outcome(i) for i in range(N)]                         # the fake simulator's outcome is known from the start state of the environment
         assert len((tmp_path / "results" / f"{label}.jsonl").read_text().splitlines()) == N
     assert len({results(tmp_path, l)["eval_sha"] for l in ("0", "500", "1000")}) == 1       # the same policy on the same episodes: the same fingerprint
     assert reg.live == set() and reg.stopped == 3                                         # a fresh server per checkpoint, all stopped
+    assert sorted(reg.reset_calls) == [[MASTER]] * 3                                      # ONE real reset per checkpoint: round 0 of the master seed
 
 
 def test_one_worker_or_several_give_the_same_results(tmp_path):
@@ -225,19 +239,19 @@ def test_a_sweep_that_is_stopped_keeps_its_episodes_and_the_same_command_finishe
     assert ref.run().ok
 
     reg, sh = Registry(), shared()
-    cut, stop = make_sweep(tmp_path / "cut", labels, 2, sh, reg, stop_after=5)                  # SIGTERM after five episodes, in the middle of two checkpoints
+    cut, stop = make_sweep(tmp_path / "cut", labels, 2, sh, reg, stop_after_calls=5)            # SIGTERM at the fifth model call, in the middle of two checkpoints
     first = cut.run()
     assert first.stopped and not first.ok and first.incomplete and not first.complete
     assert reg.live == set() and reg.started >= 1 and reg.stopped == reg.started                # every server that was started is stopped
     logged = {l: len(E.EpisodeLog(tmp_path / "cut" / "results" / f"{l}.jsonl").load()) for l in labels}
-    assert 0 < sum(logged.values()) <= 5 and all(v < N for v in logged.values())              # what was finished is on disk; the episode in progress was dropped
+    assert 0 < sum(logged.values()) and all(v < N for v in logged.values())                    # what had ended is on disk; the episodes still running were dropped
     assert not list((tmp_path / "cut" / "results").glob("*.json"))                              # no result for a checkpoint that is not complete
 
     sh2, reg2 = shared(), Registry()
     resume, _ = make_sweep(tmp_path / "cut", labels, 2, sh2, reg2, attempt=2)
     second = resume.run()
     assert second.ok and sorted(second.complete) == sorted(labels)
-    assert len(sh2["episodes"]) == N * len(labels) - sum(logged.values())                         # ONLY the missing episodes were run
+    assert len(sh2["episodes"]) == N * len(labels) - sum(logged.values())                         # ONLY the missing episodes were played (the others of the batch were held)
     for label in labels:
         r, ref_r = results(tmp_path / "cut", label), results(reference_dir, label)
         assert r["successes"] == ref_r["successes"] and r["eval_sha"] == ref_r["eval_sha"]       # the fake simulator has no history: the same bits as an uncut run
@@ -257,12 +271,13 @@ def test_a_finished_checkpoint_is_not_run_again(tmp_path):
 
 
 def test_more_episodes_than_before_only_runs_the_new_ones(tmp_path):
-    short, _ = make_sweep(tmp_path, ["0"], 1, shared(), Registry(), seeds=E.make_seeds(42, 3))
+    short, _ = make_sweep(tmp_path, ["0"], 1, shared(), Registry(), seeds=E.make_seeds(MASTER, 3))
     assert short.run().ok
     sh = shared()
-    longer, _ = make_sweep(tmp_path, ["0"], 1, sh, Registry(), seeds=E.make_seeds(42, 5), attempt=2)
+    longer, _ = make_sweep(tmp_path, ["0"], 1, sh, Registry(), seeds=E.make_seeds(MASTER, 5), attempt=2)
     assert longer.run().ok
-    assert sh["episodes"] == E.make_seeds(42, 5)[3:] and results(tmp_path, "0")["n_episodes"] == 5
+    assert sh["episodes"] == E.make_seeds(MASTER, 5)[3:] and results(tmp_path, "0")["n_episodes"] == 5
+    assert results(tmp_path, "0")["successes"] == [outcome(i) for i in range(5)]                     # the new episodes start from the same states as in one go
 
 
 def test_a_failing_checkpoint_is_reported_and_the_others_are_evaluated(tmp_path):
@@ -280,12 +295,12 @@ def test_a_failing_checkpoint_is_reported_and_the_others_are_evaluated(tmp_path)
 
 def test_the_server_is_stopped_when_an_episode_blows_up_and_a_wrong_episode_length_is_refused(tmp_path):
     class Boom(CountingPolicy):
-        def raw_chunks(self, rows, n):
+        def raw_chunks(self, rows, n, row_seeds=None, pad_to=None):
             raise RuntimeError("the model crashed")
 
     reg = Registry()
-    sw = S.Sweep(output_dir=tmp_path, jobs=[S.Job("0", 0)], seeds=E.make_seeds(42, 2), replan=4, max_steps=20, workers=1, policy_factory=lambda: Boom(shared()),
-                 prepare=lambda p, j: None, server_factory=reg.factory, attempt=1, gpu="g", say=lambda m: None)
+    sw = S.Sweep(output_dir=tmp_path, jobs=[S.Job("0", 0)], seeds=E.make_seeds(MASTER, 2), replan=4, max_steps=20, workers=1, policy_factory=lambda: Boom(shared()),
+                 prepare=lambda p, j: None, server_factory=reg.factory, attempt=1, gpu="g", say=lambda m: None, master_seed=MASTER, envs_per_server=N)
     out = sw.run()
     assert "the model crashed" in out.failed["0"] and reg.live == set() and reg.started == 1 and reg.stopped == 1
     reg2 = Registry(max_steps=30)                                                                   # a server whose episodes are not the protocol's
@@ -300,8 +315,8 @@ def test_a_worker_that_cannot_make_its_policy_is_a_failure_and_a_stop_before_the
     def broken():
         raise MemoryError("no room for the policy")
 
-    sw = S.Sweep(output_dir=tmp_path, jobs=[S.Job("0", 0)], seeds=E.make_seeds(42, 2), replan=4, max_steps=20, workers=1, policy_factory=broken,
-                 prepare=lambda p, j: None, server_factory=reg.factory, attempt=1, gpu="g", say=lambda m: None)
+    sw = S.Sweep(output_dir=tmp_path, jobs=[S.Job("0", 0)], seeds=E.make_seeds(MASTER, 2), replan=4, max_steps=20, workers=1, policy_factory=broken,
+                 prepare=lambda p, j: None, server_factory=reg.factory, attempt=1, gpu="g", say=lambda m: None, master_seed=MASTER, envs_per_server=N)
     out = sw.run()
     assert out.failed and not out.ok and "0" in out.incomplete and reg.started == 0
     stop = threading.Event()
@@ -321,3 +336,38 @@ def test_a_stop_while_waiting_for_the_start_lock_leaves_at_once(tmp_path):
     out = sw.run()
     assert time.monotonic() - t0 < 10 and out.stopped and reg.live == set()
     sw._start_lock.release()
+
+
+def test_fewer_environments_than_episodes_means_several_batches_each_with_its_own_round_and_the_same_outcomes_as_the_batch_semantics_say(tmp_path):
+    reg, sh = Registry(num_envs=2), shared()
+    sw, _ = make_sweep(tmp_path, ["0"], 1, sh, reg, envs=2)
+    assert sw.run().ok
+    assert reg.reset_calls == [[MASTER, MASTER + 1, MASTER + 2]]                                   # three batches of two: rounds 0, 1, 2 of the master seed, in one server
+    r = results(tmp_path, "0")
+    assert r["successes"] == [outcome(i, envs=2) for i in range(N)]
+    recs = E.EpisodeLog(tmp_path / "results" / "0.jsonl").load()
+    assert sorted((rec["batch"], rec["env"]) for rec in recs.values()) == [(b, e) for b in range(3) for e in range(2)]
+
+
+def test_a_batch_that_was_cut_is_resumed_in_the_same_round_in_a_fresh_server(tmp_path):
+    reg, sh = Registry(num_envs=2), shared()
+    sw, _ = make_sweep(tmp_path, ["0"], 1, sh, reg, seeds=E.make_seeds(MASTER, 4), envs=2)
+    assert sw.run().ok
+    log = E.EpisodeLog(tmp_path / "results" / "0.jsonl")
+    kept = {i: r for i, r in log.load().items() if i in (0, 1, 2)}                                  # episode 3 (batch 1, environment 1) is lost, as in a kill
+    (tmp_path / "results" / "0.jsonl").unlink()
+    (tmp_path / "results" / "0.json").unlink()
+    for r in kept.values():
+        log.append(r)
+    reg2, sh2 = Registry(num_envs=2), shared()
+    again, _ = make_sweep(tmp_path, ["0"], 1, sh2, reg2, seeds=E.make_seeds(MASTER, 4), envs=2, attempt=2)
+    assert again.run().ok
+    assert reg2.reset_calls == [[MASTER + 1]]                                                       # only batch 1 runs again, with ITS round
+    assert sh2["episodes"] == [E.make_seeds(MASTER, 4)[3]] and results(tmp_path, "0")["successes"] == [outcome(i, envs=2) for i in range(4)]
+
+
+def test_a_server_with_another_number_of_environments_than_the_protocols_is_refused(tmp_path):
+    reg = Registry(num_envs=3)
+    sw, _ = make_sweep(tmp_path, ["0"], 1, shared(), reg, envs=N)
+    out = sw.run()
+    assert not out.ok and "3 environments" in out.failed["0"] and reg.live == set()

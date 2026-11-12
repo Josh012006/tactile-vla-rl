@@ -214,19 +214,27 @@ class VLAPolicy(abc.ABC):
     touch: Mapping[str, TouchSpec] = {}        # component -> TouchSpec of the components that use touch (set by the subclass from its YAML)
 
     @abc.abstractmethod
-    def raw_chunks(self, rows: List[dict], num_samples: int) -> Tuple[np.ndarray, float]:
+    def raw_chunks(self, rows: List[dict], num_samples: int, row_seeds: Optional[Sequence[int]] = None, pad_to: Optional[int] = None) -> Tuple[np.ndarray, float]:
         """`rows`: one openpi-format observation per environment (`rows_of`: `to_openpi_obs` + the touch vectors). Returns the model's own chunks (N, S, H, D >= 8)
-        in the order [environment][sample], and the model time in ms."""
+        in the order [environment][sample], and the model time in ms.
+        `row_seeds` (one int per row): the sampling noise of row i is a function of row_seeds[i] ONLY, not of the other rows, of the batch size or of the policy's own stream (an
+        evaluation gives each episode its own noise this way). A model with no sampling noise (pi0-FAST decodes greedily) ignores it.
+        `pad_to`: call the model with exactly this many rows (the rows are padded by repeating the last one) instead of the next power of two: one shape whatever the number of rows."""
 
     def seed(self, seed: int) -> None:
         """Restart the policy's random stream (sampling noise). Same seed + same inputs = same chunks. Default: nothing to seed."""
 
-    def plan(self, obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], num_samples: int = 1) -> Plan:
+    def plan(self, obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], num_samples: int = 1, *,
+             row_seeds: Optional[Sequence[int]] = None, pad_to: Optional[int] = None) -> Plan:
+        """Chunks for every row of `obs`. `row_seeds` / `pad_to`: see `raw_chunks`; a policy that does not take them is not called with them unless they are given."""
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
         rows = rows_of(obs, prompt, self.touch)
         n, h = len(rows), self.info.action_horizon
-        raw, infer_ms = self.raw_chunks(rows, num_samples)
+        if row_seeds is not None and len(row_seeds) != n:
+            raise ValueError(f"row_seeds has {len(row_seeds)} entries for {n} rows")
+        extra = {k: v for k, v in (("row_seeds", row_seeds), ("pad_to", pad_to)) if v is not None}
+        raw, infer_ms = self.raw_chunks(rows, num_samples, **extra)
         raw = np.asarray(raw, dtype=np.float32)
         if raw.ndim != 4 or raw.shape[:2] != (n, num_samples) or raw.shape[3] < P.ACTION_DIM:
             raise ValueError(f"{type(self).__name__}.raw_chunks returned {raw.shape}, expected ({n}, {num_samples}, H, >= {P.ACTION_DIM})")
@@ -253,7 +261,7 @@ class CallablePolicy(VLAPolicy):
         self._infer = infer
         self.info = ModelInfo.from_cfg(cfg)
 
-    def raw_chunks(self, rows, num_samples):
+    def raw_chunks(self, rows, num_samples, row_seeds=None, pad_to=None):
         out, ms = [], 0.0
         for row in rows:
             samples = []
@@ -273,7 +281,7 @@ class StaticPolicy(VLAPolicy):
         self.info = ModelInfo.from_cfg({"name": "static", "family": "static", "action_horizon": action_horizon,
                                         "output_semantics": output_semantics})
 
-    def raw_chunks(self, rows, num_samples):
+    def raw_chunks(self, rows, num_samples, row_seeds=None, pad_to=None):
         h, offsets = self.info.action_horizon, self.info.output_semantics == "offsets_from_chunk_start_state"
         out = np.zeros((len(rows), num_samples, h, P.ACTION_DIM), np.float32)
         for i, row in enumerate(rows):

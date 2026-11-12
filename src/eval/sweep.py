@@ -4,10 +4,11 @@
                   policy_factory=..., prepare=..., server_factory=..., attempt=1, gpu="NVIDIA L40S", stop=stop_event)
     result = sweep.run()
 
-One WORKER is one thread. It takes the next checkpoint from the queue, sets its weights in its own policy, starts a FRESH env server (a subprocess with its own port and
-process group), runs the episodes the checkpoint still lacks, stops the server, and takes the next one. Why a fresh server for each checkpoint, and not one per worker kept alive:
-the start of an episode is bit-identical only for an identical sequence of calls from a fresh server (docs/envs/isaaclab_env.md G1), and a server that has already run another
-checkpoint's episodes would give different bits. The start-up costs a few minutes against two hours of episodes.
+One WORKER is one thread. It takes the next checkpoint from the queue, sets its weights in its own policy, starts a FRESH env server with K environments (a subprocess with its own
+port and process group), plays the episodes the checkpoint still lacks in batches of K (src/eval/episodes.py: `run_batch`), stops the server, and takes the next one. Why a fresh server
+for each checkpoint, and not one per worker kept alive: the start of the first batch is bit-identical only from a fresh server (docs/envs/isaaclab_env.md G1), and a server that has already
+run another checkpoint's episodes would start the next ones from states that depend on them (N1). With K at least the number of episodes the whole checkpoint is ONE batch: one reset, the
+same K start states for every checkpoint.
 
 Why a subprocess and not a thread for the simulator: Isaac Sim allows one SimulationApp per process. The threads of this file only supervise the subprocesses and drive the policy.
 
@@ -161,15 +162,15 @@ class ServerProcess:
 
 
 def make_server_factory(task_config: Path, env_set: Sequence[str], logs_dir: Path, base_env: Optional[Mapping[str, str]] = None,
-                        server_args: Sequence[str] = ()) -> Callable[[str], ServerProcess]:
-    """label -> a ServerProcess for one environment, on a port nobody listens on, running jobs/env_server.sh with the task YAML and `--set KEY=VALUE` overrides.
+                        server_args: Sequence[str] = (), num_envs: int = 1) -> Callable[[str], ServerProcess]:
+    """label -> a ServerProcess with `num_envs` environments, on a port nobody listens on, running jobs/env_server.sh with the task YAML and `--set KEY=VALUE` overrides.
     `server_args`: further command-line arguments of the server itself, after the `--set`s (Isaac Lab AppLauncher options such as `--rendering_mode performance`); none by default."""
     env = clean_server_env(base_env if base_env is not None else os.environ)
     env["ENV_CONFIG"] = str(task_config)
 
     def factory(label: str) -> ServerProcess:
         port = free_port()
-        command = ["bash", str(ROOT / "jobs" / "env_server.sh"), "--set", "num_envs=1", "--set", f"server_port={port}"]
+        command = ["bash", str(ROOT / "jobs" / "env_server.sh"), "--set", f"num_envs={int(num_envs)}", "--set", f"server_port={port}"]
         for item in env_set:
             command += ["--set", item]
         command += list(server_args)
@@ -213,7 +214,7 @@ class Sweep:
                  policy_factory: Callable[[], object], prepare: Callable[[object, Job], None], server_factory: Callable[[str], ServerProcess],
                  attempt: int, gpu: str, stop: Optional[threading.Event] = None, on_complete: Optional[Callable[[Job, dict], None]] = None,
                  video_dir: Optional[Path] = None, fps: int = 15, ready_timeout_s: float = 1800.0, connect_timeout_s: float = 120.0, grace_s: float = 90.0,
-                 say: Callable[[str], None] = print):
+                 say: Callable[[str], None] = print, master_seed: int = E.DEFAULT_SEED, envs_per_server: int = 1, video_episodes: int = 5):
         self.output_dir, self.jobs, self.seeds = Path(output_dir), list(jobs), list(seeds)
         self.replan, self.max_steps, self.workers = int(replan), int(max_steps), max(1, int(workers))
         self.policy_factory, self.prepare, self.server_factory = policy_factory, prepare, server_factory
@@ -222,6 +223,7 @@ class Sweep:
         self.on_complete, self.video_dir, self.fps = on_complete, (Path(video_dir) if video_dir else None), fps
         self.ready_timeout_s, self.connect_timeout_s, self.grace_s = ready_timeout_s, connect_timeout_s, grace_s
         self.say = say
+        self.master_seed, self.envs_per_server, self.video_episodes = int(master_seed), max(1, int(envs_per_server)), max(0, int(video_episodes))
         self.results_dir = self.output_dir / "results"
         self._start_lock, self._finish_lock, self._state_lock = threading.Lock(), threading.Lock(), threading.Lock()
         self._complete: List[str] = []
@@ -272,22 +274,34 @@ class Sweep:
             env = VectorEnvClient([server.endpoint], connect_timeout_s=self.connect_timeout_s)
             if env.spec.max_steps != self.max_steps:
                 raise ServerError(f"the server's episodes are {env.spec.max_steps} steps long, the protocol's are {self.max_steps} (max_steps_per_episode of the task YAML)")
-            self.say(f"[{job.label}] env server ready on port {server.endpoint[1]}")
+            if env.num_envs != self.envs_per_server:
+                raise ServerError(f"the server has {env.num_envs} environments, the protocol's are {self.envs_per_server}")
+            self.say(f"[{job.label}] env server ready on port {server.endpoint[1]} ({env.num_envs} environments)")
+            k = self.envs_per_server
+            batches: Dict[int, List[int]] = {}
             for i in pending:
+                batches.setdefault(i // k, []).append(i)
+            for b, episodes in sorted(batches.items()):
                 if self.stop.is_set():
                     break
-                video = self.video_dir / job.label / f"ep_{i:04d}_seed{self.seeds[i]}.mp4" if self.video_dir else None
+
+                def on_episode(record: dict) -> None:
+                    i = int(record["episode"])
+                    record.update(attempt=self.attempt, gpu=self.gpu)
+                    log.append(record)
+                    done[i] = record
+                    counted = [r for n, r in done.items() if n < len(self.seeds)]
+                    self.say(f"[{job.label}] episode {i} (env {record['env']}, seed {self.seeds[i]}): {'SUCCESS' if record['success'] else 'failure'} in {record['steps']} steps, "
+                             f"{record['wall_s']:.0f} s into its batch; {len(counted)}/{len(self.seeds)} done, {sum(bool(r['success']) for r in counted)} successes")
+
+                films = {i % k: self.video_dir / job.label / f"ep_{i:04d}_seed{self.seeds[i]}.mp4" for i in episodes[:self.video_episodes]} if self.video_dir else None
+                self.say(f"[{job.label}] batch {b}: {len(episodes)} episodes in {k} environments")
                 try:
-                    record = E.run_episode(env, policy, episode=i, seed=self.seeds[i], replan=self.replan, max_steps=self.max_steps, stop=self.stop,
-                                           video_path=video, fps=self.fps)
+                    info = E.run_batch(env, policy, {i % k: (i, self.seeds[i]) for i in episodes}, master_seed=self.master_seed, batch=b, replan=self.replan,
+                                       max_steps=self.max_steps, on_episode=on_episode, stop=self.stop, videos=films, fps=self.fps)
                 except E.EvalAborted:
                     break
-                record.update(attempt=self.attempt, gpu=self.gpu)
-                log.append(record)
-                done[i] = record
-                counted = [r for k, r in done.items() if k < len(self.seeds)]
-                self.say(f"[{job.label}] episode {i} (seed {self.seeds[i]}): {'SUCCESS' if record['success'] else 'failure'} in {record['steps']} steps, "
-                         f"{record['wall_s']:.0f} s; {len(counted)}/{len(self.seeds)} done, {sum(bool(r['success']) for r in counted)} successes")
+                self.say(f"[{job.label}] batch {b} done in {info['wall_s']:.0f} s ({info['steps_run']} steps, {info['plans']} chunks planned)")
         finally:
             if env is not None:
                 env.close()

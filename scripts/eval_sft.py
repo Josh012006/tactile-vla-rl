@@ -12,20 +12,22 @@ overrides and normalisation statistics, and checkpoints/<step>/ the trained para
 (openpi's, seed 0), nothing trained: the point the curve starts from (`--no-initial` leaves it out). The normalisation statistics are the run's too: the file its model YAML names, which
 the SFT copied into every checkpoint (checkpoints/<step>/assets/); the two are compared byte for byte before anything starts, and a difference is refused (check_norm_stats).
 
-The episodes. `--seed` (default 42) generates the `--n-episodes` seeds ONCE (the way expo-ft does: episode_seeds.json, kept in the output folder); every checkpoint plays the same
-ones. Each episode is `reset(seed=<its seed>)` in a server with ONE environment, a chunk is executed `--replan` steps (default: half the model's chunk, as expo-ft's 8 of 16) and
-the episode lasts at most `max_steps_per_episode` of the task YAML.
+The episodes. One env server per checkpoint holds `--envs-per-server` K environments (default 100) that play their episodes TOGETHER: episode i is environment i % K of batch i // K, and
+batch b starts with FORGE's real reset seeded `--seed` + b. With at most K episodes (the normal case) a checkpoint is ONE batch from a fresh server: every checkpoint starts from the very same K
+states, and no start depends on what an earlier episode did. `--seed` (default 42) also generates the `--n-episodes` episode seeds ONCE (the way expo-ft does: episode_seeds.json, kept in the
+output folder), which seed the policy's sampling noise: the noise of pi0.5 for the k-th chunk of episode i depends on (its seed, k) only. A chunk is executed `--replan` steps (default: half the
+model's chunk, as expo-ft's 8 of 16) and the episode lasts at most `max_steps_per_episode` of the task YAML. K is part of the protocol (it fixes the start states): it cannot change in a folder.
+More than K episodes means more batches in the same server: those start after other episodes and carry the small history dependence of docs/envs/isaaclab_env.md N1 (keep K >= --n-episodes).
 
-Deterministic evaluation (docs/eval/sft_eval.md). pi0-FAST decodes greedily; pi0.5's flow noise restarts from the episode's seed at every episode; the model is always called with a
-batch of 1; XLA's GPU kernels are set deterministic (XLA_FLAGS --xla_gpu_deterministic_ops=true, added here); each checkpoint gets a FRESH env server (the physics is bit-identical for
-an identical sequence of calls from a fresh server over the 20 steps tested, on the same GPU model). End to end, 150-step episodes were NOT bit-reproducible in the first measurements
-(docs/eval/sft_eval.md section 3; scripts/probe_determinism.py isolates the cause). Every episode records `start_sha` and `traj_sha`, every checkpoint an `eval_sha`: two evaluations are
-identical when these are.
+Comparable evaluation (docs/eval/sft_eval.md). pi0-FAST decodes greedily; pi0.5's noise is per episode; the model is always called with K rows (one shape, rows of finished episodes repeated);
+XLA's GPU kernels are set deterministic (XLA_FLAGS --xla_gpu_deterministic_ops=true, added here); each checkpoint gets a FRESH env server. The physics is bit-reproducible from a fresh server,
+the cameras are not (two servers render images that differ by about 0.5 / 255 on average, from the first frame): the evaluation is comparable, not bit-reproducible: same starts, same
+episode seeds, a standard error. Every episode records `start_sha` (identical for the same episode on any fresh server) and `traj_sha`, every checkpoint an `eval_sha`.
 
-Resume. Re-run the SAME command. Each finished episode is a line of <output-dir>/results/<step>.jsonl: a checkpoint that was cut is continued from its missing episodes only, and its
-result and the curve are recomputed from the file as if nothing had happened. (A checkpoint evaluated in several attempts is statistically equivalent to one done in a single
-attempt, not bit-identical: docs/envs/isaaclab_env.md N1. `single_attempt` in its result says which one it is.) Another --seed / --replan / task YAML / model than the folder's is refused.
-`--n-episodes` may grow: the first seeds do not change, only the missing episodes are run. `--force` sets aside (`.prev1`, ...) the results of the checkpoints it evaluates and starts them over.
+Resume. Re-run the SAME command. Each finished episode is a line of <output-dir>/results/<step>.jsonl, written the moment it ends: a checkpoint that was cut is continued with a fresh server
+(the same K start states) in which only the missing episodes play, and its result and the curve are recomputed from the file as if nothing had happened. `single_attempt` in a result says
+whether it took one attempt. Another --seed / --replan / --envs-per-server / task YAML / model than the folder's is refused. `--n-episodes` may grow (up to K without leaving the first batch):
+the first seeds do not change, only the missing episodes are run. `--force` sets aside (`.prev1`, ...) the results of the checkpoints it evaluates and starts them over.
 
 Parallel. `--workers N` (default 1: on one L40S two or three workers gave the same throughput as one, docs/eval/sft_eval.md section 6) evaluates N checkpoints at the same time: one thread per checkpoint, each with its own env server (a subprocess, own port and process group) and its own
 policy (they share the compiled model and the base weights, so N workers cost N env servers plus one model in GPU memory). SIGTERM / SIGINT stop it cleanly: the episodes in progress are dropped,
@@ -57,10 +59,11 @@ from src.eval.curve import write_curve
 from src.eval.sweep import Job, Sweep, gpu_name, kill_all_servers, make_server_factory
 from src.models.interface import ROOT, norm_stats_source
 
-RECIPE = "deterministic-v1"                  # policy seeded per episode, batch of 1, fresh server per checkpoint, one environment per server
+RECIPE = "batched-v1"                        # K environments per server, one reset per checkpoint, pi0.5 noise per (episode, chunk), model batch of K, fresh server per checkpoint
+DEFAULT_ENVS_PER_SERVER = 100
 DEFAULT_TASK = "configs/task/peg_insert_forge.yaml"
 XLA_DETERMINISTIC = "--xla_gpu_deterministic_ops=true"
-FORBIDDEN_ENV_SET = ("num_envs", "server_port")
+FORBIDDEN_ENV_SET = ("num_envs", "server_port")                     # num_envs: --envs-per-server
 NORM_STATS_FILE = "norm_stats.json"
 
 
@@ -97,14 +100,14 @@ def select_jobs(found: Dict[int, Path], steps: Optional[List[int]], no_initial: 
 
 
 # -- protocol ---------------------------------------------------------------------------------------------------------------------------
-def task_settings(task_config: Path, env_set: List[str]) -> dict:
-    """The task YAML with the `--env-set KEY=VALUE` overrides applied, as the server will read it (one environment)."""
+def task_settings(task_config: Path, env_set: List[str], envs_per_server: int = 1) -> dict:
+    """The task YAML with the `--env-set KEY=VALUE` overrides applied, as the server will read it (`envs_per_server` environments)."""
     task = yaml.safe_load(Path(task_config).read_text()) or {}
     for key, value in parse_assignments(env_set).items():
         if key in FORBIDDEN_ENV_SET:
-            raise SystemExit(f"--env-set {key}: set by this script (one environment per server, a free port)")
+            raise SystemExit(f"--env-set {key}: set by this script (--envs-per-server, a free port)")
         task[key] = value
-    task["num_envs"] = 1
+    task["num_envs"] = int(envs_per_server)
     task.pop("server_port", None)
     return task
 
@@ -115,7 +118,7 @@ def build_protocol(args, run_dir: Path, model_cfg: dict, task: dict) -> dict:
     if not 1 <= replan <= horizon:
         raise SystemExit(f"--replan {replan}: between 1 and the model's chunk length ({horizon})")
     stats = norm_stats_path(model_cfg)
-    return {"recipe": RECIPE, "master_seed": int(args.seed), "replan": replan, "max_steps": int(task["max_steps_per_episode"]), "num_envs": 1,
+    return {"recipe": RECIPE, "master_seed": int(args.seed), "replan": replan, "max_steps": int(task["max_steps_per_episode"]), "num_envs": int(args.envs_per_server),
             "model_cfg": model_cfg, "norm_stats_sha": file_sha(stats) if stats else None, "task": task, "run": str(run_dir)}
 
 
@@ -226,11 +229,14 @@ def main(argv=None) -> int:
     ap.add_argument("--no-initial", action="store_true", help="leave the initial state (step 0) out of the default list")
     ap.add_argument("--output-dir", metavar="DIR", help="where the evaluation data goes (default: <run>/eval)")
     ap.add_argument("--curve-dir", metavar="DIR", help="where curve.json / curve.png / curve.pdf go (default: the output folder)")
+    ap.add_argument("--envs-per-server", type=int, default=DEFAULT_ENVS_PER_SERVER, metavar="K",
+                    help=f"environments in each server, playing together (default {DEFAULT_ENVS_PER_SERVER}); at least --n-episodes keeps a checkpoint in ONE batch. Fixed by the folder's protocol")
     ap.add_argument("--workers", type=int, default=1, help="checkpoints evaluated at the same time (default 1): one thread, one env server and one policy each")
     ap.add_argument("--replan", type=int, help="steps executed per chunk before the model is called again (default: half the model's chunk)")
     ap.add_argument("--task-config", default=DEFAULT_TASK, help=f"env server YAML (default {DEFAULT_TASK})")
     ap.add_argument("--env-set", action="append", default=[], metavar="KEY=VALUE", help="override a key of the task YAML for the servers (not num_envs / server_port)")
-    ap.add_argument("--save-videos", action="store_true", help="one video per episode in <output-dir>/videos/<step>/")
+    ap.add_argument("--save-videos", action="store_true", help="videos of the first --video-episodes episodes of each checkpoint in <output-dir>/videos/<step>/")
+    ap.add_argument("--video-episodes", type=int, default=5, help="how many episodes of a checkpoint are filmed with --save-videos (default 5)")
     ap.add_argument("--video-dir", metavar="DIR", help="parent folder of the videos (implies --save-videos)")
     ap.add_argument("--title", help="title of the plot (small font, wrapped); default: 'Eval success rate vs. checkpoint — <run name>'")
     ap.add_argument("--plot-only", action="store_true", help="only rebuild curve.json / .png / .pdf from the results on disk")
@@ -262,7 +268,9 @@ def main(argv=None) -> int:
     task_config = Path(args.task_config) if Path(args.task_config).is_absolute() else ROOT / args.task_config
     if not task_config.is_file():
         raise SystemExit(f"no task YAML {task_config}")
-    task = task_settings(task_config, args.env_set)
+    if args.envs_per_server < 1:
+        raise SystemExit("--envs-per-server must be at least 1")
+    task = task_settings(task_config, args.env_set, args.envs_per_server)
     protocol = build_protocol(args, run_dir, model_cfg, task)
     norm = check_norm_stats(model_cfg, jobs)
     protocol_path = output_dir / E.PROTOCOL_FILE
@@ -276,7 +284,10 @@ def main(argv=None) -> int:
 
     done = progress_of(output_dir, jobs, seeds)
     print(f"run {run_dir}\nmodel {model_cfg['name']} ({model_cfg['family']}), chunk {model_cfg['action_horizon']}, replan {protocol['replan']}, episodes of at most {protocol['max_steps']} steps")
-    print(f"{len(seeds)} episodes per checkpoint, master seed {args.seed}, {args.workers} worker(s); data in {output_dir}, curve in {curve_dir}")
+    print(f"{len(seeds)} episodes per checkpoint, master seed {args.seed}, {args.envs_per_server} environments per server, {args.workers} worker(s); data in {output_dir}, curve in {curve_dir}")
+    if len(seeds) > args.envs_per_server:
+        print(f"WARNING: {len(seeds)} episodes in servers of {args.envs_per_server} environments: batches after the first start after other episodes (small history dependence, "
+              f"docs/envs/isaaclab_env.md N1); --envs-per-server {len(seeds)} or more keeps one batch (set it from the first run on: it is fixed by the protocol)")
     if norm["source"] is None:
         print("normalisation statistics: the base checkpoint's own (the model YAML has no norm_stats block), as in the SFT")
     else:
@@ -343,8 +354,10 @@ def main(argv=None) -> int:
 
     video_dir = Path(args.video_dir).resolve() if args.video_dir else (output_dir / "videos" if args.save_videos else None)
     sweep = Sweep(output_dir=output_dir, jobs=jobs, seeds=seeds, replan=protocol["replan"], max_steps=protocol["max_steps"], workers=args.workers,
-                  policy_factory=lambda: base.fork(0), prepare=prepare, server_factory=make_server_factory(task_config, args.env_set, output_dir / "logs"),
-                  attempt=attempt, gpu=gpu, stop=stop, on_complete=on_complete, video_dir=video_dir, ready_timeout_s=args.ready_timeout, say=say)
+                  policy_factory=lambda: base.fork(0), prepare=prepare,
+                  server_factory=make_server_factory(task_config, args.env_set, output_dir / "logs", num_envs=args.envs_per_server),
+                  attempt=attempt, gpu=gpu, stop=stop, on_complete=on_complete, video_dir=video_dir, ready_timeout_s=args.ready_timeout, say=say,
+                  master_seed=args.seed, envs_per_server=args.envs_per_server, video_episodes=args.video_episodes)
     result = sweep.run()
     try:
         write_curve(results_dir, curve_dir, title, name=run_dir.name)

@@ -103,3 +103,42 @@ def test_a_static_policy_holds_the_arm_through_the_same_rollout(servers):  # noq
         out = rollout.run_rollout(env, StaticPolicy(action_horizon=6), steps=12, replan=6)
     assert [e["steps"] for e in out["envs"]] == [12, 12] and not any(e["success"] for e in out["envs"])
     assert out["plans"] and all(np.allclose(p["raw_first"][:7], p["q_plan"]) for p in out["plans"])
+
+
+class Seeded:
+    """Inserts (joint 0 -> 1.0) and records, per call, the rows it was asked for, their seeds and the batch it was given."""
+
+    def __init__(self, h=10):
+        self.h, self.calls = h, []
+        self.info = type("I", (), {"output_semantics": "absolute_targets", "action_horizon": h})()
+        self.last_valid = None
+
+    def plan(self, obs, prompt, num_samples=1, *, row_seeds=None, pad_to=None):
+        from src.models.interface import Plan
+        n = len(obs[P.JOINT_POSITION])
+        self.calls.append((n, row_seeds, pad_to))
+        raw = np.zeros((n, 1, self.h, 8), np.float32)
+        raw[..., 0] = 1.0
+        return Plan(targets=raw.copy(), raw=raw, infer_ms=1.0)
+
+
+def test_inactive_environments_are_held_and_never_planned_for_and_the_others_do_not_notice(servers):  # noqa: F811
+    s = servers(num_envs=3, max_steps=20, seed=5)
+    with VectorEnvClient([s.endpoint]) as env:
+        everyone = rollout.run_rollout(env, Seeded(), steps=12, replan=4, seed=5)
+        policy = Seeded()
+        only = rollout.run_rollout(env, policy, steps=12, replan=4, seed=5, active=[False, True, False], pad_to=8, row_seeds=lambda e, k: 100 * e + k)
+    assert [n for n, _, _ in policy.calls] == [1] and all(pad == 8 for _, _, pad in policy.calls)     # one row: the one that plays
+    assert policy.calls[0][1] == [100]                                                                   # environment 1, its first plan
+    assert only["envs"][1]["success"] and only["all_done"]
+    assert only["envs"][1]["steps"] == everyone["envs"][1]["steps"]                                      # the same start: the held environments change nothing for it
+    assert only["envs"][0]["steps"] == 0 or not only["envs"][0]["success"]                               # a held one does not succeed by itself
+
+
+def test_on_env_done_is_called_once_per_episode_when_it_ends_with_its_own_summary(servers):  # noqa: F811
+    s = servers(num_envs=3, max_steps=20, seed=5)
+    done = []
+    with VectorEnvClient([s.endpoint]) as env:
+        out = rollout.run_rollout(env, Seeded(), steps=20, replan=4, seed=5, on_env_done=lambda e, summ: done.append((e, summ["steps"], summ["success"])))
+    assert sorted(e for e, _, _ in done) == [0, 1, 2]
+    assert {(e, st, ok) for e, st, ok in done} == {(e["env"], e["steps"], e["success"]) for e in out["envs"]}

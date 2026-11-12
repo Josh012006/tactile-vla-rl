@@ -1,21 +1,23 @@
 #!/bin/bash
 # Success-rate curve of an SFT run: its initial state (step 0) and every checkpoint, on the same fixed episodes of the FORGE environment (Isaac Sim and the policy on ONE GPU).
+# Protocol batched-v1: --envs-per-server K (default 100) environments per server; the episodes of a checkpoint play together in batches of K (docs/eval/sft_eval.md section 2).
 #   sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/peg_insert_pi05_lora_teleop --n-episodes 50
 #   sbatch jobs/job_eval_sft.sh --run <run> --steps 0 2000 4000 --n-episodes 100           # only these checkpoints (0 = the run's initial state)
-#   sbatch jobs/job_eval_sft.sh --run <run> --n-episodes 50 --save-videos                    # one video per episode
+#   sbatch jobs/job_eval_sft.sh --run <run> --n-episodes 50 --save-videos                    # one video per episode (default: the first 5 of each batch, --video-episodes)
+#   sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --output-dir <probe dir>   # MEASURE the cost of a batch of 100 on the real simulator and model (nothing else), see below
 #   sbatch jobs/job_eval_sft.sh --run <run> --n-episodes 50                                  # the SAME command again after a stop or a failure: only the missing episodes are run
 # Every option goes to `python -m scripts.eval_sft` (see its --help: --seed 42, --output-dir, --curve-dir, --title, --replan, --force, ...).
 # Look first, on the login node, at what would be evaluated and what is already done:  python -m scripts.eval_sft --run <run> --dry-run
 # Rebuild the curve only (no GPU):                                                      python -m scripts.eval_sft --run <run> --plot-only --title "..."
 # Before the first run: the learner venv and the models fetched (uv sync --group vla; python -m scripts.fetch_models), the Isaac Lab venv (scripts/setup_isaac_venv.sh).
 #
-# One worker = one checkpoint at a time, with its own env server (about 8 GB of GPU memory each, plus the one policy the workers share). Measured on an L40S (probe of 12 Nov. 2026, one
-# env per server, replan 8 / 5): one worker uses 17 GB of the card and 65 % of its utilisation; 2 or 3 workers only saturate it (92-97 %) and give the SAME throughput as one (42 episodes
-# per hour for pi0.5, 34 for pi0-FAST). So --workers stays 1: more would cost memory for nothing; for speed, use several GPUs, i.e. several jobs on different runs. Keep ONE kind of GPU for a
-# whole curve (the physics is bit-identical only on the same one).
-# Time: a 150-step episode takes about 86 s for pi0.5 and 107 s for pi0-FAST (measured, XLA deterministic ops on), so 50 episodes are about 1.2 h (pi0.5) or 1.5 h (pi0-FAST) per
-# checkpoint and 200 episodes about 4.8 h or 6 h: the limit below holds about 11 checkpoints of 50 episodes for pi0.5 and 9 for pi0-FAST. Five minutes before the limit Slurm sends a SIGTERM:
-# the episodes in progress are dropped, the servers are killed, the finished episodes are kept, and the same command continues from there.
+# One worker = one checkpoint at a time, with its own env server of K environments (about 8.1 GiB + 26-29.5 MiB per environment: about 11 GiB for K = 100; plus the one policy the workers share,
+# whose memory at batch K is NOT measured yet). Measured on an L40S before batching (probe of 12 Nov. 2026, ONE environment per server): one worker used 17 GB of the card and 65 % of its utilisation; 2 or 3 workers only
+# saturated it and gave the SAME throughput as one. So --workers stays 1; for speed, use several GPUs, i.e. several jobs on different runs. Keep ONE kind of GPU for a whole curve (the physics is bit-identical only on the same one).
+# Time: NOT MEASURED with batches. Before, an episode alone took about 86 s (pi0.5) or 107 s (pi0-FAST), i.e. 50 episodes 1.2-1.5 h per checkpoint. A batch of K plays its episodes together: one step costs about
+# 0.53 s + 0.0023 K s, so 150 steps of K = 100 are about 2 minutes of simulator plus the model's calls (a chunk every 8 steps: 19 calls at batch K, `scripts/probe_batch_cost.py` measures it), i.e. a checkpoint of
+# 100 episodes in minutes instead of 2.4 h IF those estimates hold. Measure it (second line of the usage above) before trusting the time limit below. Five minutes before the limit Slurm sends a SIGTERM:
+# the episodes still running are dropped, the servers are killed, the episodes that had ended are kept (written the moment they end), and the same command continues from there.
 # Requeue: the job is requeueable (a preemption or a node failure restarts the script, which is the same command: the evaluation continues where it stopped). A time limit is not
 # a requeue: send the same command again.
 # Resources, for ONE worker: 6 CPUs and 40 G of host memory (an Isaac server and the model); the GPU memory is the 17 GB above. Measured (12 Nov. 2026, sacct): an Isaac server alone peaks at 8.3 GB
