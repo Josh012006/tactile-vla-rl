@@ -22,6 +22,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --no-requeue
+#SBATCH --mail-type=ALL
 #SBATCH --mail-user=josue.mongan@mila.quebec
 
 set -u
