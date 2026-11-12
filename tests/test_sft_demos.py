@@ -246,18 +246,19 @@ def experiment_files():
     return sorted((Path(__file__).resolve().parents[1] / "configs" / "experiment" / "sft").glob("*.yaml"))
 
 
-def test_the_six_sft_experiments_are_the_two_models_times_the_three_demonstration_types():
+def test_the_first_five_sft_experiments_are_the_three_pi05_runs_and_the_pair_of_pi0_fast_runs():
     from scripts import sft as cli
     from src.models.interface import ROOT, apply_overrides, load_model_cfg, norm_stats_source
     from src.models.settings import parse_model_settings
     files = experiment_files()
-    assert [f.stem for f in files] == sorted(f"{m}_lora_{d}" for m in ("pi05", "pi0_fast") for d in ("scripted", "noisy", "teleop"))
+    assert [f.stem for f in files] == sorted(["pi05_lora_scripted", "pi05_lora_noisy", "pi05_lora_teleop", "pi0_fast_lora_teleop_droid_stats", "pi0_fast_lora_teleop_demo_stats"])
     names = set()
     for f in files:
         exp = cli.load_experiment(f)
-        model, demos_type = f.stem.split("_lora_")
+        model, rest = f.stem.split("_lora_")
+        demos_type = rest.split("_")[0]                                                                    # scripted | noisy | teleop
         assert exp["model"] == model and exp["full"] is False
-        assert exp["name"] == f"peg_insert_{model}_lora_{demos_type}" and exp["name"] not in names       # clear, and one folder per run
+        assert exp["name"] == f"peg_insert_{f.stem}" and exp["name"] not in names                          # clear, and one folder per run
         names.add(exp["name"])
         assert exp["demos"] == [f"demos/isaaclab/ForgePegInsert_Robotiq_{demos_type}"]
         assert exp["set"] == {"output_root": "runs/sft/peg_insert"}
@@ -267,8 +268,10 @@ def test_the_six_sft_experiments_are_the_two_models_times_the_three_demonstratio
         stats = norm_stats_source(apply_overrides(cfg, cli.model_overrides(cfg, exp["full"], exp["model_set"])))
         if model == "pi05":                                                                              # the noisy set's statistics for the three, as in expo-ft
             assert stats == (ROOT / "assets" / "forge_demo_norm", "forge_demos_robotiq_noisy")
+        elif f.stem.endswith("demo_stats"):                                                              # pi0-FAST pair: the same demonstrations, only the statistics differ
+            assert stats == (ROOT / "assets" / "forge_demo_norm", "forge_demos_robotiq_noisy_h10")
         else:
-            assert stats is None                                                                         # pi0-FAST: the checkpoint's own (offsets' statistics do not fit it)
+            assert stats is None                                                                         # the checkpoint's own
 
 
 def test_a_checkpoint_carries_the_normalisation_statistics_it_was_trained_with(tmp_path):
