@@ -102,3 +102,26 @@ def test_the_camera_frames_of_two_plays_are_compared_by_first_step_pixels_and_si
     diff = PD.compare_images(a, c)[P.EXTERIOR_IMAGE]
     assert not diff["identical"] and diff["first_differing_step"] == 4 and diff["max_abs_diff_at"]["5"] == 3
     assert diff["differing_fraction_at"]["5"] == pytest.approx(1 / (8 * 8 * 3)) and "25" not in diff["max_abs_diff_at"]
+    assert diff["mean_abs_diff_at"]["5"] == pytest.approx(3 / (8 * 8 * 3), abs=1e-3) and diff["share_over_2_at"]["5"] == pytest.approx(1 / (8 * 8 * 3), abs=1e-4)
+    assert diff["share_over_8_at"]["5"] == 0.0
+
+
+def test_the_frames_are_written_as_pngs_with_the_difference_against_server_0(tmp_path):
+    PIL = pytest.importorskip("PIL")
+    a, c = {}, {}
+    PD.run_trace(FakeEnv(), 1, 10, images=a)
+    PD.run_trace(FakeEnv(noise=1e-6, noise_from=4), 1, 10, images=c)
+    PD.save_frame_pngs(tmp_path / "images", {"s0.r0": a, "s1.r0": c})
+    names = sorted(f.name for f in (tmp_path / "images").iterdir())
+    assert any(n.startswith("s0.r0_") and n.endswith("_step1.png") for n in names)
+    assert any(n.startswith("s1.r0_") and n.endswith("_step1_diff_x8.png") for n in names)
+    assert not any(n.startswith("s0.r0_") and "diff" in n for n in names)          # nothing to compare server 0 with
+
+
+def test_the_server_arguments_follow_the_set_overrides(tmp_path):
+    from src.eval import sweep as S
+    server = S.make_server_factory(tmp_path / "task.yaml", ["max_steps_per_episode=100"], tmp_path / "logs", {"PATH": "/usr/bin"},
+                                   server_args=["--rendering_mode", "performance"])("a")
+    assert server.command[-2:] == ["--rendering_mode", "performance"] and "max_steps_per_episode=100" in server.command
+    plain = S.make_server_factory(tmp_path / "task.yaml", [], tmp_path / "logs", {"PATH": "/usr/bin"})("a")
+    assert "--rendering_mode" not in plain.command

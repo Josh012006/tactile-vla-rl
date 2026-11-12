@@ -160,8 +160,10 @@ class ServerProcess:
             _LIVE.discard(self)
 
 
-def make_server_factory(task_config: Path, env_set: Sequence[str], logs_dir: Path, base_env: Optional[Mapping[str, str]] = None) -> Callable[[str], ServerProcess]:
-    """label -> a ServerProcess for one environment, on a port nobody listens on, running jobs/env_server.sh with the task YAML and `--set KEY=VALUE` overrides."""
+def make_server_factory(task_config: Path, env_set: Sequence[str], logs_dir: Path, base_env: Optional[Mapping[str, str]] = None,
+                        server_args: Sequence[str] = ()) -> Callable[[str], ServerProcess]:
+    """label -> a ServerProcess for one environment, on a port nobody listens on, running jobs/env_server.sh with the task YAML and `--set KEY=VALUE` overrides.
+    `server_args`: further command-line arguments of the server itself, after the `--set`s (Isaac Lab AppLauncher options such as `--rendering_mode performance`); none by default."""
     env = clean_server_env(base_env if base_env is not None else os.environ)
     env["ENV_CONFIG"] = str(task_config)
 
@@ -170,6 +172,7 @@ def make_server_factory(task_config: Path, env_set: Sequence[str], logs_dir: Pat
         command = ["bash", str(ROOT / "jobs" / "env_server.sh"), "--set", "num_envs=1", "--set", f"server_port={port}"]
         for item in env_set:
             command += ["--set", item]
+        command += list(server_args)
         return ServerProcess(command, Path(logs_dir) / f"server_{label}.log", ("127.0.0.1", port), env=env, cwd=ROOT)
 
     return factory

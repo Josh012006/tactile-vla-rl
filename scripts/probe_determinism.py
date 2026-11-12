@@ -21,7 +21,9 @@ differs over 150 steps (docs/envs/isaaclab_env.md G1 was measured over 20 steps 
                   Identical across fresh servers: the physics is reproducible over 150 steps. Different: the physics is not, and the first step says when (an early step: the contact
                   solver; growing slowly from a late step: chaos amplifying float noise). The two CAMERA IMAGES of the first play of every server are compared the same way (first differing
                   step, fraction of pixels that differ, largest difference): the model sees the images, so images that differ between fresh servers change its actions (docs/envs/isaaclab_env.md N3).
-                  A second play in the same server starts from a (reproducibly) different state: N1.
+                  A second play in the same server starts from a (reproducibly) different state: N1. For each camera the mean difference and the share of values above 2 and 8 levels
+                  say whether it is noise or a different picture; PNGs of the frames and of their difference (x8) are written to <data>/images/.
+                  `--rendering-mode` / `--server-arg=...` start the servers with another Isaac Lab rendering preset or setting, to see which one makes the images reproducible.
 
 The verdict is printed and stored in reports/probe_determinism_<part>_<model or env>_<time>_<job id>.json; the data (server logs) in runs/sft/probing/_probe_determinism_<same tag>/.
 """
@@ -182,10 +184,36 @@ def compare_images(reference: Dict[str, list], other: Dict[str, list], check_ste
         frames = other.get(key, [])
         n = min(len(ref), len(frames))
         differs = [bool(not np.array_equal(ref[i], frames[i])) for i in range(n)]
+        gaps = {s: np.abs(ref[s].astype(np.int16) - frames[s].astype(np.int16)) for s in check_steps if s < n}
         out[key] = {"frames": n, "identical": not any(differs) and len(ref) == len(frames), "first_differing_step": differs.index(True) if any(differs) else None,
                     "differing_fraction_at": {str(s): float(np.mean(ref[s] != frames[s])) for s in check_steps if s < n},
-                    "max_abs_diff_at": {str(s): int(np.abs(ref[s].astype(np.int16) - frames[s].astype(np.int16)).max()) for s in check_steps if s < n}}
+                    "max_abs_diff_at": {str(s): int(g.max()) for s, g in gaps.items()},
+                    # how big the differences are, out of 255: a mean near 1 and a tiny share above 8 is noise; a larger share is a different picture
+                    "mean_abs_diff_at": {str(s): round(float(g.mean()), 3) for s, g in gaps.items()},
+                    "share_over_2_at": {str(s): round(float((g > 2).mean()), 4) for s, g in gaps.items()},
+                    "share_over_8_at": {str(s): round(float((g > 8).mean()), 4) for s, g in gaps.items()}}
     return out
+
+
+def save_frame_pngs(folder: Path, frames: Dict[str, Dict[str, list]], steps=(1, 150)) -> None:
+    """To LOOK at the difference: for each camera and step, the frame of every server and the absolute difference of each against server 0, times 8 (PNG; skipped when PIL is missing)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        print("PIL is not installed: no PNG written", flush=True)
+        return
+    folder.mkdir(parents=True, exist_ok=True)
+    reference = frames.get("s0.r0", {})
+    for name, cams in sorted(frames.items()):
+        for key, seq in cams.items():
+            for s in steps:
+                if s >= len(seq):
+                    continue
+                cam = key.split("/")[-1]
+                Image.fromarray(np.asarray(seq[s], dtype=np.uint8)).save(folder / f"{name}_{cam}_step{s}.png")
+                if name != "s0.r0" and key in reference and s < len(reference[key]):
+                    gap = np.abs(seq[s].astype(np.int16) - reference[key][s].astype(np.int16)) * 8
+                    Image.fromarray(np.clip(gap, 0, 255).astype(np.uint8)).save(folder / f"{name}_{cam}_step{s}_diff_x8.png")
 
 
 def verdict_env(traces: Dict[str, np.ndarray]) -> dict:
@@ -217,6 +245,8 @@ def main(argv=None) -> int:
     ap.add_argument("--amplitude", type=float, default=0.15, help="--part env: amplitude of the sinusoid, rad (default 0.15)")
     ap.add_argument("--period", type=int, default=60, help="--part env: its period in steps (default 60)")
     ap.add_argument("--task-config", default=DEFAULT_TASK)
+    ap.add_argument("--rendering-mode", choices=["performance", "balanced", "quality"], help="--part env: Isaac Lab's rendering preset for the servers (AppLauncher `--rendering_mode`; the server stops with an error if this Isaac Lab has none)")
+    ap.add_argument("--server-arg", action="append", default=[], metavar="ARG", help="--part env: one more command-line argument for every server, e.g. --server-arg=--kit_args=--/rtx/post/aa/op=0 (repeatable; write it with `=`)")
     ap.add_argument("--no-deterministic-xla", action="store_true", help="--part policy: leave XLA_FLAGS as they are (to see what the flag changes)")
     ap.add_argument("--ready-timeout", type=float, default=1800.0)
     ap.add_argument("--output-root", default="runs/sft/probing")
@@ -279,7 +309,10 @@ def env_part(args) -> int:
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
-    factory = make_server_factory(task_config, [], root / "logs")
+    server_args = (["--rendering_mode", args.rendering_mode] if args.rendering_mode else []) + list(args.server_arg)
+    factory = make_server_factory(task_config, [], root / "logs", server_args=server_args)
+    if server_args:
+        print(f"server arguments: {' '.join(server_args)}", flush=True)
     print(f"simulator determinism on {gpu_name()}: {args.servers} fresh servers x {args.replays} plays of {steps} scripted steps (seed {args.seed})", flush=True)
     traces: Dict[str, np.ndarray] = {}
     frames: Dict[str, Dict[str, list]] = {}                                 # the camera frames of the first play of every server
@@ -315,13 +348,14 @@ def env_part(args) -> int:
     for name, cams in result["images"].items():
         for key, c in cams.items():
             print(f"  {name} {key.split('/')[-1]}: " + ("identical" if c["identical"] else f"first differing step {c['first_differing_step']}, differing pixel values {c['differing_fraction_at']}, "
-                                                                                       f"largest difference {c['max_abs_diff_at']}"))
+                                                                                       f"largest difference {c['max_abs_diff_at']}\n      mean difference {c['mean_abs_diff_at']}, share above 2 levels {c['share_over_2_at']}, above 8 levels {c['share_over_8_at']}"))
     images_identical = all(c["identical"] for cams in result["images"].values() for c in cams.values())
     result["images_identical"] = images_identical
     verdict += ("; the camera images are bit-identical too" if images_identical else "; the CAMERA IMAGES differ between fresh servers (the model's input is not reproducible)")
     print(verdict)
     np.savez_compressed(root / "traces.npz", **{k.replace(".", "_"): v for k, v in traces.items()})
-    write_report(args, {"part": "env", "gpu": gpu_name(), "steps": steps, "seed": args.seed, "result": result, "verdict": verdict, "data": str(root)}, "env", tag)
+    save_frame_pngs(root / "images", frames)
+    write_report(args, {"part": "env", "gpu": gpu_name(), "steps": steps, "seed": args.seed, "server_args": server_args, "result": result, "verdict": verdict, "data": str(root)}, "env", tag)
     return 0 if result["fresh_servers_identical"] and images_identical else 1
 
 
