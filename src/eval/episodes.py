@@ -170,7 +170,16 @@ def run_batch(env, policy, episodes: Mapping[int, Tuple[int, int]], *, master_se
     if not out["all_done"]:
         missing = sorted(set(hashers) - set(done_records))
         raise RuntimeError(f"episodes {[episodes[e][0] for e in missing]} (batch {batch}) did not end within {max_steps} steps: is the server's max_steps_per_episode larger than the protocol's?")
-    return {"wall_s": round(time.monotonic() - t0, 2), "steps_run": out["steps_run"], "plans": len(out["plans"])}
+    return {"wall_s": round(time.monotonic() - t0, 2), "steps_run": out["steps_run"], "plans": len(out["plans"]), "decode": decode_totals(done_records.values())}
+
+
+def decode_totals(records) -> Optional[dict]:
+    """pi0-FAST: the chunks planned for these episodes and how many could not be decoded (None for a model without token strings)."""
+    parts = [r["decode"] for r in records if r.get("decode")]
+    if not parts:
+        return None
+    chunks, failed = sum(d["chunks"] for d in parts), sum(d["failed"] for d in parts)
+    return {"chunks": chunks, "failed": failed, "failed_rate": failed / chunks if chunks else 0.0}
 
 
 # -- the append-only log of a checkpoint ------------------------------------------------------------------------------------------------------

@@ -301,7 +301,9 @@ class Sweep:
                                        max_steps=self.max_steps, on_episode=on_episode, stop=self.stop, videos=films, fps=self.fps)
                 except E.EvalAborted:
                     break
-                self.say(f"[{job.label}] batch {b} done in {info['wall_s']:.0f} s ({info['steps_run']} steps, {info['plans']} chunks planned)")
+                dec = info.get("decode")
+                self.say(f"[{job.label}] batch {b} done in {info['wall_s']:.0f} s ({info['steps_run']} steps, {info['plans']} chunks planned"
+                         + (f", {dec['failed']} of {dec['chunks']} chunks of the finished episodes could not be decoded = {100 * dec['failed_rate']:.1f} %)" if dec else ")"))
         finally:
             if env is not None:
                 env.close()

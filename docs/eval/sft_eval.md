@@ -215,6 +215,24 @@ share a folder); the speeds above do not depend on it, they are the per-episode 
   pi0-FAST (30 plans): 114 s + 30 x (7 calls of 1.0-1.6 s if the strings are short = 210-340 s) = 5.4-7.5 min, **21 checkpoints about 2.2-3 h**; if its strings are long like the probe's, 22 min per checkpoint, about 8 h. The 14 h limit of the job holds either way.
 To measure the real thing (the simulator at K = 100, the strings of a real pi0-FAST): `sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir <probe dir>`: the log prints the wall time of the batch, `sacct` the host memory, `gpu_<jobid>.csv` the card's memory and utilisation.
 
+### 6.2 First real batches (12 Nov. 2026, L40S, step 4000 of the teleop runs, 100 episodes, K = 100, `jobs/job_eval_sft.sh --steps 4000 ...`)
+
+| | pi0.5 (`peg_insert_pi05_lora_teleop`) | pi0-FAST (`..._pi0_fast_lora_teleop_demo_stats`) |
+|---|---|---|
+| success | **41 / 100** (SE 4.9, Wilson 32-51 %) | **46 / 100** (SE 5.0, Wilson 37-56 %) |
+| chunks planned | 1 529 (of at most 1 900) | 2 427 (of at most 3 000) |
+| server ready after | 86 s | 90 s |
+| the batch (150 steps) | **309 s** | **1 462 s** (a model call of 15 rows lasts as long as the longest token string: about 50 s per plan) |
+| one checkpoint, from the start of the evaluation to its result | 402 s = 6.7 min | 1 558 s = 26 min |
+| job (`sacct`) | 7 min 28, 1.5 cores, MaxRSS 29.1 GB of 40 | 26 min 43, 1.2 cores, MaxRSS 29.3 GB of 40 |
+| GPU memory (accounting) | policy 16.8 GiB + server 10.6 GiB | policy 16.8 GiB + server 10.8 GiB |
+
+**All 21 checkpoints of a run** (step 0 and a save every 200 of 4000 steps): pi0.5 about **2.4 h**, pi0-FAST about **9.1 h**, both inside the 14 h of the job. These are the figures of the final checkpoint, which ends 41-46 % of its episodes early: a weaker checkpoint runs more
+episodes to the full 150 steps and takes longer (pi0.5 at most about 8 min). Two GPUs for pi0-FAST (two jobs on different checkpoints) need a lock per checkpoint instead of per folder, which is not written.
+- The 41 % of pi0.5 matches expo-ft's evaluation of the same kind of start (teleop SFT, step 1200: 40 %, 100 fixed episodes); nothing in the log points to a fault (every episode ended, the failures all ran the full 150 steps, the successes are spread from 34 to 144 steps).
+- pi0-FAST: about 4.5 % of the chunks could not be decoded in this run (the warnings the tokenizer printed, 109 distinct ones out of 2 427 chunks; the exact count is the `decode` of every episode, and the batch line now prints it). Those chunks are the model's zero action, executed for 5 steps.
+  The tokenizer's warnings (printed twice per chunk) are now dropped: the failures are counted instead.
+
 ## 7. What is written
 
 `<output-dir>/` (default `<run>/eval/`): `eval_protocol.json` (what the results were made with, and one entry per attempt), `episode_seeds.json`, `results/<step>.jsonl` and `.json`,

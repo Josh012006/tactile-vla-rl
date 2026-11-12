@@ -326,3 +326,16 @@ def test_a_fork_shares_the_compiled_sampler_and_the_weights_but_has_its_own_stre
     assert np.abs(fork.plan(obs, "p").raw - pol.plan(obs, "p").raw).max() > 1e-4
     shared = [a is b for a, b in zip(jax.tree.leaves(pol.state), jax.tree.leaves(fork.state))]
     assert sum(shared) > 0.9 * len(shared)                                                   # all but the replaced parameters are the SAME device arrays: N forks hold one base model
+
+
+def test_the_fast_decoders_warnings_are_dropped_and_the_others_are_not(pol, caplog):
+    import logging
+    from src.models import openpi_policy as OP
+    OP.silence_fast_decoder_warnings()
+    OP.silence_fast_decoder_warnings()                                               # once
+    assert sum(isinstance(f, OP._QuietFastDecoder) for f in logging.getLogger().filters) == 1      # noqa: SLF001
+    flt = OP._QuietFastDecoder()                                                       # noqa: SLF001
+    rec = lambda msg: logging.LogRecord("root", logging.WARNING, __file__, 1, msg, (), None)
+    assert not flt.filter(rec("Error decoding tokens: cannot reshape array of size 79 into shape (8)"))
+    assert not flt.filter(rec("Tokens: [1008, 975]"))
+    assert flt.filter(rec("Token length (300) exceeds max length (256), truncating."))

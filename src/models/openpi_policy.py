@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import logging
 import time
 from typing import Dict, List, Optional, Sequence, Union
 
@@ -64,6 +65,22 @@ class DecodeStats:
                 "no_eos_rate": self.no_eos / n, "tokens_mean": self.tokens_sum / n, "tokens_max": self.tokens_max}
 
 
+class _QuietFastDecoder(logging.Filter):
+    """openpi's FAST tokenizer logs two warnings through the ROOT logger every time a token string cannot be decoded (`Error decoding tokens: ...` and `Tokens: [...]`), and a chunk is decoded
+    twice here (by openpi's output transform and by `_record_decoding`): hundreds of lines per evaluation. They are dropped; the failures are COUNTED instead (`decode_stats`, `last_valid`, and the
+    `decode` of every episode record)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (message.startswith("Error decoding tokens") or message.startswith("Tokens: ["))
+
+
+def silence_fast_decoder_warnings() -> None:
+    root = logging.getLogger()
+    if not any(isinstance(f, _QuietFastDecoder) for f in root.filters):
+        root.addFilter(_QuietFastDecoder())
+
+
 def fast_extractor(policy):
     """openpi's `ExtractFASTActions` in the policy's output transforms (it holds the FAST tokenizer), or None when there is none."""
     for transform in getattr(getattr(policy, "_output_transform", None), "transforms", ()):
@@ -90,6 +107,8 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         self.decode_stats = DecodeStats()                    # pi0-FAST: what the generated tokens were like (cumulative, reset() to restart)
         self.last_valid: Optional[np.ndarray] = None         # pi0-FAST: (N, S) bool of the last `plan`: False = the chunk could not be decoded
         self._fast = None if self._native_samples else fast_extractor(policy)
+        if self._fast is not None:
+            silence_fast_decoder_warnings()
         self._graphdef, self._state = nnx.split(policy._model)                      # noqa: SLF001
         graphdef, kwargs, native = self._graphdef, dict(policy._sample_kwargs), self._native_samples   # noqa: SLF001
 

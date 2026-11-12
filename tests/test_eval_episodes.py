@@ -287,3 +287,8 @@ def test_only_the_title_is_small_and_a_long_one_is_wrapped_inside_the_figure(tmp
     box, frame = ax.title.get_window_extent(fig.canvas.get_renderer()), fig.bbox
     assert box.x0 >= frame.x0 and box.x1 <= frame.x1 and box.y0 >= frame.y0 and box.y1 <= frame.y1         # the title does not leave the picture
     plt.close(fig)
+
+
+def test_decode_totals_counts_the_chunks_of_pi0_fast_and_is_none_without_token_strings():
+    assert E.decode_totals([{"decode": None}, {}]) is None
+    assert E.decode_totals([{"decode": {"chunks": 30, "failed": 3}}, {"decode": {"chunks": 10, "failed": 0}}]) == {"chunks": 40, "failed": 3, "failed_rate": 0.075}
