@@ -17,6 +17,8 @@ demos:
   - demos/isaaclab/ForgePegInsert_Robotiq_noisy
 set:
   output_root: runs/sft/peg_insert
+  num_demos: 50                    # the first 50 episodes of the folder (all of them): expo-ft's `num_data_sft: 50` (`--data.num-demos=50`), written here so that the file says it
+  seed: 42                         # the SFT seed, really used by the training: LoRA initialisation, order of the rows, noise (expo-ft's SFT ran with openpi's default seed, 42)
 model_set:                       # touch off in every component the model has (it is off in the model YAML too: written here so that the file says it)
   vlm.use_tactile: false
   vlm.use_force: false

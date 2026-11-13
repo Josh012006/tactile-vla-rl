@@ -261,7 +261,10 @@ def test_the_first_five_sft_experiments_are_the_three_pi05_runs_and_the_pair_of_
         assert exp["name"] == f"peg_insert_{f.stem}" and exp["name"] not in names                          # clear, and one folder per run
         names.add(exp["name"])
         assert exp["demos"] == [f"demos/isaaclab/ForgePegInsert_Robotiq_{demos_type}"]
-        assert exp["set"] == {"output_root": "runs/sft/peg_insert"}
+        assert exp["set"] == {"output_root": "runs/sft/peg_insert", "num_demos": 50, "seed": 42}          # said in the file: expo-ft's 50 demonstrations and openpi's default seed
+        from src.algos import sft
+        cfg_sft = sft.load_config(overrides=exp["set"])                                                  # what scripts/sft.py builds from the experiment: the training reads cfg.seed (LoRA init, rows, noise), cfg.num_demos
+        assert (cfg_sft.num_demos, cfg_sft.seed) == (50, 42)
         cfg = load_model_cfg(model)
         settings = parse_model_settings(apply_overrides(cfg, cli.model_overrides(cfg, exp["full"], exp["model_set"])))
         assert settings.any_lora and not settings.active_touch                                           # LoRA, and no touch in any component
