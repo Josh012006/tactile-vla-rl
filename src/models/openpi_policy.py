@@ -248,25 +248,19 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         return np.stack(chunks).reshape(n, s, *chunks[0].shape), infer_ms
 
     # -- candidates for the RL methods (docs/algos/rl.md) ----------------------------------------------------------------------
-    @property
-    def native_samples(self) -> bool:
-        """True when the S samples of a state are drawn inside ONE model call (pi0.5 / pi0: the prefix is computed once); False for pi0-FAST (one row per sample)."""
-        return self._native_samples
-
     def sample_candidates(self, obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], num_samples: int, *,
                           row_seeds: Optional[Sequence[int]] = None, pad_to: Optional[int] = None) -> Candidates:
         """`plan` that also returns the chunks in the model's NORMALISED space (the first 8 dimensions of what the model outputs, before the output transforms) and the state rows that bring
-        them back to the env's space (`normalized_to_targets`). The env-space chunks are `plan`'s own, unchanged. pi0.5 / pi0 only: pi0-FAST's output is a token string whose normalised chunk
-        is the middle of its output transforms (ExtractFASTActions), to be taken out at the step of docs/algos/rl.md that prepares its path."""
+        them back to the env's space (`normalized_to_targets`). The env-space chunks are `plan`'s own, unchanged. pi0.5 / pi0 only (the S samples are drawn inside one model call): the RL methods
+        are for them, pi0-FAST is not part of them (docs/algos/rl.md)."""
         if not self._native_samples:
-            raise NotImplementedError("sample_candidates: pi0-FAST's candidates are token strings; their normalised chunks are decoded inside the output transforms (not wired yet)")
+            raise ValueError("sample_candidates: the RL methods are for pi0.5 / pi0 (samples drawn inside one model call), not pi0-FAST")
         plan = self.plan(obs, prompt, num_samples, row_seeds=row_seeds, pad_to=pad_to)
         out, state = self.last_sample
         n = plan.targets.shape[0]
         out = np.asarray(out, dtype=np.float32)
         normalized = out.reshape(n, num_samples, *out.shape[1:])[..., :P.ACTION_DIM]            # (environment, sample)-major, as in `raw_chunks`
-        valid = np.ones((n, num_samples), bool) if self.last_valid is None else np.asarray(self.last_valid, bool)
-        return Candidates(normalized=np.ascontiguousarray(normalized), states=np.asarray(state[:n], dtype=np.float32), targets=plan.targets, valid=valid, infer_ms=plan.infer_ms)
+        return Candidates(normalized=np.ascontiguousarray(normalized), states=np.asarray(state[:n], dtype=np.float32), targets=plan.targets, infer_ms=plan.infer_ms)
 
     def normalized_to_targets(self, normalized: np.ndarray, states: np.ndarray, joints: np.ndarray) -> np.ndarray:
         """The env's chunks (N, S, H, 8) (absolute joint targets + gripper) of normalised chunks (N, S, H, 8), through the SAME output transforms as `plan`: for the chunks `sample_candidates`

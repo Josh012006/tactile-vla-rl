@@ -16,7 +16,7 @@ at the end combines the two with `--steps` and `--replan` and is an ESTIMATE (it
     sbatch jobs/job_eval_sft.sh --run <run> --steps 0 --n-episodes 100 --envs-per-server 100 --output-dir <a probe folder>
 whose log prints the wall time of every batch.
 With `--num-samples S1 S2 ...` (default 1) every batch size is measured for each S: `plan(obs, prompt, num_samples=S)`, S candidate chunks per row, as the RL methods sample them (docs/algos/rl.md).
-pi0.5 draws the S samples inside one model call (the prefix is computed once, `num_samples`), pi0-FAST repeats every row S times (B * S rows in the call: `pad_to` = B * S, so use small B for it).
+pi0.5 draws the S samples inside one model call (the prefix is computed once, `num_samples`). S > 1 is refused for pi0-FAST: the RL methods are pi0.5's (docs/algos/rl.md).
 For S > 1 the estimate also gives the time to recompute the candidates of every state of the PA-RL buffer (the cache refresh after each distillation epoch: `--refresh-states`, default the
 whole run of the spec: 1000 episodes in rounds of 50 after 50 warm-up episodes, the `--steps` / `--replan` plans per episode, refreshed after every round) at the measured time per row.
 The split is measured LAST: if it fails while M fit alone above, an earlier out-of-memory may be the cause (fragmentation): run it alone (`--batch-sizes 1 --split M TOTAL`).
@@ -82,6 +82,8 @@ def measure(policy, batch_sizes: Sequence[int], repeats: int, prompt: str = PROM
             memory: Callable[[], dict] = device_memory, say: Callable[[str], None] = print, max_rows: Optional[int] = None, num_samples: int = 1) -> List[dict]:
     """For every batch size B (in increasing order): the time of the first call (it compiles) and of `repeats` more, the way an evaluation calls the policy, with `num_samples` candidate
     chunks per row. With `max_rows` the policy splits a batch larger than that in equal calls (`policy.max_rows`, set for the measurement and put back)."""
+    if num_samples > 1 and not getattr(policy, "_native_samples", True):
+        raise ValueError("num_samples > 1 is for pi0.5 / pi0 (the samples are drawn inside one model call): the RL methods are not pi0-FAST's")
     out = []
     previous = getattr(policy, "max_rows", None)
     policy.max_rows = max_rows
@@ -95,29 +97,27 @@ def _measure(policy, batch_sizes, repeats, prompt, clock, memory, say, max_rows,
     for b in sorted(set(int(x) for x in batch_sizes)):
         obs = batch_obs(b)
         seeds = [plan_seed(1000 + r, 0) for r in range(b)]
-        native = getattr(policy, "_native_samples", True)                # pi0.5 / pi0: the samples are drawn inside the call; pi0-FAST: one model row per sample
-        model_rows = b if native else b * num_samples
         times = []
         try:
             for call in range(repeats + 1):
                 t0 = clock()
-                plan = policy.plan(obs, prompt, num_samples=num_samples, row_seeds=seeds, pad_to=model_rows)
+                plan = policy.plan(obs, prompt, num_samples=num_samples, row_seeds=seeds, pad_to=b)
                 times.append(1e3 * (clock() - t0))
                 if plan.targets.shape[0] != b:
                     raise RuntimeError(f"asked for {b} rows, the policy returned {plan.targets.shape[0]}")
         except RuntimeError as e:                                       # XLA's out-of-memory is a RuntimeError (XlaRuntimeError): the largest batch that fits is the result
             if "returned" in str(e):
                 raise
-            out.append({"batch": b, "num_samples": num_samples, "model_rows": model_rows, "failed": str(e).strip().splitlines()[0][:300], "memory": memory()})
+            out.append({"batch": b, "num_samples": num_samples, "failed": str(e).strip().splitlines()[0][:300], "memory": memory()})
             say(f"  B={b:<4} S={num_samples:<3} FAILED: {out[-1]['failed']}")
             break
         first, rest = times[0], times[1:]
-        row = {"batch": b, "num_samples": num_samples, "model_rows": model_rows, "first_call_ms": round(first, 1), "calls": len(rest), "median_ms": round(statistics.median(rest), 1) if rest else None,
+        row = {"batch": b, "num_samples": num_samples, "first_call_ms": round(first, 1), "calls": len(rest), "median_ms": round(statistics.median(rest), 1) if rest else None,
                "min_ms": round(min(rest), 1) if rest else None, "max_ms": round(max(rest), 1) if rest else None,
                "median_ms_per_row": round(statistics.median(rest) / b, 2) if rest else None,
                "median_ms_per_candidate": round(statistics.median(rest) / (b * num_samples), 3) if rest else None, "memory": memory()}
         if max_rows is not None:
-            row.update({"max_rows": max_rows, **split_calls(model_rows, max_rows)})
+            row.update({"max_rows": max_rows, **split_calls(b, max_rows)})
         out.append(row)
         say(f"  B={b:<4} S={num_samples:<3}{'' if max_rows is None else f' (split: {row_split_text(row)})'} first call {first:9.1f} ms | median {row['median_ms']} ms (min {row['min_ms']}, max {row['max_ms']}) = {row['median_ms_per_row']} ms per row | memory {row['memory'].get('peak_bytes_in_use', 0) / 2 ** 30:.2f} GiB peak")
     return out
@@ -151,11 +151,11 @@ def estimate(rows: List[dict], steps: int, replan: int, episodes: Optional[int] 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", required=True, help="configs/model/<name>.yaml (pi05 or pi0_fast)")
+    ap.add_argument("--model", required=True, help="configs/model/<name>.yaml (pi05 or pi0_fast; pi0_fast only with one candidate per row)")
     ap.add_argument("--model-set", action="append", default=[], metavar="KEY=VALUE", help="override a key of the model YAML: <component>.<key>")
     ap.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 8, 32, 64, 100], help="rows per model call (default 1 8 32 64 100)")
     ap.add_argument("--split", type=int, nargs=2, metavar=("M", "TOTAL"), help="also measure TOTAL rows in one call split in equal calls of at most M rows (what the evaluation does with K = TOTAL)")
-    ap.add_argument("--num-samples", type=int, nargs="+", default=[1], metavar="S", help="candidate chunks per row to measure, each batch size for each S (default 1; RL: 1 32). pi0-FAST calls hold B * S rows")
+    ap.add_argument("--num-samples", type=int, nargs="+", default=[1], metavar="S", help="candidate chunks per row to measure, each batch size for each S (default 1; RL: 1 32; pi0.5 only)")
     ap.add_argument("--refresh-states", type=int, default=None, help="states whose candidates the cache refresh recomputes, for the estimate (default: the whole PA-RL run of docs/algos/rl.md for --steps / --replan)")
     ap.add_argument("--repeats", type=int, default=5, help="timed calls per batch size after the first, which compiles (default 5)")
     ap.add_argument("--steps", type=int, default=150, help="episode length of the estimate (default 150)")

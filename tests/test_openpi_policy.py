@@ -346,7 +346,7 @@ def test_sample_candidates_gives_plans_own_chunks_plus_their_normalised_form_and
     obs = env_obs(3)
     cands = pol.sample_candidates(obs, "insert the peg", 4, row_seeds=[1, 2, 3], pad_to=4)
     plan = pol.plan(obs, "insert the peg", 4, row_seeds=[1, 2, 3], pad_to=4)                        # the same seeds: the same chunks
-    assert pol.native_samples and cands.normalized.shape == (3, 4, H, P.ACTION_DIM) and cands.targets.shape == plan.targets.shape and cands.valid.all()
+    assert cands.normalized.shape == (3, 4, H, P.ACTION_DIM) and cands.targets.shape == plan.targets.shape
     assert np.allclose(cands.targets, plan.targets, atol=1e-5)
     back = pol.normalized_to_targets(cands.normalized, cands.states, obs[P.JOINT_POSITION])
     assert np.allclose(back, cands.targets, atol=1e-5)

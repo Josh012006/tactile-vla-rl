@@ -1,4 +1,4 @@
-"""The candidates of the RL methods: k chunks sampled from the VLA at a state, and the cache that keeps them. Pure numpy (the model is behind `policy.sample_candidates`): it can be read and tested
+"""The candidates of the RL methods: k chunks sampled from the VLA at a state, and the cache that keeps them. Pure numpy (the model is behind `policy.sample_candidates`, pi0.5 / pi0): it can be read and tested
 anywhere. Design and decisions: docs/algos/rl.md (sections 2 and 3).
 
     sampler = CandidateSampler(policy, cfg)                           # cfg: src/algos/rl_config.RLConfig
@@ -37,20 +37,15 @@ def concat_candidates(parts: Sequence[Candidates]) -> Candidates:
     if not parts:
         raise ValueError("no candidates to join")
     return Candidates(normalized=np.concatenate([p.normalized for p in parts]), states=np.concatenate([p.states for p in parts]), targets=np.concatenate([p.targets for p in parts]),
-                      valid=np.concatenate([p.valid for p in parts]), infer_ms=float(sum(p.infer_ms for p in parts)))
+                      infer_ms=float(sum(p.infer_ms for p in parts)))
 
 
 class CandidateSampler:
-    """k candidates per environment from a policy with `sample_candidates`, in model calls of a fixed shape.
-
-    pi0.5 / pi0 (samples inside the call): `rows_per_sample_call` environments per call (50 x 32 samples does not fit on an L40S, measured), every call padded to exactly that many rows: ONE
-    compilation whatever the number of environments. pi0-FAST (one model row per sample): one environment per call, its k rows split in calls of at most `rows_per_sample_call` rows
-    (`policy.max_rows`, put back afterwards)."""
+    """k candidates per environment from a pi0.5 / pi0 policy (`sample_candidates`), in model calls of a fixed shape: `rows_per_sample_call` environments per call (50 x 32 samples does not fit
+    on an L40S, measured, docs/algos/rl.md section 5), every call padded to exactly that many rows, so ONE compilation whatever the number of environments."""
 
     def __init__(self, policy, cfg: RLConfig):
-        self.policy, self.k, self.rows = policy, cfg.num_candidates, cfg.rows_per_sample_call
-        self.native = bool(getattr(policy, "native_samples", True))
-        self.envs_per_call = self.rows if self.native else 1
+        self.policy, self.k, self.envs_per_call = policy, cfg.num_candidates, cfg.rows_per_sample_call
 
     def sample(self, obs: Dict[str, np.ndarray], prompt: Prompts, row_seeds: Sequence[int]) -> Candidates:
         """k candidates for every environment of `obs`. `row_seeds`: one int per environment (the noise of an environment's candidates is a function of ITS seed alone)."""
@@ -60,18 +55,10 @@ class CandidateSampler:
         prompts = [prompt] * n if isinstance(prompt, str) else list(prompt)
         if len(prompts) != n:
             raise ValueError(f"{len(prompts)} prompts for {n} environments")
-        previous = getattr(self.policy, "max_rows", None)
-        if not self.native:
-            self.policy.max_rows = self.rows
         parts: List[Candidates] = []
-        try:
-            for start in range(0, n, self.envs_per_call):
-                idx = list(range(start, min(n, start + self.envs_per_call)))
-                pad = self.envs_per_call if self.native else self.k * self.envs_per_call
-                parts.append(self.policy.sample_candidates(take(obs, idx), [prompts[i] for i in idx], self.k, row_seeds=[int(row_seeds[i]) for i in idx], pad_to=pad))
-        finally:
-            if not self.native:
-                self.policy.max_rows = previous
+        for start in range(0, n, self.envs_per_call):
+            idx = list(range(start, min(n, start + self.envs_per_call)))
+            parts.append(self.policy.sample_candidates(take(obs, idx), [prompts[i] for i in idx], self.k, row_seeds=[int(row_seeds[i]) for i in idx], pad_to=self.envs_per_call))
         return concat_candidates(parts)
 
 
@@ -90,7 +77,6 @@ class CandidateCache:
     def _alloc(self, capacity: int) -> None:
         self.normalized = np.zeros((capacity, self.k, self.h, self.d), np.float32)
         self.states = np.zeros((capacity, self.ds), np.float32)
-        self.valid = np.zeros((capacity, self.k), bool)
         self.version = np.full(capacity, -1, np.int64)
 
     @property
@@ -99,14 +85,14 @@ class CandidateCache:
 
     @property
     def nbytes(self) -> int:
-        return int(self.normalized.nbytes + self.states.nbytes + self.valid.nbytes + self.version.nbytes)
+        return int(self.normalized.nbytes + self.states.nbytes + self.version.nbytes)
 
     def _grow(self, need: int) -> None:
         if need <= self.capacity:
             return
-        old = (self.normalized, self.states, self.valid, self.version)
+        old = (self.normalized, self.states, self.version)
         self._alloc(max(need, 2 * self.capacity))
-        for new, was in zip((self.normalized, self.states, self.valid, self.version), old):
+        for new, was in zip((self.normalized, self.states, self.version), old):
             new[:len(was)] = was
 
     def put(self, ids: Sequence[int], cands: Candidates, version: int) -> None:
@@ -121,20 +107,20 @@ class CandidateCache:
         if not len(ids):
             return
         self._grow(int(ids.max()) + 1)
-        self.normalized[ids], self.states[ids], self.valid[ids], self.version[ids] = cands.normalized, cands.states, cands.valid, version
+        self.normalized[ids], self.states[ids], self.version[ids] = cands.normalized, cands.states, version
         self.size = max(self.size, int(ids.max()) + 1)
 
     def has(self, ids: Sequence[int]) -> np.ndarray:
         ids = np.asarray(ids, np.int64)
         return (ids >= 0) & (ids < self.capacity) & (self.version[np.clip(ids, 0, self.capacity - 1)] >= 0)
 
-    def get(self, ids: Sequence[int]) -> Tuple[np.ndarray, np.ndarray]:
-        """(normalized (N, k, H, 8), valid (N, k)) of the states `ids`; a state with nothing stored is an error, not zeros."""
+    def get(self, ids: Sequence[int]) -> np.ndarray:
+        """The normalised candidates (N, k, H, 8) of the states `ids`; a state with nothing stored is an error, not zeros."""
         ids = np.asarray(ids, np.int64)
         missing = ids[~self.has(ids)]
         if len(missing):
             raise KeyError(f"no candidates stored for states {missing.tolist()[:8]}")
-        return self.normalized[ids], self.valid[ids]
+        return self.normalized[ids]
 
     def states_of(self, ids: Sequence[int]) -> np.ndarray:
         self.get(ids)

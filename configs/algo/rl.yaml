@@ -1,4 +1,4 @@
-# Online RL fine-tuning of a VLA on the FORGE PegInsert task: Best-of-N and PA-RL (Policy Agnostic RL, Mark et al., arXiv 2412.06685v1). The ALGORITHM side only: the model, the SFT
+# Online RL fine-tuning of pi0.5 (pi0 shares its sampler; pi0-FAST is NOT part of these methods, docs/algos/rl.md) on the FORGE PegInsert task: Best-of-N and PA-RL (Policy Agnostic RL, Mark et al., arXiv 2412.06685v1). The ALGORITHM side only: the model, the SFT
 # checkpoint it starts from and the method are chosen by the experiment file (configs/experiment/rl/*.yaml). Design, decisions and sources of every value: docs/algos/rl.md.
 #
 # Rule: the DEFAULTS are the paper's (Appendix B.1, pp. 22-23). Where the paper has no value the comment says "group" (decided with Josue, 15 Nov. 2026) or "proposal", and docs/algos/rl.md
@@ -26,8 +26,8 @@ softmax_temperature: 1.0
 # K environments play K episodes with the critic and the VLA frozen; then the critic updates (UTD updates per environment step), then (parl) the distillation and the cache refresh.
 envs_per_batch: 50      # K (about 20 rounds for 1000 episodes)
 total_episodes: 1000    # online episodes in total (paper: 1000 in simulation); a multiple of envs_per_batch
-replan_steps: 0         # steps executed per chunk before the model is called again; 0 = half the model's chunk, as the evaluation (8 for pi0.5, 5 for pi0-FAST)
-rows_per_sample_call: 8 # environments per model call when sampling the k candidates (OpenPIPolicy.max_rows): 50 x 32 does not fit on an L40S (measured, docs/algos/rl.md section 5)
+replan_steps: 0         # steps executed per chunk before the model is called again; 0 = half the model's chunk, as the evaluation (8 for pi0.5)
+rows_per_sample_call: 8 # environments per model call when sampling the k candidates: 50 x 32 does not fit on an L40S (measured, docs/algos/rl.md section 5)
 
 # -- Critic (paper B.1, image domains; one critic + a delayed copy) --------------------------------------------------------------------
 critic_cameras: [exterior, wrist]   # group: both cameras
@@ -36,7 +36,7 @@ random_shift_px: 4                  # paper (Kumar et al. 2023)
 critic_hidden: [512, 512, 512]      # MLP, the action concatenated to the input of every layer (paper B.1)
 critic_lr: 3.0e-4                   # Adam (paper B.1)
 critic_batch_size: 256              # paper B.1
-utd: 1                              # critic updates per ENVIRONMENT step (group): 8 per plan for pi0.5, 5 for pi0-FAST
+utd: 1                              # critic updates per ENVIRONMENT step (group): 8 per plan for pi0.5
 gamma: 0.99                         # per plan: a plan (one chunk) is one transition (paper B.1; group)
 tau: 0.005                          # delayed target network: soft update (group; the paper gives none)
 step_reward: -1.0                   # per plan until success; 0 at success (paper B.1 reward bias -1; group). A time-out at the horizon is not terminal: the target bootstraps (group)

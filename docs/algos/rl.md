@@ -7,7 +7,7 @@ Rule: the defaults of the YAMLs are the paper's; where the paper has no value we
 
 ## 1. What is built
 
-Three methods, all on pi0.5 first (pi0-FAST has its path but comes after), all with ONE online-trained critic and UTD = 1, no ensemble, no pessimism (Jesse: a conservatism bias is likely harmful):
+Three methods, all on pi0.5 (scope below), all with ONE online-trained critic and UTD = 1, no ensemble, no pessimism (Jesse: a conservatism bias is likely harmful):
 
 | method | VLA | action executed in rollouts | action executed in evaluation |
 |---|---|---|---|
@@ -19,13 +19,15 @@ Best-of-N is Algorithm 2 of the paper without the distillation step, restricted 
 Tactile / force goes to the CRITIC ONLY (the SFT checkpoint is the same for every run and has not learned touch); the comparison is the same algorithm with the critic with and without touch.
 Evaluation is the paper's: the VLA WITH action optimisation at inference (so the critic, hence touch, is also used at evaluation). Group decision, 15 Nov. 2026.
 
+**Scope: pi0.5 only (decision of 15 Nov. 2026).** pi0-FAST is not part of these methods, and nothing of the RL code is wired to it. Two reasons measured or read: it decodes greedily as we run it (no sampling temperature is set, see src/models/interface.py), so the k candidates of a state would be identical unless a sampling temperature is added; and 32 candidates cost far too much (about 4 s per state, extrapolated from a probe with synthetic observations, 15 Nov. 2026: about 36 h of model for 1000 episodes of rollouts alone). pi0-FAST stays a baseline of the SFT part (docs/algos/sft.md).
+
 ## 2. Algorithm (paper, section 4, Alg. 1 and 2, pp. 7-8)
 
 - Stage I, action optimisation at a state s: sample k actions (chunks) from the VLA; **global**: keep the top m by Q; **local**: T steps `a <- a + alpha * grad_a Q(s, a)` on each kept action, a step being kept only if it
   raises Q (otherwise the loop of that action stops: Alg. 1 lines 5-9). The dataset action is NOT added to the set (group; the paper includes it in Alg. 1 line 3 but says it is only "sometimes helpful").
 - pi^Opt(a|s,m) = softmax over the optimised set of Q (temperature 1) (Eq. 4.3). In evaluation, and in Best-of-N, the argmax.
-- Stage II, distillation (PA-RL only): annotate every state of the buffer (warm-up data included, Eq. 4.4) with one action of pi^Opt, and train the VLA on it with its own loss (flow matching for pi0.5, cross-entropy on FAST tokens
-  for pi0-FAST: the existing `OpenPIPolicy.training_batch` / `loss`). Candidate to imitate: softmax sample or argmax, BOTH paths exist (YAML switch), chosen by the variance of the candidate Q-values (paper B.1, Tables 5-6:
+- Stage II, distillation (PA-RL only): annotate every state of the buffer (warm-up data included, Eq. 4.4) with one action of pi^Opt, and train the VLA on it with its own loss (flow matching for pi0.5: the existing
+  `OpenPIPolicy.training_batch` / `loss`). Candidate to imitate: softmax sample or argmax, BOTH paths exist (YAML switch), chosen by the variance of the candidate Q-values (paper B.1, Tables 5-6:
   CALVIN with std 0.02 is better with argmax, the kitchens with std 1.6-11.5 with softmax; no threshold is given). **The standard deviation of the candidates' Q is logged at every iteration** (group).
 - Critic target: the Bellman backup uses actions of pi^Opt at s' (paper, p. 9 and Fig. 16: using the base policy there makes fine-tuning unstable). The VLA's raw candidates of every state are CACHED with the transition
   (paper 5.2.2 and Appendix E); the optimisation (global ranking, local steps) is done on the fly with the current critic. The cache of Best-of-N never expires (the VLA never changes);
@@ -36,13 +38,13 @@ Evaluation is the paper's: the VLA WITH action optimisation at inference (so the
 
 | item | value | source |
 |---|---|---|
-| candidates k | 32 (both models) | paper B.1; group |
+| candidates k | 32 | paper B.1; group |
 | kept m (PA-RL) | 10 | paper B.1 |
 | Best-of-N | k = 32, argmax (m = 1), no local step | group |
 | local steps T / step alpha | 10 / 3e-4, in the model's normalised chunk space, no clipping | paper B.1; group (the paper gives no bounding) |
 | a step is kept only if Q rises | yes, per action | paper Alg. 1 |
 | dataset action in the candidate set | no | group |
-| critic count / UTD | 1 critic / 1 update per environment step (not per plan: 8 per plan for pi0.5, 5 for pi0-FAST) | group |
+| critic count / UTD | 1 critic / 1 update per environment step (not per plan: 8 per plan) | group |
 | critic | image encoder + MLP 3 x 512, the action concatenated to the input of every layer, random shift 4 px, Adam, lr 3e-4, batch 256 | paper B.1 (image domains, Kumar et al. 2023) |
 | critic inputs (state) | both cameras (exterior + wrist) resized to 128 x 128, a small CNN encoder trained from scratch with the critic (random shift 4 px), concatenated with the 7 joint positions and the gripper position, then the MLP above; the action input is the whole chunk (pi0.5: 16 x 8, normalised space). The tactile variant ADDS the touch features (taxels or force / torque, per robot) after the encoder; nothing else changes, so the comparison with / without touch is clean. Fallback if the Q values do not learn from ~20 000 transitions: a frozen pre-trained encoder (ResNet-18), not before | group (15 Nov. 2026); paper: from scratch with random shift, no camera or resolution given |
 | critic loss | Cal-QL (Eq. 3.3): TD in MSE with pi^Opt targets + alpha * (E[max(Q(s,a~VLA), V^mu(s))] - E[Q(s,a_data)]), alpha = 0.01 | paper B.1 (alpha 0.01 for CALVIN and the real robot; MSE there, HL-Gauss only when Q explodes); group: stay as close as possible to the paper (Jesse) |
@@ -67,11 +69,11 @@ Evaluation is the paper's: the VLA WITH action optimisation at inference (so the
 
 Candidate Q standard deviation (mean over states, and the distribution), Q mean / min / max and Q minus the Monte-Carlo discounted return of the visited states (over- and under-estimation, as the paper's Fig. 14), TD loss,
 success rate of the rollouts, the share of states where the argmax differs from the VLA's first sample, local optimisation: Q gain, share of accepted steps, L1 norm of the displacement (paper Fig. 13), distillation loss,
-and for pi0-FAST the share of undecodable chunks. Jesse's warning: value-estimation error (over- or under-estimation) drives many collapses, so the Q statistics are watched as much as the success rate.
+Jesse's warning: value-estimation error (over- or under-estimation) drives many collapses, so the Q statistics are watched as much as the success rate.
 
 ## 5. Costs
 
-MEASURED on 15 Nov. 2026 (L40S, policy limited to half of the card, `scripts/probe_batch_cost.py`, synthetic observations, 5 timed calls per row, logs 11716915 and 11716916):
+MEASURED on 15 Nov. 2026 (L40S, policy limited to half of the card, `scripts/probe_batch_cost.py`, synthetic observations, 5 timed calls per row, log 11716915):
 
 | model | rows x samples per call | median per call | per state |
 |---|---|---|---|
@@ -81,20 +83,15 @@ MEASURED on 15 Nov. 2026 (L40S, policy limited to half of the card, `scripts/pro
 | pi0.5 | 1 x 32 | 159 ms | 159 ms |
 | pi0.5 | 8 x 32 | 1 529 ms | 191 ms |
 | pi0.5 | 50 x 32 | out of memory (30 GiB asked, 24 GiB available) | - |
-| pi0-FAST | 1 x 1 | 417 ms | 417 ms |
-| pi0-FAST | 4 x 1 | 3 464 ms | 866 ms |
-| pi0-FAST | 1 x 8 | 1 086 ms | 1 086 ms |
-| pi0-FAST | 4 x 8, 1 x 32 | out of memory | - |
 
 - pi0.5: 32 candidates per state cost little more than the state itself (the prefix is computed once; 159-191 ms against 85-101 ms). The images' prefix is the floor (about 85 ms per state, about 5 h over the whole refresh even with one candidate).
-  Calls of 50 environments x 32 samples do not fit: the rollouts split them (`OpenPIPolicy.max_rows = 8`, so 7 calls of 8 for 50 environments). One round of 50 episodes: about 182 s of model (19 plans x 50 x 191 ms) + about 97 s of simulator = about 280 s, so about 93 min for 1000 episodes (estimate).
+  Calls of 50 environments x 32 samples do not fit: the rollouts split them (`rows_per_sample_call = 8` in `configs/algo/rl.yaml`, so 7 calls of 8 for 50 environments). One round of 50 episodes: about 182 s of model (19 plans x 50 x 191 ms) + about 97 s of simulator = about 280 s, so about 93 min for 1000 episodes (estimate).
 - Cache refresh of pi0.5 (every state of the buffer after every round, about 218 500 recomputations over the run): 9.6 h (calls of 1 row) to 11.6 h (calls of 8 rows), linear extrapolation. Decision: full refresh as the paper (section 3); the total cost of a run is to be brought back under 10 h AFTER everything is built (fewer steps or more parallelism), not before.
 - Distillation: about 8 h (3 400 steps at 8.7 s), estimate. Critic updates (UTD 1: about 150 000 updates of a small CNN + MLP) not measured yet.
-- pi0-FAST with k = 32 is NOT feasible as specified: about 4.3 s per state at 32 candidates (4 x the measure at 8), so about 36 h of model for 1000 episodes of rollouts (30 plans per episode) and over 400 h for the cache refresh (345 000 states). The decoding time depends on the content of the observations (the probe's are synthetic): an order of magnitude, to be redone with real observations. To be decided at step 8 (smaller k, or another solution).
 
 ## 6. Open points (no reference in the paper), to decide one at a time before the step that needs them
 
-1. Cost of a run: the target is under 10 h in total (group); the measured pieces (section 5) add up to more (refresh about 10-12 h, distillation about 8 h, rollouts about 1.5 h). To revisit once the implementation is complete: fewer distillation / refresh steps, more parallelism, pi0-FAST k.
+1. Cost of a run: the target is under 10 h in total (group); the measured pieces (section 5) add up to more (refresh about 10-12 h, distillation about 8 h, rollouts about 1.5 h). To revisit once the implementation is complete: fewer distillation / refresh steps, more parallelism.
 2. Which touch features exactly enter the tactile critic (taxel array vs force / torque, normalisation, history): decided at implementation step 3, when the tactile variant is built.
 
 Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillation epoch per round, which critic ranks (Q_theta) and evaluates (Q_bar), the critic's inputs, the distillation recipe, the code stack (JAX / Flax) and the cache refresh policy (full).
@@ -104,12 +101,10 @@ Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillat
 1. DONE (15 Nov. 2026): YAML defaults (`configs/algo/rl.yaml`, one experiment per method in `configs/experiment/rl/`) and their loader (`src/algos/rl_config.py`, `tests/test_rl_config.py`). Open: the SFT checkpoint each run starts from (`start: {run, step}` of the experiment, optional until the launch script exists).
 2. DONE (15 Nov. 2026): candidate sampler and cache (`src/algos/rl_candidates.py`, `tests/test_rl_candidates.py`; `OpenPIPolicy.sample_candidates` / `normalized_to_targets` and `Candidates` in `src/models/`, checked against the real transforms in `tests/test_openpi_policy.py`, which needs the `vla` group and was NOT run here).
    - The critic and the local ascent work in the model's NORMALISED chunk space (first 8 dimensions of the model output, before the output transforms): `sample_candidates` returns those chunks with the state rows, `normalized_to_targets` brings a chunk (chosen or moved) back to the env's space to be executed or distilled.
-   - `CandidateSampler`: pi0.5 in calls of `rows_per_sample_call` = 8 environments, every call padded to 8 (one compilation); pi0-FAST one environment per call, its k rows split by `max_rows`.
+   - `CandidateSampler`: pi0.5 in calls of `rows_per_sample_call` = 8 environments, every call padded to 8 (one compilation).
    - `CandidateCache`: by state id, with the version of the VLA that drew the candidates (Best-of-N: one version for ever; PA-RL: a new one after each distillation epoch; `stale_ids`), `refresh` recomputes them reading the buffer in chunks, with seeds that are a function of (seed, state id, version). About 16 KiB per state for pi0.5 (20 000 states: about 330 MB).
-   - pi0-FAST is NOT wired (`sample_candidates` raises): its candidates are token strings whose normalised chunk is inside the output transforms, and it has NO sampling temperature (it decodes greedily, so the k candidates of a state would be identical). Both are for step 8.
 3. Critic (without touch, then the touch inputs) and the replay buffer.
 4. Action optimisation (global, local with the acceptance rule) on a toy critic, then on the real one.
 5. Critic update with pi^Opt targets and the warm-up phase; measure the real cost.
 6. Best-of-N rollouts and its evaluation (environment servers of the evaluation).
 7. Distillation (pi0.5) and the cache refresh: PA-RL variants A and B.
-8. pi0-FAST path.

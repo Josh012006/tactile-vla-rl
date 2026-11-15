@@ -2,6 +2,7 @@
 import types
 
 import numpy as np
+import pytest
 
 from scripts import probe_batch_cost as PB
 from src.envs import protocol as P
@@ -67,20 +68,14 @@ def test_split_measures_one_plan_of_many_rows_cut_in_equal_calls_and_puts_max_ro
     assert PB.split_calls(100, 16) == {"call_rows": 15, "calls_per_plan": 7} and PB.estimate(rows, 150, 8)[0]["batch"] == 100
 
 
-def test_num_samples_goes_to_the_policy_and_pi0_fast_pads_to_one_model_row_per_sample():
-    native, fast = Fake(native=True), Fake(native=False)
-    a = PB.measure(native, [4], 2, memory=lambda: {}, say=lambda m: None, num_samples=32)
-    b = PB.measure(fast, [4], 2, memory=lambda: {}, say=lambda m: None, num_samples=8)
-    assert set(native.samples) == {32} and all(c[2] == 4 for c in native.calls)               # pi0.5: the samples are inside the call, B rows
-    assert set(fast.samples) == {8} and all(c[2] == 32 for c in fast.calls)                   # pi0-FAST: B * S rows
-    assert (a[0]["num_samples"], a[0]["model_rows"]) == (32, 4) and (b[0]["num_samples"], b[0]["model_rows"]) == (8, 32)
-    assert a[0]["median_ms_per_candidate"] == round(a[0]["median_ms"] / (4 * 32), 3)
-
-
-def test_the_split_of_pi0_fast_counts_model_rows_not_environments():
-    fast = Fake(native=False)
-    rows = PB.measure(fast, [10], 1, memory=lambda: {}, say=lambda m: None, max_rows=16, num_samples=8)       # 80 model rows, calls of at most 16
-    assert (rows[0]["call_rows"], rows[0]["calls_per_plan"]) == (16, 5)
+def test_num_samples_goes_to_the_policy_with_one_row_per_environment_and_pi0_fast_refuses_it():
+    policy = Fake()
+    rows = PB.measure(policy, [4], 2, memory=lambda: {}, say=lambda m: None, num_samples=32)
+    assert set(policy.samples) == {32} and all(c[2] == 4 for c in policy.calls)                 # the samples are inside the call: B rows
+    assert rows[0]["num_samples"] == 32 and rows[0]["median_ms_per_candidate"] == round(rows[0]["median_ms"] / (4 * 32), 3)
+    with pytest.raises(ValueError, match="pi0.5"):
+        PB.measure(Fake(native=False), [4], 2, memory=lambda: {}, say=lambda m: None, num_samples=8)
+    assert PB.measure(Fake(native=False), [4], 2, memory=lambda: {}, say=lambda m: None)[0]["num_samples"] == 1      # one candidate per row: as before, pi0-FAST included
 
 
 def test_the_estimate_of_the_cache_refresh_uses_the_time_per_row_and_the_runs_states():
