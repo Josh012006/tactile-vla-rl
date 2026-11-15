@@ -22,6 +22,13 @@ def make_run(tmp_path, steps=(500, 1000, 1500), horizon=16, complete=True):
 
 
 # -- the run and its checkpoints --------------------------------------------------------------------------------------------------------
+def test_run_seed_is_the_one_of_the_sft_block_and_0_without(tmp_path):
+    assert ES.run_seed({"sft": {"seed": 42}}) == 42 and ES.run_seed({"sft": {"seed": 0}}) == 0
+    assert ES.run_seed({"sft": {}}) == 0 and ES.run_seed({"adopted_from": "x"}) == 0 and ES.run_seed({"sft": None}) == 0
+    run = make_run(tmp_path)
+    assert ES.run_seed(json.loads((run / "config.json").read_text())) == 0
+
+
 def test_a_run_is_found_by_path_or_by_name_and_only_complete_checkpoints_count(tmp_path, monkeypatch):
     run = make_run(tmp_path)
     (run / "checkpoints" / "2000").mkdir()                                            # being written: no meta.json yet

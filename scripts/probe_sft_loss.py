@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from scripts.eval_sft import discover_checkpoints, find_run_dir, with_deterministic_xla
+from scripts.eval_sft import discover_checkpoints, find_run_dir, run_seed, with_deterministic_xla
 from scripts.probe_eval_parallel import probe_tag
 from scripts.sft import enable_compilation_cache
 from src.eval.sweep import gpu_name
@@ -190,7 +190,7 @@ def main(argv=None) -> int:
         run_dir, config = runs[name]
         model_cfg = config["model_cfg"]
         print(f"\nloading {run_dir.name} ({model_cfg['name']})", flush=True)
-        policy = load_model(model_cfg, seed=0)
+        policy = load_model(model_cfg, seed=run_seed(config))                  # step 0 = the LoRA initialisation of the run's own seed
         initial = policy.state
         micro = args.micro_batch or DEFAULT_MICRO_BATCH.get(model_cfg.get("family", ""), 4)
         batches = sft_mod.micro_batches(policy, train, rows, min(micro, len(rows)))

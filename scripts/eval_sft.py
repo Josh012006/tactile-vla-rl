@@ -9,7 +9,7 @@ Run it through jobs/job_eval_sft.sh (an env server is started for each checkpoin
 
 What is evaluated. `--run` is a run folder of scripts/sft.py (runs/sft/peg_insert/<name>, or a probe under runs/sft/probing/): its config.json gives the model YAML with its
 overrides and normalisation statistics, and checkpoints/<step>/ the trained parameters. Step 0 is the run's own initial state: the same model, the same LoRA initialisation
-(openpi's, seed 0), nothing trained: the point the curve starts from (`--no-initial` leaves it out). The normalisation statistics are the run's too: the file its model YAML names, which
+(openpi's, drawn from the seed of the run's `sft` block in config.json), nothing trained: the point the curve starts from (`--no-initial` leaves it out). The normalisation statistics are the run's too: the file its model YAML names, which
 the SFT copied into every checkpoint (checkpoints/<step>/assets/); the two are compared byte for byte before anything starts, and a difference is refused (check_norm_stats).
 
 The episodes. One env server per checkpoint holds `--envs-per-server` K environments (default 100) that play their episodes TOGETHER: episode i is environment i % K of batch i // K, and
@@ -78,6 +78,13 @@ def find_run_dir(name_or_path: str) -> Path:
         if (candidate / "config.json").exists():
             return candidate.resolve()
     raise SystemExit(f"no SFT run {name_or_path!r} (looked for config.json at that path and under runs/sft/peg_insert/ and runs/sft/probing/)")
+
+
+def run_seed(config: dict) -> int:
+    """The `seed` the run was trained with (the `sft` block of its config.json): it fixes the LoRA initialisation, which is the run's step 0. A run without one (an adopted expo-ft
+    checkpoint holds every weight, its seed does not matter) gets 0."""
+    block = config.get("sft") or {}
+    return int(block.get("seed", 0))
 
 
 def discover_checkpoints(run_dir: Path) -> Dict[int, Path]:
@@ -347,7 +354,7 @@ def main(argv=None) -> int:
     from src.algos import sft as sft_mod
     from src.models import load_model
     print(f"loading the model ({model_cfg['name']}), XLA_FLAGS={os.environ['XLA_FLAGS']}", flush=True)
-    base = load_model(model_cfg, seed=0)
+    base = load_model(model_cfg, seed=run_seed(run_config))                  # the LoRA initialisation of the run's own seed: its step 0
     initial = base.state                                                     # the run's initial state: the policy as loaded
     base.max_rows = protocol["model_batch"]                                   # forks (one per worker) inherit it
 

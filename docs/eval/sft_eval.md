@@ -43,7 +43,7 @@ a requeue, send the command again. Resources for one worker: 1 L40S, 6 CPUs, 40 
   to evaluate and refuses if one differs or has no copy (the folder was recomputed or edited after the training: put the checkpoint's copy back, or evaluate with the YAML the run used). The file's sha256
   is printed and frozen in `eval_protocol.json` (`norm_stats_sha`), so a folder cannot be resumed with other statistics. A model YAML without a `norm_stats` block uses the base checkpoint's own (DROID's)
   statistics on both sides: nothing to compare. Step 0 is built from the same YAML, so it has the run's statistics by construction.
-- **Step 0** is the run's own initial state: the same model with the same LoRA initialisation (openpi's, seed 0) and nothing trained. This is the point the curve starts from, and also where an RL run
+- **Step 0** is the run's own initial state: the same model with the same LoRA initialisation (openpi's, drawn from the `seed` of the run, read from the `sft` block of its config.json; 0 for a run without one) and nothing trained. This is the point the curve starts from, and also where an RL run
   starts from SFT's checkpoint. (`--no-initial` leaves it out of the default list; a checkpoint list given with `--steps` is exact.)
 - **The episodes.** `--seed` (default 42) generates the `--n-episodes` seeds once (`np.random.default_rng(seed).integers(0, 2**31 - 1, n)`, expo-ft's recipe), kept in `<output-dir>/episode_seeds.json`.
   **K environments per server** (`--envs-per-server`, default 100, frozen in `eval_protocol.json` as `num_envs`). Episode *i* is environment `i % K` of batch `i // K`; a batch is one
@@ -80,7 +80,7 @@ for a given sequence of episodes, and it is the history dependence of N1. Until 
 | shape of the model call | the batch is padded to a power of two | the same | `pad_to=K`: always K rows (padding repeats the last row), whatever the number of episodes still running |
 | GPU kernels | reductions and scatters may differ from run to run | the same | `XLA_FLAGS=--xla_gpu_deterministic_ops=true` (added by the script and the jobs) |
 | compilation | autotuning could pick another algorithm in another compilation | the same | all the workers share **one** compiled sampler (`OpenPIPolicy.fork`) |
-| LoRA initialisation (step 0) | `build_params_like_expo_ft(seed=0)`: fixed | the same | nothing to do |
+| LoRA initialisation (step 0) | `build_params_like_expo_ft(seed=<seed of the run>)`: fixed by the run's config.json | the same | nothing to do |
 | physics of the environment | bit-identical for an identical sequence of calls from a **fresh server** over the 20 steps that were tested (G1 of `docs/envs/isaaclab_env.md`); **not measured over 150 steps, and an evaluation of 150 steps was not reproducible** (above); after other episodes the start of an episode can differ slightly (N1) | the same | a **fresh server for every checkpoint** (and one real reset for a checkpoint of at most K episodes); one GPU model for a whole curve (kept: it is what G1 needs, and costs nothing) |
 | images | **differ between fresh servers** (sensor-level noise, above) | the same | accepted: kept the default rendering, the comparison is statistical. The fingerprints below do not cover the images |
 
