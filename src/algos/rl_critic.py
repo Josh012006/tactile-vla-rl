@@ -3,6 +3,8 @@
     net = CriticNet.from_config(cfg)
     state = init_critic(net, jax.random.key(0), horizon=16)                # CriticState: params, target_params
     q = q_values(net, state.params, s, actions)                            # s: the state dict of the buffer (images by camera, "proprio", "touch"); actions (B, N, H * 8) or (B, N, H, 8): N candidates per state -> (B, N); a state is encoded ONCE
+    z = encode_state(net, state.params, s)                                 # the state's features alone (the CNNs)
+    q = score(net, state.params, z, actions)                               # the MLP alone: Q of N chunks given the features (q_values = the two in a row); the action optimisation repeats only this
     state = soft_update(state, tau=0.005)                                  # target <- tau * params + (1 - tau) * target
 
 Architecture (paper B.1 for the shape of the MLP and the random shift; the rest is ours, the paper gives none):
@@ -74,25 +76,30 @@ class CriticNet(nn.Module):
         return cls(cameras=tuple(cfg.critic_cameras), hidden=tuple(cfg.critic_hidden), image_size=cfg.critic_image_size, shift_px=cfg.random_shift_px, touch_dim=cfg.critic_touch.dim)
 
     @nn.compact
-    def __call__(self, state: Dict[str, jnp.ndarray], actions: jnp.ndarray, train: bool = False) -> jnp.ndarray:
+    def __call__(self, state: Optional[Dict[str, jnp.ndarray]], actions: Optional[jnp.ndarray], train: bool = False, features: Optional[jnp.ndarray] = None, return_features: bool = False) -> jnp.ndarray:
         """state: camera -> uint8 (B, H, W, 3), "proprio" (B, 8) and, with `touch_dim`, "touch" (B, touch_dim); actions (B, N, A): N chunks per state, A = H * 8 flattened. Returns Q (B, N).
-        `train` switches on the random shift (it draws from the `shift` RNG stream: `apply(..., rngs={"shift": key})`)."""
-        features = []
-        for name in self.cameras:
-            x = preprocess(state[name], self.image_size)
-            if train and self.shift_px > 0:
-                x = random_shift(self.make_rng("shift"), x, self.shift_px)
-            features.append(ImageEncoder(name=f"encoder_{name}")(x))
-        features.append(state["proprio"].astype(jnp.float32))
-        if self.touch_dim:
-            if "touch" not in state or state["touch"].shape[-1] != self.touch_dim:
-                raise ValueError(f"the critic sees touch ({self.touch_dim} values) but the state has {None if 'touch' not in state else state['touch'].shape}")
-            features.append(state["touch"].astype(jnp.float32))
-        elif "touch" in state:
-            raise ValueError("the state carries touch but the critic was built without it (touch_dim = 0)")
-        z = jnp.concatenate(features, axis=-1)                                                 # (B, F)
+        `train` switches on the random shift (it draws from the `shift` RNG stream: `apply(..., rngs={"shift": key})`).
+        The two halves can be run apart (the action optimisation changes the chunk many times at a fixed state): `return_features=True` stops after the state's encoding and returns it (B, F);
+        `features=` gives that encoding back and skips the encoders (then `state` is not read). `encode_state` and `score` below wrap the two."""
+        if features is None:
+            features_list = []
+            for name in self.cameras:
+                x = preprocess(state[name], self.image_size)
+                if train and self.shift_px > 0:
+                    x = random_shift(self.make_rng("shift"), x, self.shift_px)
+                features_list.append(ImageEncoder(name=f"encoder_{name}")(x))
+            features_list.append(state["proprio"].astype(jnp.float32))
+            if self.touch_dim:
+                if "touch" not in state or state["touch"].shape[-1] != self.touch_dim:
+                    raise ValueError(f"the critic sees touch ({self.touch_dim} values) but the state has {None if 'touch' not in state else state['touch'].shape}")
+                features_list.append(state["touch"].astype(jnp.float32))
+            elif "touch" in state:
+                raise ValueError("the state carries touch but the critic was built without it (touch_dim = 0)")
+            features = jnp.concatenate(features_list, axis=-1)                                 # (B, F)
+        if return_features:
+            return features
         n = actions.shape[1]
-        h = jnp.broadcast_to(z[:, None, :], (z.shape[0], n, z.shape[-1]))                      # the state is encoded once, shared by the N chunks
+        h = jnp.broadcast_to(features[:, None, :], (features.shape[0], n, features.shape[-1]))  # the state is encoded once, shared by the N chunks
         for i, width in enumerate(self.hidden):
             h = nn.relu(nn.LayerNorm()(nn.Dense(width, name=f"dense_{i}")(jnp.concatenate([h, actions], axis=-1))))
         return nn.Dense(1, name="out")(jnp.concatenate([h, actions], axis=-1))[..., 0]
@@ -119,11 +126,21 @@ def init_critic(net: CriticNet, rng, horizon: int, image_hw: Tuple[int, int] = (
     return CriticState(params=params, target_params=jax.tree.map(jnp.array, params))
 
 
-def q_values(net: CriticNet, params: dict, state: Dict[str, jnp.ndarray], actions: jnp.ndarray, *, train: bool = False, rng=None) -> jnp.ndarray:
-    """Q of N chunks at each of B states: (B, N). `train` needs `rng` (the random shift)."""
+def encode_state(net: CriticNet, params: dict, state: Dict[str, jnp.ndarray], *, train: bool = False, rng=None) -> jnp.ndarray:
+    """The state's feature vector (B, F): images through the encoders (random shift when `train`, which needs `rng`), proprioception, touch."""
     if train and net.shift_px > 0 and rng is None:
         raise ValueError("train=True with a random shift needs an rng")
-    return net.apply({"params": params}, state, flatten_actions(actions), train=train, rngs={"shift": rng} if train and net.shift_px > 0 else None)
+    return net.apply({"params": params}, state, None, train=train, return_features=True, rngs={"shift": rng} if train and net.shift_px > 0 else None)
+
+
+def score(net: CriticNet, params: dict, features: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
+    """Q of N chunks at each of B states whose features are given: (B, N). Only the MLP runs: this is what the local ascent repeats."""
+    return net.apply({"params": params}, None, flatten_actions(actions), features=features)
+
+
+def q_values(net: CriticNet, params: dict, state: Dict[str, jnp.ndarray], actions: jnp.ndarray, *, train: bool = False, rng=None) -> jnp.ndarray:
+    """Q of N chunks at each of B states: (B, N). `train` needs `rng` (the random shift)."""
+    return score(net, params, encode_state(net, params, state, train=train, rng=rng), actions)
 
 
 def soft_update(state: CriticState, tau: float) -> CriticState:

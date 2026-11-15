@@ -137,3 +137,10 @@ def test_with_touch_the_vector_joins_the_state_feature_and_changes_q_and_a_misma
         rc.q_values(plain, rc.init_critic(plain, jax.random.key(0), horizon=H).params, touched, actions)
     from_cfg = rc.CriticNet.from_config(RLConfig(critic_use_force=True, critic_use_tactile=True))
     assert from_cfg.touch_dim == 60
+
+
+def test_the_encoder_half_and_the_mlp_half_run_apart_and_give_q_values(setup):
+    net, state, obs, actions = setup
+    z = rc.encode_state(net, state.params, obs)
+    assert z.shape == (B, len(net.cameras) * rc.ENCODER_FEATURES + rc.PROPRIO_DIM)
+    assert np.array_equal(rc.score(net, state.params, z, actions), rc.q_values(net, state.params, obs, actions))
