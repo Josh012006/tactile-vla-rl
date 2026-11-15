@@ -1,0 +1,14 @@
+# RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE PegInsert task: Best-of-N: the VLA stays frozen, the argmax of Q over k = 32 candidates is executed (Alg. 2 of the paper without the distillation, global optimisation only).
+# Touch is NOT in the VLA (the SFT checkpoint is the same for every run); `use_touch` is the critic's: false here, the tactile variant is this file with it true.
+# Everything not written here is configs/algo/rl.yaml (the paper's values); the model is configs/model/pi05.yaml. The SFT checkpoint to start from (`start: {run, step}`) is
+# decided before the first launch (docs/algos/rl.md); nothing is launched without Josue's go.
+name: peg_insert_pi05_best_of_n
+description: "pi0.5 Best-of-N, PegInsert, one online critic, no touch"
+model: pi05
+set:
+  output_root: runs/rl/peg_insert
+  seed: 42                         # as the SFT main runs
+  method: best_of_n
+  keep_top: 1
+  local_steps: 0
+  rollout_selection: argmax

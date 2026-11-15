@@ -1,6 +1,6 @@
 # RL fine-tuning of the VLA: Best-of-N and PA-RL (design, decisions, open points)
 
-Status: DESIGN ONLY (15 Nov. 2026). Nothing of this is implemented yet. Every value below says where it comes from:
+Status (15 Nov. 2026): design settled; implementation step 1 of 8 done (section 7: the YAML defaults and their loader). No model, critic or job code yet. Every value below says where it comes from:
 **paper** = Policy Agnostic RL (Mark et al., arXiv 2412.06685v1), with the section / page; **group** = decided with Josué (15 Nov. 2026) after the exchange with Jesse;
 **proposal** = chosen by Claude because the paper is silent, to be confirmed before the step that needs it; **open** = to decide.
 Rule: the defaults of the YAMLs are the paper's; where the paper has no value we ask before choosing.
@@ -59,6 +59,7 @@ Evaluation is the paper's: the VLA WITH action optimisation at inference (so the
 | warm-up | 50 episodes of the base VLA, then 5 000 critic gradient steps | group (paper: 50 rollouts for OpenVLA, 5e5 steps of offline pre-training) |
 | distillation | lr 2.5e-5 constant, batch 64, the LoRA of the SFT, one epoch over the whole buffer per round (about 30 steps in the first round to about 330 in the last, about 3 400 in total, about 8 h at 8.7 s per step: estimate); Adam state kept from one round to the next (one continuous fine-tuning cut in 20 rounds) | group (15 Nov. 2026); paper: 5e-5 (1e-5 kitchens), "reduced" for OpenVLA without a value; same loop as src/algos/sft.py |
 | code stack of the critic | JAX / Flax + optax in the same process as the VLA (openpi is JAX: the critic, the candidates and jax.grad of Q with respect to the action share the card, no framework conversion, all under jit) | group (15 Nov. 2026); the paper is silent |
+| cache refresh (PA-RL) | FULL after every round, as the paper (every buffer state recomputed with the updated VLA); about 10-12 h for pi0.5 (measured per state, extrapolated). Target: the whole run under 10 h, revisited once everything is built (fewer steps, more parallelism) | paper (App. E); group (15 Nov. 2026) |
 | distributional critic (HL-Gauss) | not at first; added only if Q explode | paper B.1 |
 | evaluation | 100 episodes, the same starting states as the SFT evaluations, with optimisation at inference | group |
 
@@ -68,22 +69,39 @@ Candidate Q standard deviation (mean over states, and the distribution), Q mean 
 success rate of the rollouts, the share of states where the argmax differs from the VLA's first sample, local optimisation: Q gain, share of accepted steps, L1 norm of the displacement (paper Fig. 13), distillation loss,
 and for pi0-FAST the share of undecodable chunks. Jesse's warning: value-estimation error (over- or under-estimation) drives many collapses, so the Q statistics are watched as much as the success rate.
 
-## 5. Costs (estimates, not measured)
+## 5. Costs
 
-A rollout plan with k = 32 samples costs up to 32 times the evaluation's. pi0.5 draws its samples inside one call (the prefix is computed once: `num_samples`), so the real cost is below 32 x; at the measured 87 ms per row and plan
-and 19 plans of 100 environments it is at most about 88 min per 100 episodes. pi0-FAST repeats the rows: at most about 13 h per 100 episodes (linear extrapolation of the 12 Nov. measure, with the old long token strings).
-The cache refresh recomputes k candidates for every state of the buffer after each distillation epoch. To be measured at step 5 before any long job.
+MEASURED on 15 Nov. 2026 (L40S, policy limited to half of the card, `scripts/probe_batch_cost.py`, synthetic observations, 5 timed calls per row, logs 11716915 and 11716916):
+
+| model | rows x samples per call | median per call | per state |
+|---|---|---|---|
+| pi0.5 | 1 x 1 | 101 ms | 101 ms |
+| pi0.5 | 8 x 1 | 678 ms | 85 ms |
+| pi0.5 | 50 x 1 | 4 319 ms | 86 ms |
+| pi0.5 | 1 x 32 | 159 ms | 159 ms |
+| pi0.5 | 8 x 32 | 1 529 ms | 191 ms |
+| pi0.5 | 50 x 32 | out of memory (30 GiB asked, 24 GiB available) | - |
+| pi0-FAST | 1 x 1 | 417 ms | 417 ms |
+| pi0-FAST | 4 x 1 | 3 464 ms | 866 ms |
+| pi0-FAST | 1 x 8 | 1 086 ms | 1 086 ms |
+| pi0-FAST | 4 x 8, 1 x 32 | out of memory | - |
+
+- pi0.5: 32 candidates per state cost little more than the state itself (the prefix is computed once; 159-191 ms against 85-101 ms). The images' prefix is the floor (about 85 ms per state, about 5 h over the whole refresh even with one candidate).
+  Calls of 50 environments x 32 samples do not fit: the rollouts split them (`OpenPIPolicy.max_rows = 8`, so 7 calls of 8 for 50 environments). One round of 50 episodes: about 182 s of model (19 plans x 50 x 191 ms) + about 97 s of simulator = about 280 s, so about 93 min for 1000 episodes (estimate).
+- Cache refresh of pi0.5 (every state of the buffer after every round, about 218 500 recomputations over the run): 9.6 h (calls of 1 row) to 11.6 h (calls of 8 rows), linear extrapolation. Decision: full refresh as the paper (section 3); the total cost of a run is to be brought back under 10 h AFTER everything is built (fewer steps or more parallelism), not before.
+- Distillation: about 8 h (3 400 steps at 8.7 s), estimate. Critic updates (UTD 1: about 150 000 updates of a small CNN + MLP) not measured yet.
+- pi0-FAST with k = 32 is NOT feasible as specified: about 4.3 s per state at 32 candidates (4 x the measure at 8), so about 36 h of model for 1000 episodes of rollouts (30 plans per episode) and over 400 h for the cache refresh (345 000 states). The decoding time depends on the content of the observations (the probe's are synthetic): an order of magnitude, to be redone with real observations. To be decided at step 8 (smaller k, or another solution).
 
 ## 6. Open points (no reference in the paper), to decide one at a time before the step that needs them
 
-1. Cache refresh policy of PA-RL (after every epoch, as the paper, vs cheaper variants): decided after measuring the sampling cost of k = 32 candidates per row (`scripts/probe_batch_cost.py --num-samples 32`, run by Josué on an L40S). The refresh recomputes candidates for every buffer state at every round: about 218 000 state recomputations over 20 rounds, from about 6 h (shared prefix) to over 100 h (linear).
+1. Cost of a run: the target is under 10 h in total (group); the measured pieces (section 5) add up to more (refresh about 10-12 h, distillation about 8 h, rollouts about 1.5 h). To revisit once the implementation is complete: fewer distillation / refresh steps, more parallelism, pi0-FAST k.
 2. Which touch features exactly enter the tactile critic (taxel array vs force / torque, normalisation, history): decided at implementation step 3, when the tactile variant is built.
 
-Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillation epoch per round, which critic ranks (Q_theta) and evaluates (Q_bar), the critic's inputs, the distillation recipe and the code stack (JAX / Flax).
+Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillation epoch per round, which critic ranks (Q_theta) and evaluates (Q_bar), the critic's inputs, the distillation recipe, the code stack (JAX / Flax) and the cache refresh policy (full).
 
 ## 7. Implementation steps (one at a time, each with its tests, no job launched without a go)
 
-1. YAML defaults (`configs/algo/rl.yaml` and one experiment per method) and their loader.
+1. DONE (15 Nov. 2026): YAML defaults (`configs/algo/rl.yaml`, one experiment per method in `configs/experiment/rl/`) and their loader (`src/algos/rl_config.py`, `tests/test_rl_config.py`). Open: the SFT checkpoint each run starts from (`start: {run, step}` of the experiment, optional until the launch script exists).
 2. Candidate sampler on the existing `plan(..., num_samples=k)` (pi0.5 first), with the cache.
 3. Critic (without touch, then the touch inputs) and the replay buffer.
 4. Action optimisation (global, local with the acceptance rule) on a toy critic, then on the real one.
