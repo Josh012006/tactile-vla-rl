@@ -1,0 +1,24 @@
+# SFT of pi0-FAST with LoRA on the FORGE PegInsert teleoperated demonstrations (50 episodes, all of them).
+# Touch is NOT used: this is the SFT of expo-ft (cameras, joints, gripper, prompt), whose checkpoint the RL starts from. The taxels in the demonstrations are ignored.
+# Normalisation statistics: the CHECKPOINT's own (DROID's, from the PolaRiS checkpoint; no `norm_stats` block), for the three demonstration types, so that the demonstrations are the only
+# difference between the three runs. Decided on 2026-11-14 by a pair of runs on the teleoperated demonstrations (seed 0, 100 episodes): checkpoint's statistics 56.5 % of success from step 1000
+# on and no chunk the FAST decoder could not decode, against 43.8 % and 2.7 % (0.37 % already on the demonstrations' own tokens) with the statistics of the noisy demonstrations (docs/algos/sft.md,
+# section 2b; scripts/fast_stats_fit.py, scripts/fast_roundtrip.py). Their price: the FAST round trip is noisy at the milliradian level (docs/algos/sft.md, section 2b).
+# Everything else (steps, batch, learning rate, checkpoints every 200 steps, resume snapshots, wandb) is configs/algo/sft.yaml; the model is configs/model/pi0_fast.yaml (LoRA).
+#
+#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/pi0_fast_lora_teleop.yaml
+#   continue it:  sbatch jobs/job_sft_lora.sh --resume runs/sft/peg_insert/peg_insert_pi0_fast_lora_teleop
+# Output: runs/sft/peg_insert/peg_insert_pi0_fast_lora_teleop/
+name: peg_insert_pi0_fast_lora_teleop
+description: "pi0-FAST LoRA SFT, PegInsert, teleoperated demonstrations, normalisation statistics of the checkpoint (DROID), no touch"
+model: pi0_fast
+full: false
+demos:
+  - demos/isaaclab/ForgePegInsert_Robotiq_teleop
+set:
+  output_root: runs/sft/peg_insert
+  num_demos: 50                    # the first 50 episodes of the folder (all of them): expo-ft's `num_data_sft: 50` (`--data.num-demos=50`), written here so that the file says it
+  seed: 42                         # the SFT seed, really used by the training: LoRA initialisation, order of the rows, noise (expo-ft's SFT ran with openpi's default seed, 42)
+model_set:                       # touch off in every component the model has (it is off in the model YAML too: written here so that the file says it); no `norm_stats`: the checkpoint's own
+  vlm.use_tactile: false
+  vlm.use_force: false

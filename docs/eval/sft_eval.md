@@ -218,7 +218,7 @@ To measure the real thing (the simulator at K = 100, the strings of a real pi0-F
 
 ### 6.2 First real batches (12 Nov. 2026, L40S, step 4000 of the teleop runs, 100 episodes, K = 100, `jobs/job_eval_sft.sh --steps 4000 ...`)
 
-| | pi0.5 (`peg_insert_pi05_lora_teleop`) | pi0-FAST (`..._pi0_fast_lora_teleop_demo_stats`) |
+| | pi0.5 (`peg_insert_pi05_lora_teleop`) | pi0-FAST (`..._pi0_fast_lora_teleop_demo_stats`, the demonstrations' statistics, seed 0: since replaced by `peg_insert_pi0_fast_lora_teleop`, the checkpoint's statistics) |
 |---|---|---|
 | success | **41 / 100** (SE 4.9, Wilson 32-51 %) | **46 / 100** (SE 5.0, Wilson 37-56 %) |
 | chunks planned | 1 529 (of at most 1 900) | 2 427 (of at most 3 000) |

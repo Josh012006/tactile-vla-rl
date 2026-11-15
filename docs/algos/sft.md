@@ -25,16 +25,17 @@ checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/alg
 - **Main runs** are the experiment files of `configs/experiment/sft/`: one file = one run (`name`, `model`, `full`, `demos`, `set`, `model_set`, `description`; any other key is refused). They go to
   **`runs/sft/peg_insert/<name>/`** (`output_root` in their `set`). What is given on the command line is added to the file and wins (`--set steps=100`, `--run-name`).
 - **Probes** (a run to measure or look at something, not a main run) have no experiment file: their default `output_root` is **`runs/sft/probing`**.
-- The first five SFTs of PegInsert, all LoRA, without touch (the SFT of expo-ft: cameras, joints, gripper, prompt; the taxels in the demonstrations are not read by the model). The three pi0.5 runs, and
-  a PAIR of pi0-FAST runs on the teleoperated demonstrations (the best ones) that differ only by the normalisation statistics (section 2b). The scripted and noisy pi0-FAST runs come after the pair:
+- The six SFTs of PegInsert, all LoRA, without touch (the SFT of expo-ft: cameras, joints, gripper, prompt; the taxels in the demonstrations are not read by the model): the three pi0.5 runs and the three
+  pi0-FAST runs, one per demonstration type. Normalisation statistics (section 2b): pi0.5 the noisy demonstrations', pi0-FAST the checkpoint's own (DROID), the same for the three runs of a model.
 
 | experiment file | run folder under `runs/sft/peg_insert/` | model | demonstrations | normalisation statistics |
 |---|---|---|---|---|
 | `pi05_lora_scripted.yaml` | `peg_insert_pi05_lora_scripted` | pi0.5 | `ForgePegInsert_Robotiq_scripted` | noisy demonstrations, 16 steps |
 | `pi05_lora_noisy.yaml` | `peg_insert_pi05_lora_noisy` | pi0.5 | `ForgePegInsert_Robotiq_noisy` | noisy demonstrations, 16 steps |
 | `pi05_lora_teleop.yaml` | `peg_insert_pi05_lora_teleop` | pi0.5 | `ForgePegInsert_Robotiq_teleop` | noisy demonstrations, 16 steps |
-| `pi0_fast_lora_teleop_droid_stats.yaml` | `peg_insert_pi0_fast_lora_teleop_droid_stats` | pi0-FAST | `ForgePegInsert_Robotiq_teleop` | the checkpoint's (DROID) |
-| `pi0_fast_lora_teleop_demo_stats.yaml` | `peg_insert_pi0_fast_lora_teleop_demo_stats` | pi0-FAST | `ForgePegInsert_Robotiq_teleop` | noisy demonstrations, 10 steps |
+| `pi0_fast_lora_scripted.yaml` | `peg_insert_pi0_fast_lora_scripted` | pi0-FAST | `ForgePegInsert_Robotiq_scripted` | the checkpoint's (DROID) |
+| `pi0_fast_lora_noisy.yaml` | `peg_insert_pi0_fast_lora_noisy` | pi0-FAST | `ForgePegInsert_Robotiq_noisy` | the checkpoint's (DROID) |
+| `pi0_fast_lora_teleop.yaml` | `peg_insert_pi0_fast_lora_teleop` | pi0-FAST | `ForgePegInsert_Robotiq_teleop` | the checkpoint's (DROID) |
 
 `--set KEY=VALUE` overrides a key of `configs/algo/sft.yaml`; `--model-set KEY=VALUE` a key of the model YAML (`<component>.<key>`, the
 probe's `--set`); `--full` is `use_lora: false` in every component the model has. Before the first job, on the login node:
@@ -67,8 +68,8 @@ Which statistics the SFT normalises with is the `norm_stats` block of the model 
   expo-ft (`configs/task/isaaclab/peg_insert_forge_sft_robotiq_*.yaml` there): the same file for the three runs, so that the demonstrations are the only difference
   between them; the noisy set was the one that covered the other two best. The three pi0.5 experiment files carry the block (`model_set: norm_stats.*`). The file is
   the one expo-ft wrote (`scripts/demos/compute_demo_norm_stats.py`, identical in both repositories); copy it, do not recompute it.
-- **pi0-FAST: undecided, a pair of runs decides.** Its openpi pipeline normalises OFFSETS from the chunk-start state too (`RLDSDroidDataConfig`, JOINT_POSITION: `DeltaActions` before `Normalize`,
-  `AbsoluteActions` after the inverse), so statistics computed on the demonstrations have the same kind as pi0.5's and only the chunk length differs (10 steps:
+- **pi0-FAST: the checkpoint's own statistics (DROID), decided 2026-11-14.** Its openpi pipeline normalises OFFSETS from the chunk-start state too (`RLDSDroidDataConfig`, JOINT_POSITION: `DeltaActions` before
+  `Normalize`, `AbsoluteActions` after the inverse), so statistics computed on the demonstrations have the same kind as pi0.5's and only the chunk length differs (10 steps:
   `compute_demo_norm_stats --horizon 10 --droid-stats <the polaris checkpoint's norm_stats.json>`, asset `forge_demos_robotiq_noisy_h10`). Measured on the 150 demonstrations with
   `scripts/fast_tokens.py` (CPU, 2026-11-12; `--norm-stats-dir` / `--norm-stats-asset-id` give the other statistics):
 
@@ -79,10 +80,25 @@ Which statistics the SFT normalises with is the `norm_stats` block of the model 
   | tokens per chunk, mean / maximum (limit 180, 256 generated) | 56 / 62 | 64 / 92 |
   | chunks openpi cannot decode (zero chunk instead) | 3 of 8913 (0.03 %) | 20 of 8913 (0.22 %; teleop about 16 of 4006) |
 
-  The statistics of the demonstrations are about 6.5 times more precise, with 7 times more undecodable chunks (about 4 % of the episodes would have one, with 19 chunks each). The cause of the
-  failures is not established (hypothesis: the tails of the noise, up to ±4 once normalised, give coefficients that a tokenizer built on DROID's ±1 reads badly). A measurement cannot say which
-  wins in the environment, so the first pi0-FAST runs are the PAIR `pi0_fast_lora_teleop_droid_stats` / `pi0_fast_lora_teleop_demo_stats`, on the teleoperated demonstrations (the best ones); only the
-  success rate of the two settles it (a loss or an error computed with other statistics is not comparable). The scripted and noisy pi0-FAST runs wait for that.
+  A pair of runs on the teleoperated demonstrations (seed 0, LoRA, 4000 steps, 100 episodes per checkpoint, the same starting states) settled it: **the checkpoint's statistics win**, although they are the less precise ones.
+
+  | | the checkpoint's (DROID) | noisy demonstrations, 10 steps |
+  |---|---|---|
+  | success, mean of the checkpoints from step 1000 on (16) | **56.5 %** | 43.8 % |
+  | step 200 / step 1000 / step 4000 | 53 / 64 / 53 % | 17 / 52 / 39 % |
+  | chunks the FAST decoder could not decode while evaluating | 0.0 % | 0.7 % at the start, 6.7 % at step 3800 |
+
+  What the two measurements of 2026-11-14 (`scripts/fast_stats_fit.py`, `scripts/fast_roundtrip.py`, the 4006 teleoperated chunks) say:
+  - FIT: with the checkpoint's statistics the demonstrations occupy a narrow band of the range (state: 8 to 38 % of it, 5 to 73 of the 256 bins in which the state is written as text; actions: 1 to 7 %); with the
+    noisy demonstrations' statistics the state is well fitted (155 to 257 bins) and the actions use 30 to 70 % of the range, off centre on joints 2 and 5. The stats file is the noisy demonstrations' applied to the teleoperated ones.
+  - ROUND TRIP: with the checkpoint's statistics the FAST round trip is noisy (error / motion 0.66 on average, 69 % of the chunks above 0.5; 3 to 6 mrad RMS per joint, more than the motion itself on joints 1, 3, 5, 7,
+    whose motion is 1 to 4 mrad RMS) but does not shrink it (amplitude kept 1.10, no chunk below 0.1, same-direction gain 0.88). With the demonstrations' statistics it is nearly lossless (0.11, 1.00, 0.99).
+  - UNDECODABLE: 15 of the 4006 chunks (0.37 %) do not decode with the demonstrations' statistics even from their own tokens (`cannot reshape array of size 78 into shape (8)`); openpi replaces them by a zero chunk
+    (the arm stops, the gripper command goes to about 0.5 instead of 1). Never with the checkpoint's. That is real but does not explain the gap alone: it is already 12 points at step 1000, with 0.7 % of the chunks lost.
+  - So the precision of the FAST round trip is not what makes a run succeed (the most precise setting is the worse one). The hypothesis that fits (not proved): the pretrained model is calibrated on DROID's statistics
+    (53 % against 17 % after 200 steps). One run per statistics, seed 0: a gap of 12.7 points is of the order of the unexplained seed / recipe gap of pi0.5 (docs/eval/sft_eval.md), so read it as the best choice the measurements support.
+  - Limit to keep in mind for the tactile study: a coding error of 3 to 6 mrad is about 2 to 3 mm at 0.5 m of arm, which may cap the precision of a fine insertion with pi0-FAST.
+  The three pi0-FAST runs therefore use the checkpoint's own statistics (no `norm_stats` block) and the seed 42.
 - **The checkpoints carry them**: `checkpoints/<step>/assets/<asset_id>/norm_stats.json` (as openpi does) and the block in `meta.json` (`model_cfg`). A policy that loads
   such a checkpoint (evaluation, RL) must be built with the same `norm_stats` block, otherwise the actions come back un-normalised with the wrong scale. A resume refuses a run
   whose model YAML differs. The dry run prints which file is used and stops if it is missing.
