@@ -1,7 +1,6 @@
 """src/algos/sft.py on CPU, with the tiny pi0.5 of tests/test_openpi_policy.py (dummy Gemma variants, tokenizer and normalisation stubbed).
-openpi's SigLIP tower is not downsized by any variant and a float32 copy with its optimiser state does not fit the CI memory, so here the
-vision tower is FROZEN (the freeze filter of the policy) and only the language model and the action expert are trained: what is tested is
-the loop (micro-batches, accumulation, optimiser, evaluation, checkpoints), not the size of the model.
+openpi's SigLIP tower has no tiny variant by name (here its "mu/14" is patched in at the model's creation) and is FROZEN (the freeze filter of the policy), so that only
+the language model and the action expert are trained: what is tested is the loop (micro-batches, accumulation, optimiser, evaluation, checkpoints), not the size of the model.
 
 Needs the `vla` dependency group (skipped otherwise)."""
 import gc
@@ -37,7 +36,15 @@ COMMON = {"wandb_mode": "disabled", "demos": ["x"], "batch_size": 4, "micro_batc
 
 
 def vision_frozen_policy(seed_offset=0):
-    policy, _ = build()
+    # a tiny vision tower (openpi's variant "mu/14"): a checkpoint now holds EVERY parameter, and the real SigLIP (400M) in float32, its host copy and its serialisation do not fit the 7 GB of the test machine
+    import openpi.models.siglip as siglip
+    real_siglip = siglip.Module
+    patch = pytest.MonkeyPatch()
+    patch.setattr(siglip, "Module", lambda *a, **k: real_siglip(*a, **{**k, "variant": "mu/14"}))
+    try:
+        policy, _ = build()
+    finally:
+        patch.undo()
     policy.train_cfg = types.SimpleNamespace(freeze_filter=nnx_utils.PathRegex(".*img.*"))
     return policy
 
@@ -97,7 +104,7 @@ def test_the_run_trains_the_trainable_part_only_and_writes_its_log(run):
     assert set(evals[0]) >= {"train", "val"} and np.isfinite(evals[0]["val"]["loss"]) and evals[0]["train"]["chunks"] == 2
     assert all("elapsed_s" in line for line in lines) and evals[0]["eval_s"] > 0                  # time and size of what a run costs
     assert all(line["save_s"] >= 0 and line["size_mib"] > 0 for line in lines if line["event"] == "checkpoint")
-    assert lines[0]["trainable_m"] > 0 and lines[0]["frozen_m"] > 100                       # SigLIP (frozen) is the bulk of this tiny model
+    assert lines[0]["trainable_m"] > 0                                             # (the frozen part, the tiny vision tower, rounds to 0.0 M)
     after = fingerprint(policy.state)
     assert all(x.is_deleted() for x in jax.tree.leaves(trainable0))        # the policy's own copy of the trainable weights was freed during the run (memory)
     assert not any(x.is_deleted() for x in jax.tree.leaves(policy.state))   # and the policy ends with valid weights
@@ -111,28 +118,29 @@ def test_the_run_trains_the_trainable_part_only_and_writes_its_log(run):
 
 def test_a_checkpoint_per_save_interval_with_its_meta(run):
     _, run_dir, summary, *_ = run
-    assert [p.rsplit("/", 1)[1] for p in summary["checkpoints"]] == ["2", "4"]
-    meta = json.loads((run_dir / "checkpoints" / "4" / "meta.json").read_text())
-    assert meta["step"] == 4 and meta["model_name"] == "tiny" and meta["action_horizon"] == H and meta["sft"]["batch_size"] == 4
+    assert [p.rsplit("/", 1)[1] for p in summary["checkpoints"]] == ["2", "3"]                  # openpi's rule: step % 2 == 0 and step > 0, and the last step (the loop runs 0 .. steps - 1)
+    meta = json.loads((run_dir / "checkpoints" / "3" / "meta.json").read_text())
+    assert meta["step"] == 3 and meta["updates"] == 4 and meta["model_name"] == "tiny" and meta["action_horizon"] == H and meta["sft"]["batch_size"] == 4
 
 
 def test_load_checkpoint_gives_a_fresh_policy_the_trained_weights(run):
     trained, run_dir, *_ = run
     fresh = vision_frozen_policy()
     trainable_before = tu.flatten_dict(sft.split_state(fresh)[0].to_pure_dict())
-    meta = sft.load_checkpoint(fresh, run_dir / "checkpoints" / "4")
-    assert meta["step"] == 4
+    meta = sft.load_checkpoint(fresh, run_dir / "checkpoints" / "3")
+    assert meta["step"] == 3
     want = tu.flatten_dict(sft.split_state(trained)[0].to_pure_dict())
     got = tu.flatten_dict(sft.split_state(fresh)[0].to_pure_dict())
     assert set(got) == set(want)
-    assert all(np.array_equal(np.asarray(got[k]), np.asarray(want[k])) for k in want)         # `trained` ends with the bfloat16 weights it saved
+    bf16 = lambda x: np.asarray(x).astype(jnp.bfloat16)                                          # noqa: E731
+    assert all(np.array_equal(bf16(got[k]), bf16(want[k])) for k in want)         # the checkpoint holds the trained weights in float32; `trained` ends with their bfloat16 rounding
     assert any(not np.allclose(np.asarray(got[k]).astype(np.float32), np.asarray(trainable_before[k]).astype(np.float32)) for k in got)
     obs = {"observation/exterior_image_1_left": np.zeros((1, 224, 224, 3), np.uint8), "observation/wrist_image_left": np.zeros((1, 224, 224, 3), np.uint8),
            "observation/joint_position": np.zeros((1, 7), np.float32), "observation/gripper_position": np.zeros((1, 1), np.float32)}
     trained.seed(3)
     fresh.seed(3)
     # same weights, same noise: the same chunk. Not bit for bit HERE: this tiny model's weights are float32 and `trained` holds its trained part in
-    # bfloat16 while `fresh` holds the same (rounded) values in float32, so the arithmetic differs; the real policies are bfloat16 throughout.
+    # bfloat16 while `fresh` holds the (unrounded) values in float32, so the arithmetic differs; the real policies are bfloat16 throughout.
     assert np.allclose(trained.plan(obs, PROMPT).raw, fresh.plan(obs, PROMPT).raw, atol=1e-2)
 
 
@@ -196,7 +204,7 @@ def test_a_resumed_run_ends_in_the_same_state_as_an_uninterrupted_one(run, resum
     assert meta_a["step"] == meta_b["step"] == 4 and len(leaves_a) == len(leaves_b) > 10
     for a, b in zip(leaves_a, leaves_b):
         assert a.shape == b.shape and np.allclose(a, b, rtol=1e-5, atol=1e-7)
-    assert first["last_step"] == 2 and second["last_step"] == 4 and not second["stopped"]
+    assert first["last_step"] == 1 and second["last_step"] == 3 and not second["stopped"]                 # the loop variable: the first part did 0 and 1, the second 2 and 3
 
 
 def test_the_log_of_a_resume_continues_the_numbering(resumed):
@@ -204,8 +212,8 @@ def test_the_log_of_a_resume_continues_the_numbering(resumed):
     lines = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
     resume = [line for line in lines if line["event"] == "resume"]
     assert len(resume) == 1 and resume[0]["from_step"] == 2 and resume[0]["target_steps"] == 4
-    assert [line["step"] for line in lines if line["event"] == "train"] == [2, 4]                     # the first part logged at its last step 2, the second at 4 (log every 2 steps)
-    assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["2", "4"]
+    assert [line["step"] for line in lines if line["event"] == "train"] == [0, 2]                     # log every 2 steps from 0 (openpi logs the step 0 alone)
+    assert sorted(p.name for p in (run_dir / "checkpoints").iterdir()) == ["1", "3"]                  # the first part's last step (1); then step 2 is not > the step the resume started at, and 3 is the last
     assert sft.find_resume(run_dir)[1]["step"] == 4
 
 
@@ -251,9 +259,9 @@ def test_a_sigterm_stops_the_run_after_the_current_step_with_a_snapshot(sets, tm
     threading.Thread(target=terminate_after_the_first_step, daemon=True).start()
     cfg = sft.load_config(overrides={**COMMON, "steps": 12, "resume_interval": 0, "save_interval": 100})
     summary = sft.train(vision_frozen_policy(), train_set, val_set, cfg, run_dir, META)
-    assert summary["stopped"] and 1 <= summary["last_step"] < 12
+    assert summary["stopped"] and 0 <= summary["last_step"] < 11
     directory, meta = sft.find_resume(run_dir)
-    assert meta["step"] == summary["last_step"]                                         # a snapshot was written although resume_interval is 0
+    assert meta["step"] == summary["last_step"] + 1                                         # a snapshot was written although resume_interval is 0
     events = [json.loads(line)["event"] for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
     assert events[-1] == "stopped" and "resume_snapshot" in events
     assert signal.getsignal(signal.SIGTERM) is not None
@@ -283,7 +291,7 @@ def test_a_checkpoint_loaded_into_a_fork_leaves_the_base_policy_alone_and_shares
     fork = base.fork(1)
     before = fingerprint(base.state)
     initial = base.state
-    sft.load_checkpoint(fork, run_dir / "checkpoints" / "4")
+    sft.load_checkpoint(fork, run_dir / "checkpoints" / "3")
     after = fingerprint(base.state)
     assert base.state is initial and all(same(before[k], after[k]) for k in before)          # the base is untouched
     frozen_base, frozen_fork = (tu.flatten_dict(sft.split_state(p)[1].to_pure_dict()) for p in (base, fork))

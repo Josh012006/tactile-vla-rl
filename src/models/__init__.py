@@ -18,14 +18,15 @@ from typing import Any, Mapping, Optional, Union
 OPENPI_FAMILIES = ("pi05", "pi0", "pi0_fast")
 
 
-def load_model(model: Union[str, dict], *, seed: int = 0, overrides: Optional[Mapping[str, Any]] = None):
+def load_model(model: Union[str, dict], *, seed: int = 0, overrides: Optional[Mapping[str, Any]] = None, for_training: bool = False):
     """`model`: the name of a configs/model/<name>.yaml, or an already loaded config dict. `overrides`: keys `<component>.<key>` of the
     YAML to change for this load (`vlm.use_lora`, `action_head.lora_rank`, `action_head.use_tactile`, ...). Returns a `VLAPolicy`
-    (src/models/interface.py)."""
+    (src/models/interface.py). `seed` draws the random initialisation (the LoRA matrices) as openpi's train.py does for `TrainConfig.seed`; `for_training` gives
+    the state a training starts from (trainable parameters in float32: src/models/loading.py)."""
     from src.models.interface import apply_overrides, load_model_cfg
     cfg = apply_overrides(load_model_cfg(model) if isinstance(model, str) else dict(model), overrides)
     family = cfg["family"]
     if family in OPENPI_FAMILIES:
         from src.models.openpi_policy import OpenPIPolicy
-        return OpenPIPolicy.load(cfg, seed=seed)
+        return OpenPIPolicy.load(cfg, seed=seed, for_training=for_training)
     raise ValueError(f"unknown model family {family!r} (known: {OPENPI_FAMILIES})")

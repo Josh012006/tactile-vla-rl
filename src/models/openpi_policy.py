@@ -128,9 +128,10 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         self.seed(seed)
 
     @classmethod
-    def load(cls, cfg: dict, seed: int = 0) -> "OpenPIPolicy":
+    def load(cls, cfg: dict, seed: int = 0, *, for_training: bool = False) -> "OpenPIPolicy":
+        """`seed` also draws the LoRA initialisation, as openpi's train.py does for `TrainConfig.seed`. `for_training`: see `loading.build_params_like_expo_ft`."""
         from src.models.loading import load_policy
-        policy, train_cfg = load_policy(cfg)
+        policy, train_cfg = load_policy(cfg, seed, for_training=for_training)
         return cls(policy, train_cfg, cfg, seed)
 
     def fork(self, seed: int = 0) -> "OpenPIPolicy":
@@ -281,3 +282,43 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         import flax.nnx as nnx
         import jax.numpy as jnp
         return jnp.mean(nnx.merge(self._graphdef, state).compute_loss(rng, observation, actions, train=train))
+
+    # -- the loss of a batch computed in slices ------------------------------------------------------------------------------
+    # openpi's `compute_loss(rng, observation, actions)` draws everything random (the image augmentation of every row, the flow-matching noise and time of every row) from ONE
+    # key for the WHOLE batch. A batch cut into micro-batches (one device, less memory) would draw from smaller shapes, other numbers: `prepare_loss_batch` makes the draws
+    # of the whole batch once, `loss_of_rows` computes the loss of a slice of rows from them. The mean of the losses of equal slices is `compute_loss`'s mean, with the same randomness.
+    def prepare_loss_batch(self, rng, observation, actions, *, train: bool = True):
+        """(observation after openpi's preprocessing and image augmentation, what else `compute_loss` draws): both for the whole batch, from `rng` as `compute_loss` splits it."""
+        import jax
+        import openpi.models.model as _model
+        if not self._native_samples:                                   # pi0-FAST: the augmentation is the only draw, from `rng` itself
+            return _model.preprocess_observation(rng, observation, train=train, image_keys=list(observation.images.keys())), None
+        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        noise = jax.random.normal(noise_rng, actions.shape)
+        time = jax.random.beta(time_rng, 1.5, 1, actions.shape[:-2]) * 0.999 + 0.001
+        return observation, (noise, time)
+
+    def loss_of_rows(self, state, observation, actions, draws):
+        """Mean loss of some rows of a batch prepared by `prepare_loss_batch` (`observation`, `actions` and `draws` cut to the same rows). Pi0.5 / pi0: the body of openpi's
+        `Pi0.compute_loss` after its draws, pi0-FAST: its `compute_loss` on the already augmented observation."""
+        import flax.nnx as nnx
+        import jax
+        import jax.numpy as jnp
+        model = nnx.merge(self._graphdef, state)
+        if draws is None:
+            return jnp.mean(model.compute_loss(jax.random.key(0), observation, actions, train=False))       # train=False: nothing is drawn, the images are already augmented
+        from openpi.models.pi0 import make_attn_mask
+        noise, time = draws
+        time_expanded = time[..., None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+        prefix_tokens, prefix_mask, prefix_ar_mask = model.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = model.embed_suffix(observation, x_t, time)
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (prefix_out, suffix_out), _ = model.PaliGemma.llm([prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond])
+        v_t = model.action_out_proj(suffix_out[:, -model.action_horizon:])
+        return jnp.mean(jnp.mean(jnp.square(v_t - u_t), axis=-1))

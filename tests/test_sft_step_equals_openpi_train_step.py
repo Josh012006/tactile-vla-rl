@@ -99,8 +99,8 @@ def test_four_updates_of_our_sft_give_the_parameters_of_openpis_train_step(monke
     cfg = {"name": "tiny", "family": "pi05", "action_horizon": H, "action_dim": 8, "output_semantics": "offsets_from_chunk_start_state"}
     policy = OpenPIPolicy(pol, types.SimpleNamespace(freeze_filter=freeze), cfg, seed=0)
     policy.set_state(jax.tree.map(lambda x: x.astype(jnp.bfloat16), nnx.state(model)))       # what `load_policy` hands to the trainer
-    # openpi starts from the float32 values of the model, ours from their bfloat16 rounding (the checkpoint is cast to bfloat16 on the host): here both start from the SAME
-    # float32 numbers, so that what is compared is the update itself (the rounding of the start is measured in another test)
+    # both start from the SAME float32 numbers (a training policy, `load_model(..., for_training=True)`, keeps the trainable parameters in float32: src/models/loading.py), so
+    # that what is compared is the update itself
     _, frozen = sft.split_state(policy)
     start = train_state.params.filter(config.trainable_filter)
     trainable = jax.tree.map(lambda x: jnp.array(x, dtype=jnp.float32, copy=True), start)

@@ -7,14 +7,19 @@ One model, one set of demonstrations, one run. The model is an `OpenPIPolicy` (s
 same as at inference), its loss (flow matching for pi0.5, next-token cross entropy for pi0-FAST) and its freeze filter are used as they
 are; what this file adds is the optimiser, the loop, the evaluation and the checkpoints.
 
+It does what openpi's own `scripts/train.py` does (the SFT of expo-ft), step for step: the batches come from the same torch `DataLoader` (`row_batches`), seeded with `seed`; the model is
+initialised with the key openpi derives from `seed` (`loading.openpi_model_key`); update number `it` draws its randomness (image augmentation, flow-matching noise and time) from
+`fold_in(train_rng, it)` for the whole batch (`train_rng, _ = split(key(seed))`), whatever the micro-batches; `steps` is openpi's `num_train_steps` (loop `it` = 0 .. steps - 1) and
+what is logged, evaluated and saved at `it` has had `it + 1` updates; a checkpoint is openpi's (`save_checkpoint`).
+
 What is trained is `policy.trainable_filter`: openpi's freeze filter of the model YAML (LoRA matrices + SigLIP + action projections with
 LoRA, everything without it). The trainable parameters are kept in float32 and the frozen ones in bfloat16, as openpi's own train.py does;
 the optimiser is openpi's (AdamW, b2 0.95, gradient clipping at 1) with the schedule of configs/algo/sft.yaml. One device (no FSDP): the
 batch is cut into micro-batches of `micro_batch_size` rows whose gradients are summed, so the memory depends on the micro-batch and the
 optimisation on the batch.
 
-Checkpoints hold the TRAINABLE parameters only, in bfloat16 (what the policy runs with): a LoRA checkpoint is small, and `load_checkpoint`
-puts it on top of a freshly loaded policy built with the same model YAML (and the same overrides: the rank is part of the structure).
+A checkpoint is what openpi's train.py saves: `params`, every parameter of the model (the trainable ones in float32, the frozen ones in bfloat16), laid out as `restore_params`
+reads it; `load_checkpoint` puts it on top of a freshly loaded policy built with the same model YAML (and the same overrides: the rank is part of the structure).
 A run can be RESUMED (section "Resume" below): every `resume_interval` steps, at the last step and when the job is told to stop (SIGTERM), the
 full training state is written to <run>/resume/, and `--resume <run>` continues from it with the same data order and the same noise.
 
@@ -23,8 +28,8 @@ The evaluation inside the run (`eval_interval`) is not the success rate, which o
 pi0-FAST, what the generated token strings were like (`OpenPIPolicy.decode_stats`).
 
 Resume. The snapshot holds what the checkpoints do not: the trainable parameters in float32 (the bfloat16 checkpoints are rounded), the optimiser
-state (AdamW moments, step counts) and the step. Everything else is a function of the step: the batch of step s comes from a permutation seeded by
-`seed` (the batches already done are skipped without being prepared) and its noise from `fold_in(key(seed), s)`, so a resumed run sees what an
+state (AdamW moments, step counts) and the number of updates done. Everything else is a function of the step: the batch of update `it` comes from the loader seeded by
+`seed` (the batches already done are skipped without being prepared) and its noise from `fold_in(train_rng, it)`, so a resumed run sees what an
 uninterrupted one would have seen (up to the non-determinism of the GPU kernels). A snapshot is about 3 times the float32 trainable parameters
 (4.5 GiB measured with pi0.5 LoRA, 29 GiB measured with pi0-FAST full fine-tuning, written in 77 s), written aside and swapped in once complete, so the disk holds two of them for a moment.
 What may change on resume: `steps` (only when the learning rate is constant, lr = lr_end: a decay depends on the total), the intervals, `eval_samples`,
@@ -68,7 +73,7 @@ class SFTConfig:
     num_demos: int = 0
     val_episodes: int = 0
     prompt: str = "Insert the peg into the socket."
-    steps: int = 4000
+    steps: int = 4001
     batch_size: int = 64
     micro_batch_size: int = 16
     lr: float = 2.5e-5
@@ -79,7 +84,7 @@ class SFTConfig:
     b2: float = 0.95
     eps: float = 1e-8
     clip_grad_norm: float = 1.0
-    log_interval: int = 50
+    log_interval: int = 100
     eval_interval: int = 200
     eval_samples: int = 16
     save_interval: int = 200
@@ -159,15 +164,17 @@ def make_optimizer(cfg: SFTConfig):
 
 
 # -- checkpoints ---------------------------------------------------------------------------------------------------------------------
-def save_checkpoint(directory: Path, trainable, meta: Mapping[str, Any]) -> None:
-    """<directory>/params (orbax, the trainable parameters in bfloat16) and <directory>/meta.json."""
+def save_checkpoint(directory: Path, trainable, frozen, meta: Mapping[str, Any]) -> None:
+    """<directory>/params and <directory>/meta.json. `params` is what openpi's train.py saves (`checkpoints.save_state`: `{"params": the whole model's state}`, orbax): EVERY parameter, the
+    trainable ones as they are in training (float32), the frozen ones in bfloat16. openpi's `restore_params` (and `loading.build_params_like_expo_ft`) read it."""
     import jax
-    import jax.numpy as jnp
     import orbax.checkpoint as ocp
+    import flax.nnx as nnx
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
-    host = jax.device_get(tree_cast(trainable, jnp.bfloat16).to_pure_dict())
-    ocp.PyTreeCheckpointer().save(directory / PARAMS_DIR, host)
+    state = jax.device_get(nnx.State.merge(trainable, frozen))
+    with ocp.PyTreeCheckpointer() as checkpointer:
+        checkpointer.save(directory / PARAMS_DIR, {"params": state})
     (directory / META_FILE).write_text(json.dumps(dict(meta), indent=2, default=str))
 
 
@@ -186,24 +193,38 @@ def save_norm_stats(model_cfg: Optional[Mapping[str, Any]], directory: Path) -> 
 
 def load_checkpoint(policy, directory) -> dict:
     """Put the trained parameters of a checkpoint into `policy` (loaded from the same model YAML and overrides). Returns the checkpoint's meta.
-    Refuses a checkpoint that does not fit the policy: a parameter the policy lacks, or of another shape (another LoRA rank)."""
+    Reads openpi's layout (`params` = `{"params": the whole state}`, what `save_checkpoint` writes) and the older one of this repo (the trainable parameters only, no `params`
+    level). Only the policy's TRAINABLE parameters are read and replaced, at the policy's own dtype (bfloat16): the frozen ones of the checkpoint are the base model's, which the
+    policy already holds (and shares with its forks); they are only checked, from the checkpoint's metadata, for being there and of the right shape.
+    Refuses a checkpoint that does not fit the policy: a parameter the policy lacks, one of another shape (another LoRA rank), or a trainable one the checkpoint lacks."""
     import flax.nnx as nnx
     import flax.traverse_util as tu
+    import jax
     import jax.numpy as jnp
     import orbax.checkpoint as ocp
     directory = Path(directory).resolve()
     meta = json.loads((directory / META_FILE).read_text())
-    saved = tu.flatten_dict(ocp.PyTreeCheckpointer().restore(directory / PARAMS_DIR))
     new = nnx.state(nnx.merge(policy.graphdef, policy.state))
     flat = tu.flatten_dict(new.to_pure_dict())
-    problems = [f"{'/'.join(map(str, k))}: not in the policy" for k in saved if k not in flat]
-    problems += [f"{'/'.join(map(str, k))}: {tuple(v.shape)} in the checkpoint, {tuple(flat[k].shape)} in the policy"
-                 for k, v in saved.items() if k in flat and tuple(v.shape) != tuple(flat[k].shape)]
-    if problems:
-        raise ValueError(f"{directory} does not fit this policy (same model YAML and overrides as the run, rank included?):\n  "
-                         + "\n  ".join(problems[:8]) + ("\n  ..." if len(problems) > 8 else ""))
-    for k, v in saved.items():
-        flat[k] = jnp.asarray(v).astype(flat[k].dtype)
+    wanted = set(tu.flatten_dict(split_state(policy)[0].to_pure_dict()))
+    with ocp.PyTreeCheckpointer() as checkpointer:
+        tree = checkpointer.metadata(directory / PARAMS_DIR).tree
+        wrapped = set(tree) == {"params"}                       # openpi's layout: the parameters are the `value` of each variable under `params`
+        entries = tu.flatten_dict(tree["params"] if wrapped else tree)
+        saved = {(k[:-1] if wrapped and k[-1] == "value" else k): v for k, v in entries.items()}
+        problems = [f"{'/'.join(map(str, k))}: not in the policy" for k in saved if k not in flat]
+        problems += [f"{'/'.join(map(str, k))}: {tuple(v.shape)} in the checkpoint, {tuple(flat[k].shape)} in the policy"
+                     for k, v in saved.items() if k in flat and tuple(v.shape) != tuple(flat[k].shape)]
+        problems += [f"{'/'.join(map(str, k))}: trainable in the policy, not in the checkpoint" for k in sorted(wanted - set(saved))]
+        if problems:
+            raise ValueError(f"{directory} does not fit this policy (same model YAML and overrides as the run, rank included?):\n  "
+                             + "\n  ".join(problems[:8]) + ("\n  ..." if len(problems) > 8 else ""))
+        paths = {k: ((("params",) + k + ("value",)) if wrapped else k) for k in wanted}
+        item = tu.unflatten_dict({paths[k]: entries[paths[k][1:] if wrapped else paths[k]] for k in paths})
+        restore_args = jax.tree.map(lambda _: ocp.RestoreArgs(restore_type=np.ndarray), item)
+        restored = tu.flatten_dict(checkpointer.restore(directory / PARAMS_DIR, args=ocp.args.PyTreeRestore(item=item, restore_args=restore_args, transforms={})))
+    for k, path in paths.items():
+        flat[k] = jnp.asarray(restored[path]).astype(flat[k].dtype)
     new.replace_by_pure_dict(tu.unflatten_dict(flat))
     policy.set_state(new)
     return meta
@@ -285,21 +306,46 @@ def load_resume(directory: Path, meta: Mapping[str, Any], trainable, opt_state, 
 
 
 # -- data feed -----------------------------------------------------------------------------------------------------------------------
+def _indices(items) -> np.ndarray:
+    """`collate_fn` of the loader of `row_batches` (a module-level function: the workers are spawned, they pickle it)."""
+    return np.asarray(items, dtype=np.int64)
+
+
+LOADER_WORKERS = 2          # expo-ft ran with 12 (`sft_num_workers`); the order of the batches does not depend on the number (measured: 1, 2 and 12), it does on there being workers
+
+
 def row_batches(n_rows: int, batch_size: int, steps: int, seed: int, skip: int = 0) -> Iterator[np.ndarray]:
-    """Batches `skip + 1` to `steps` of the sequence of `batch_size` distinct rows: a new random permutation per epoch, the incomplete tail of an epoch is
-    dropped. The `skip` first ones are walked over, not given (a resumed run does not prepare the batches it already trained on)."""
+    """The batches `skip` to `steps - 1` (0-based) of openpi's data loader on a dataset of `n_rows` rows: openpi's `TorchDataLoader` (training/data_loader.py), the same torch
+    `DataLoader` (`shuffle=True`, `drop_last=True`, `torch.Generator` seeded with `seed`, spawned persistent workers), asked for the indices only, and restarted at the end of each
+    epoch (`iter(loader)` again) as its `__iter__` does: a new random permutation per epoch, the incomplete tail of an epoch dropped. The workers matter: with workers the second
+    epoch's permutation is not the one of a loader without (the loader draws from the generator once more per epoch), and expo-ft's SFT ran with workers.
+    The `skip` first batches are walked over, not given (a resumed run does not prepare the batches it already trained on). Needs torch (a dependency of openpi)."""
+    import multiprocessing
+    import torch
     if n_rows < batch_size:
         raise ValueError(f"{n_rows} training steps but batch_size {batch_size}")
-    rng = np.random.default_rng(seed)
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    loader = torch.utils.data.DataLoader(list(range(n_rows)), batch_size=batch_size, shuffle=True, drop_last=True, generator=generator, collate_fn=_indices,
+                                         num_workers=LOADER_WORKERS, multiprocessing_context=multiprocessing.get_context("spawn"), persistent_workers=True)
     produced = 0
-    while produced < steps:
-        order = rng.permutation(n_rows)
-        for i in range(0, n_rows - batch_size + 1, batch_size):
-            if produced == steps:
-                return
-            produced += 1
-            if produced > skip:
-                yield order[i:i + batch_size]
+    try:
+        while True:
+            data_iter = iter(loader)
+            while True:
+                try:
+                    rows = next(data_iter)
+                except StopIteration:
+                    break                                   # the dataset is exhausted: a new iterator starts a new epoch
+                if produced == steps:
+                    return
+                produced += 1
+                if produced > skip:
+                    yield rows
+    finally:
+        iterator = getattr(loader, "_iterator", None)
+        if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+            iterator._shutdown_workers()                    # the workers go with the generator, not with the garbage collector
 
 
 def prefetch(iterator: Iterator, depth: int) -> Iterator:
@@ -346,6 +392,12 @@ def micro_batches(policy, dataset: DemoSet, rows: np.ndarray, micro: int) -> Lis
         obs, prompts, target = dataset.sample(rows[i:i + micro])
         out.append(policy.training_batch(obs, prompts, target))
     return out
+
+
+def full_batch(policy, dataset: DemoSet, rows: np.ndarray) -> tuple:
+    """(Observation, actions) of ALL the rows of a batch, in the model's own input and target space: a step draws the randomness of the whole batch at once (`prepare_loss_batch`)."""
+    obs, prompts, target = dataset.sample(rows)
+    return policy.training_batch(obs, prompts, target)
 
 
 # Rows per forward pass of the evaluation loss: the logits of pi0-FAST are (rows, tokens, 257152 words) in float32, 7.8 GB for 16 rows of 474 tokens, which
@@ -498,9 +550,15 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         (picture_obs, _), = micro_batches(policy, train_set, picture_rows, len(picture_rows))
         log.camera_views(0, picture_obs.images)
 
+    # openpi's randomness of a step (scripts/train.py): `train_rng, init_rng = split(key(seed))`, the key of the update number `it` is `fold_in(train_rng, it)` for the WHOLE batch.
+    # `prepare_fn` makes every draw of the batch (image augmentation, flow-matching noise and time) once, `grad_fn` takes the gradient of the loss of a micro-batch from them:
+    # the micro-batches see the numbers a single pass of the whole batch would.
+    train_rng, _ = jax.random.split(jax.random.key(cfg.seed))
+    prepare_fn = jax.jit(lambda rng, observation, actions: policy.prepare_loss_batch(rng, observation, actions, train=True))
+
     @jax.jit
-    def grad_fn(trainable, frozen, rng, observation, actions):
-        loss_of = lambda t: policy.loss(nnx.State.merge(t, frozen), rng, observation, actions, train=True)     # noqa: E731
+    def grad_fn(trainable, frozen, observation, actions, draws):
+        loss_of = lambda t: policy.loss_of_rows(nnx.State.merge(t, frozen), observation, actions, draws)     # noqa: E731
         return jax.value_and_grad(loss_of)(trainable)
 
     # Memory of a full fine-tuning (a float32 copy of the gradients is 12.5 GiB for pi0.5): the running sum is donated (it becomes the new sum), and the python
@@ -558,7 +616,7 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         if path.exists():                                   # saved by the attempt this one resumed: same step, same content
             shutil.rmtree(path)
         t_save = time.monotonic()
-        save_checkpoint(path, trainable, {**meta, "step": step, "sft": dataclasses.asdict(cfg)})
+        save_checkpoint(path, trainable, frozen, {**meta, "step": step, "updates": step + 1, "sft": dataclasses.asdict(cfg)})
         save_norm_stats(meta.get("model_cfg"), path)
         size_mib = round(sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 2**20)
         log.write(event="checkpoint", step=step, path=str(path), save_s=round(time.monotonic() - t_save, 1), size_mib=size_mib)
@@ -575,36 +633,45 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         previous_handler = signal.signal(signal.SIGTERM, lambda *_: stop.set())
     except ValueError:                                      # not the main thread: nothing to catch
         previous_handler = None
-    base_key = jax.random.key(cfg.seed)
     # Seconds the feed thread takes to prepare one batch (openpi's transforms on CPU), logged as `batch_prep_s`: as long as it stays under `step_s` the GPU never waits for data.
     prep_s: collections.deque = collections.deque()
     last_prep: Optional[float] = None
 
-    def timed_micro_batches(rows):
+    def timed_batch(rows):
         t_prep = time.monotonic()
-        out = micro_batches(policy, train_set, rows, cfg.micro_batch_size)
+        out = full_batch(policy, train_set, rows)
         prep_s.append(time.monotonic() - t_prep)
         return out
 
-    feed = prefetch((timed_micro_batches(rows) for rows in row_batches(len(train_set), cfg.batch_size, cfg.steps, cfg.seed, skip=start_step)), cfg.prefetch)
+    def due(it: int, interval: int) -> bool:
+        """openpi's rule for what happens every `interval` steps (checkpoints): `step % interval == 0 and step > start_step`, and at the last step."""
+        return (it % interval == 0 and it > start_step) or it == cfg.steps - 1
+
+    feed = prefetch((timed_batch(rows) for rows in row_batches(len(train_set), cfg.batch_size, cfg.steps, cfg.seed, skip=start_step)), cfg.prefetch)
     t_start, t_window, losses, grad_norms, checkpoints, last_loss = time.monotonic(), time.monotonic(), [], [], [], float("nan")
-    stopped, last_snapshot = False, start_step
-    for step, micros in enumerate(feed, start=start_step + 1):
+    stopped, last_snapshot, micro = False, start_step, cfg.micro_batch_size
+    # `it` is openpi's loop variable `step`: the number of updates done before this one (the update of `it` uses the learning rate and the key of `it`); what is logged and
+    # saved at `it` (a checkpoint, the evaluation) has had `it + 1` updates.
+    for it, (observation, actions) in enumerate(feed, start=start_step):
+        observation, draws = prepare_fn(jax.random.fold_in(train_rng, it), observation, actions)
         total, step_losses = None, []
-        for i, (observation, actions) in enumerate(micros):
-            loss, grads = grad_fn(trainable, frozen, jax.random.fold_in(base_key, step * n_micro + i), observation, actions)
+        for i in range(n_micro):
+            rows = slice(i * micro, (i + 1) * micro)
+            cut = lambda x, rows=rows: x[rows]                                                          # noqa: E731
+            loss, grads = grad_fn(trainable, frozen, jax.tree.map(cut, observation), actions[rows], jax.tree.map(cut, draws))
             total = grads if total is None else add_fn(total, grads)
             del grads
             step_losses.append(loss)
+        del observation, draws
         trainable, opt_state, grad_norm = apply_fn(trainable, opt_state, total)
         total = None                                        # not kept through the evaluation, the checkpoint and the snapshot
         losses.append(jnp.mean(jnp.stack(step_losses)))
         grad_norms.append(grad_norm)
-        if step == start_step + 1:
+        if it == start_step:
             jax.block_until_ready(trainable)
             log.write(event="first_step", seconds=round(time.monotonic() - t_start, 1), note="includes the compilation", memory_mib=device_memory_mib())
             t_window = time.monotonic()
-        if step % cfg.log_interval == 0 or step == cfg.steps:
+        if it % cfg.log_interval == 0:                      # openpi logs the step 0 alone, then the mean over each window of log_interval steps
             last_loss = float(np.mean(jax.device_get(losses)))
             now = time.monotonic()
             norm = {}
@@ -617,20 +684,20 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
             prepared = [prep_s.popleft() for _ in range(len(prep_s))]       # the thread runs ahead: a short window may hold none (the last value is repeated)
             if prepared:
                 last_prep = float(np.mean(prepared))
-            log.write(event="train", step=step, loss=last_loss, grad_norm=float(np.mean(jax.device_get(grad_norms))), **norm, lr=float(schedule(step - 1)),
+            log.write(event="train", step=it, loss=last_loss, grad_norm=float(np.mean(jax.device_get(grad_norms))), **norm, lr=float(schedule(it)),
                       step_s=round((now - t_window) / len(losses), 3), batch_prep_s=round(last_prep, 3) if last_prep is not None else None,
                       memory_mib=device_memory_mib())
             losses, grad_norms, t_window = [], [], now
-        if step % cfg.eval_interval == 0 or step == cfg.steps:
-            evaluate(step)
-        if step % cfg.save_interval == 0 or step == cfg.steps:
-            checkpoints.append(checkpoint(step))
-        if cfg.resume_interval and (step % cfg.resume_interval == 0 or step == cfg.steps):
-            snapshot(step)
-            last_snapshot = step
-        if stop.is_set() and step < cfg.steps:
-            if last_snapshot != step:
-                snapshot(step)
+        if due(it, cfg.eval_interval):
+            evaluate(it)
+        if due(it, cfg.save_interval):
+            checkpoints.append(checkpoint(it))
+        if cfg.resume_interval and ((it + 1) % cfg.resume_interval == 0 or it == cfg.steps - 1):
+            snapshot(it + 1)
+            last_snapshot = it + 1
+        if stop.is_set() and it < cfg.steps - 1:
+            if last_snapshot != it + 1:
+                snapshot(it + 1)
             stopped = True
             feed.close()
             break
@@ -638,7 +705,7 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         signal.signal(signal.SIGTERM, previous_handler)
     policy.set_state(deployed_state(trainable, frozen))
     summary = {"steps": cfg.steps, "final_loss": last_loss, "checkpoints": checkpoints, "seconds": round(time.monotonic() - t_start, 1),
-               "stopped": stopped, "last_step": step if cfg.steps > start_step else start_step}
+               "stopped": stopped, "last_step": it if cfg.steps > start_step else start_step - 1}
     log.write(event="stopped" if stopped else "done", **summary)
     log.close()
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))

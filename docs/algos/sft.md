@@ -105,13 +105,19 @@ range. The demo statistics keep the gripper's DROID ones (the gripper command is
 - **Trainable parameters** = `policy.trainable_filter` = openpi's freeze filter for the model YAML, unchanged: with LoRA, the LoRA matrices **and** SigLIP (and,
   for pi0.5, the action projections); without it, everything. Parameter counts are in `docs/models/pi05.md` and `pi0_fast.md` (e.g. pi0-FAST with LoRA: 442.7 M trainable
   out of 2951.2 M).
-- **Precision**: the trainable parameters are float32 during the run and the frozen ones bfloat16, as openpi's own `train.py` does. Checkpoints and evaluation use
-  bfloat16, what the policy runs with.
+- **Precision**: the trainable parameters are float32 during the run and the frozen ones bfloat16, as openpi's own `train.py` does, **from the start**: the policy of a run is loaded
+  with `load_model(..., for_training=True)`, which keeps the checkpoint's float32 values of the trainable parameters and the LoRA matrices as initialised (no rounding to bfloat16 first).
+  A checkpoint holds them as they are (`checkpoints/<step>/` below); the evaluation runs the policy in bfloat16, what it runs with.
 - **Loss**: `policy.loss`, i.e. openpi's `compute_loss` with `train=True` (image augmentation included): flow matching for pi0.5, next-token cross entropy for pi0-FAST.
 - **Optimiser**: openpi's AdamW (b1 0.9, b2 0.95, weight decay 1e-10, gradient clipping at 1.0), no EMA, learning rate 2.5e-5 constant (no warmup; `lr`, `lr_end`,
   `warmup_steps` give a cosine decay if wanted). These are the values of expo-ft's pi0.5 SFT.
-- **Batches**: 64 rows per update, 4000 updates, a new random permutation of the steps every epoch. With 50 demonstrations (about 2 400 steps for scripted) that is about 100
+- **Batches**: 64 rows per update, `steps: 4001` updates (openpi's `num_train_steps` as expo-ft ran it: the loop variable `it` goes from 0 to 4000, and a checkpoint "`<it>`" has had `it + 1`
+  updates), a new random permutation of the rows every epoch, the incomplete tail dropped. With 50 demonstrations (about 2 400 steps for scripted) that is about 100
   epochs; expo-ft started the RL from the step 1200 to 1400 checkpoints, which is why a checkpoint is saved every 200 steps.
+- **Randomness is openpi's** (`tests/test_sft_loop_equals_openpi.py` runs openpi's own code against ours): the ORDER of the rows is the sequence of openpi's `TorchDataLoader` (the same torch
+  `DataLoader`, `torch.Generator` seeded with `seed`, with workers; `row_batches`); the LoRA matrices are initialised with the key openpi derives from `seed` (`split(key(seed))`, then `split` again;
+  `loading.openpi_model_key`); update `it` draws its image augmentation, flow-matching noise and time for the WHOLE batch from `fold_in(train_rng, it)` (`train_rng` the first half of `split(key(seed))`),
+  and the micro-batches take their rows of those draws (`OpenPIPolicy.prepare_loss_batch` / `loss_of_rows`), so cutting the batch changes the memory and nothing else. With `seed: 42`, expo-ft's.
 - **Memory knob**: `micro_batch_size` cuts the batch into passes whose gradients are summed (`batch_size` must be a multiple). It sets the memory, not the optimisation. One
   device, no FSDP.
 - A thread prepares the next batches (`prefetch`): openpi's transforms (resize, tokens, FAST) are CPU work.
@@ -228,7 +234,7 @@ Looked at and not done:
 | `wandb_id.txt` | the id of the wandb run of this training (section 5b); `--resume` reads it to continue the same run |
 | `wandb/` | the local files of wandb (the whole run when it is offline) |
 | `resume/` | the training state to resume from (section 6), replaced at each snapshot |
-| `checkpoints/<step>/` | `params` (orbax: the trainable parameters in bfloat16) and `meta.json` (step, model, overrides, demos, settings) |
+| `checkpoints/<step>/` | `params` (orbax, openpi's layout: `{"params": the whole model}`, trainable parameters in float32, frozen ones in bfloat16: about 7.7 GB with pi0.5 LoRA (computed from the parameter counts: 467 M x 4 bytes + 2936 M x 2 bytes, not measured), 21 of them about 160 GB; what openpi's `restore_params` reads), `assets/` (the normalisation statistics) and `meta.json` (step, updates, model, overrides, demos, settings). `<step>` is openpi's: 200, 400, ..., and the last (4000, after 4001 updates) |
 | `summary.json` | final loss, checkpoint list, duration |
 
 `eval` lines (every `eval_interval`) hold, for a **fixed** set of `eval_samples` rows, once on training rows and once on held-out rows when `val_episodes > 0`: the loss, and
@@ -257,7 +263,7 @@ as expo-ft did (openpi's `loss`, `grad_norm`, `param_norm`, and the `camera_view
 A run can be continued after a time limit, a failure or a preemption: `--resume <run>` (the run's path, e.g. `runs/sft/peg_insert/peg_insert_pi05_lora_scripted`, or a folder name under `output_root`), with the same job script and without `--model`. Nothing else
 has to be repeated: the model, its overrides, the demonstrations and the settings come from the run's `config.json`, so only `--set` is accepted next to `--resume`.
 
-What is written, in `<run>/resume/` (the checkpoints cannot do it: they are bfloat16 and hold no optimiser state):
+What is written, in `<run>/resume/` (the checkpoints cannot do it: they hold no optimiser state):
 
 - the trainable parameters **in float32**, the whole **AdamW state** and the step. Size: about 3 times the float32 trainable parameters, i.e. 4.5 GiB measured with LoRA (15 s to write) and 29 GiB measured for pi0-FAST full fine-tuning (77 s to write) and 29 GiB measured for pi0.5 full fine-tuning (160 s to write).
   full fine-tuning. It is written aside and swapped in when complete, so the disk holds twice that for a moment, and a crash while writing leaves the previous snapshot usable;
@@ -300,7 +306,10 @@ of another shape (another rank), naming the first ones. A stopped run is continu
 | pi0.5 chunk | 16 steps, offsets (DeltaActions) | the same |
 | normalisation statistics | the noisy demonstrations' (`sft_norm_stats_dir` / `sft_norm_stats_asset_id`), for the three demonstration types | the same file, through the `norm_stats` block of the model YAML (section 2b); pi0-FAST: the checkpoint's own |
 | pi0-FAST | not run | 10-step chunks, absolute targets (openpi's pipeline for this checkpoint) |
-| steps | `num_train_steps: 4001` (4001 iterations) | `steps: 4000` updates |
+| steps | `num_train_steps: 4001` (4001 iterations) | `steps: 4001` (the same loop, and the same checkpoint numbering) |
+| order of the rows, noise, LoRA initialisation | torch `DataLoader` (seed 42, workers), `fold_in(train_rng, step)` for the whole batch, `split(split(key(42))[1])` | the same ones, called (section 3) |
+| checkpoint | openpi's: every parameter, trainable ones in float32, frozen ones in bfloat16, plus the optimiser state (`train_state`) | the same `params` and `assets`; the optimiser state is in `resume/` instead |
+| batch of 64 | one pass (FSDP over the devices) | micro-batches of 16 on one device, gradients summed, **the same draws**: the gradient differs by the order of the bfloat16 sums (about 0.2 % of its norm measured on the tiny model) |
 | evaluation | none during the run | loss and own-chunk error on a fixed set, FAST decoding statistics |
 | resume | yes (openpi's) | yes (section 6) |
 | wandb | yes, the same run on resume (`wandb_id.txt`) | yes, same logic (section 5b), x axis `step` |

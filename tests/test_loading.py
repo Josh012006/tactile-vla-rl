@@ -27,6 +27,14 @@ from src.models import loading  # noqa: E402
 
 
 @pytest.fixture
+def small_vision(monkeypatch):
+    """A tiny vision tower: the real one (400M parameters) makes every copy of the model 1 GB, and a checkpoint now holds all of them. Request it BEFORE `tiny`."""
+    import openpi.models.siglip as siglip
+    real_siglip = siglip.Module
+    monkeypatch.setattr(siglip, "Module", lambda *a, **k: real_siglip(*a, **{**k, "variant": "mu/14"}))
+
+
+@pytest.fixture
 def tiny(monkeypatch):
     """(train config with a LoRA model, the checkpoint's params, the non-LoRA config the checkpoint comes from)."""
     real = gemma.get_config
@@ -39,7 +47,6 @@ def tiny(monkeypatch):
         return real(variant)
 
     monkeypatch.setattr(gemma, "get_config", get_config)
-
     base = pi0_config.Pi0Config(pi05=True, paligemma_variant="dummy", action_expert_variant="dummy", action_horizon=4)
     with_lora = dataclasses.replace(base, paligemma_variant="dummy_lora", action_expert_variant="dummy_lora")
     ckpt = jax.tree.map(np.asarray, nnx.state(base.create(jax.random.key(1))).to_pure_dict())     # what restore_params(np.ndarray) returns
@@ -74,6 +81,27 @@ def test_expo_ft_way_keeps_the_checkpoint_weights_and_initialises_the_lora(tiny)
     assert any(np.any(np.asarray(got[k], dtype=np.float32) != 0) for k in lora_keys if "lora_b" in k)
 
 
+def test_a_training_policy_starts_from_openpis_train_state_float32_trainable_bfloat16_frozen_and_openpis_lora_draw(small_vision, tiny):
+    """`for_training=True`: what `init_train_state` of openpi's train.py holds at step 0: the trainable parameters in float32 with the checkpoint's own values (not rounded to
+    bfloat16 first), the LoRA matrices as initialised (float32, from the key openpi derives from the seed), the frozen parameters in bfloat16."""
+    from openpi.shared import nnx_utils
+    train_cfg, ckpt, _ = tiny
+    trainable_filter = nnx.All(nnx.Param, nnx_utils.PathRegex(".*(lora|action_out_proj).*"))
+    cfg = types.SimpleNamespace(model=train_cfg.model, weight_loader=train_cfg.weight_loader, trainable_filter=trainable_filter)
+    got = tu.flatten_dict(nnx.state(loading.build_params_like_expo_ft(cfg, seed=5, for_training=True)).to_pure_dict(), sep="/")
+    trainable = {k for k in got if "lora" in k or "action_out_proj" in k}
+    assert trainable and any("lora" in k for k in trainable) and any("action_out_proj" in k for k in trainable)
+    want = tu.flatten_dict(ckpt, sep="/")
+    for k, v in got.items():
+        assert v.dtype == (jnp.float32 if k in trainable else jnp.bfloat16), k
+        if k in want and k in trainable:
+            assert np.array_equal(np.asarray(v), np.asarray(want[k])), f"{k} was rounded"                  # the checkpoint's float32 values, untouched
+        elif k in want:
+            assert np.array_equal(np.asarray(v, dtype=np.float32), np.asarray(jnp.asarray(want[k]).astype(jnp.bfloat16), dtype=np.float32)), k
+    reference = {"/".join(map(str, k)): v for k, v in loading.init_lora_params(train_cfg.model, loading.openpi_model_key(5), jnp.float32).items()}
+    assert reference and all(np.array_equal(np.asarray(got[k]), np.asarray(v)) for k, v in reference.items())        # the LoRA init of seed 5, in float32
+
+
 def test_a_checkpoint_that_holds_lora_tensors_keeps_them(tiny):
     """A checkpoint trained with LoRA (an expo-ft SFT step: `params/` holds the base weights AND the trained lora_a / lora_b) must come back
     as it is: only the LoRA tensors that the checkpoint LACKS are initialised. (A first version initialised every LoRA tensor and so replaced
@@ -92,12 +120,12 @@ def test_a_checkpoint_that_holds_lora_tensors_keeps_them(tiny):
         assert np.array_equal(np.asarray(got[k], dtype=np.float32), np.asarray(jnp.asarray(flat_full[k]).astype(jnp.bfloat16), dtype=np.float32)), f"{k} was replaced"
 
 
-def test_our_checkpoint_route_and_expo_fts_full_params_route_give_the_same_weights(tiny, monkeypatch, tmp_path):
+def test_our_checkpoint_route_and_expo_fts_full_params_route_give_the_same_weights(small_vision, tiny, monkeypatch, tmp_path):
     """The two ways an evaluation rebuilds a fine-tuned model, from the SAME trained values, end with the SAME weights:
     (1) ours: the initial model (base weights + LoRA init) with the TRAINABLE parameters of `<ckpt>/params` laid over it (`sft.load_checkpoint`);
     (2) expo-ft's: a `params/` that holds every weight, frozen and trained (what `scripts/adopt_expo_ft_checkpoint.py` points at), through `build_params_like_expo_ft`.
-    The trained values are the initial ones plus a perturbation, in float32 as in training; `save_checkpoint` rounds them to bfloat16 (route 1), the loader casts
-    the full params to bfloat16 (route 2): the same rounding, so the weights must be identical, leaf by leaf. (Written to share buffers: the SigLIP tower makes
+    The trained values are the initial ones plus a perturbation, in float32 as in training; `save_checkpoint` writes them as they are (openpi's layout) and `load_checkpoint`
+    casts them to the policy's bfloat16 (route 1), the loader casts the full params to bfloat16 (route 2): the same rounding, so the weights must be identical, leaf by leaf. (Written to share buffers: the SigLIP tower makes
     every copy of the model ~1 GB.)"""
     from openpi.shared import nnx_utils
 
@@ -117,9 +145,9 @@ def test_our_checkpoint_route_and_expo_fts_full_params_route_give_the_same_weigh
     trained = jax.tree.map(lambda x: x, trainable)
     trained.replace_by_pure_dict(tu.unflatten_dict(trained_flat, sep="/"))
 
-    # route 1: our checkpoint (trainable only, bfloat16), laid over the initial model by sft.load_checkpoint
-    sft.save_checkpoint(tmp_path / "ckpt", trained, {"step": 4000})
-    holder = types.SimpleNamespace(graphdef=graphdef, state=state)
+    # route 1: our checkpoint (openpi's layout: every parameter, the trainable ones in float32), its trainable part laid over the initial model by sft.load_checkpoint
+    sft.save_checkpoint(tmp_path / "ckpt", trained, state.filter(nnx.Not(trainable_filter)), {"step": 4000})
+    holder = types.SimpleNamespace(graphdef=graphdef, state=state, trainable_filter=trainable_filter)
     holder.set_state = lambda new: setattr(holder, "state", new)
     sft.load_checkpoint(holder, tmp_path / "ckpt")
     ours = tu.flatten_dict(nnx.state(nnx.merge(holder.graphdef, holder.state)).to_pure_dict(), sep="/")

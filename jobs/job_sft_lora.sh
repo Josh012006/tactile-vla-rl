@@ -11,8 +11,8 @@
 #   uv sync --group vla && source .venv/bin/activate && python -m scripts.fetch_models
 #   python -m scripts.sft --model <model> --dry-run                         # reads the demonstrations, loads no model
 #   wandb login                                                             # once; the job logs to wandb (--set wandb_mode=offline | disabled to change)
-# Output: <output_root>/<run name>/, runs/sft/peg_insert/ for an experiment, runs/sft/probing/ otherwise (metrics.jsonl, wandb_id.txt, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out, logs/slurm/gpu_<jobid>.csv (the card's utilisation every 30 s)
-# Time: 4000 steps are about 10 h on an L40S (8.7 s per step, measured) and 7 h on an A100 (6.0 s; `sbatch --gres=gpu:a100l:1 jobs/job_sft_lora.sh ...`), hence 14 h. Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (4.5 GiB with LoRA) and stops cleanly.
+# Output: <output_root>/<run name>/, runs/sft/peg_insert/ for an experiment, runs/sft/probing/ otherwise (metrics.jsonl, wandb_id.txt, checkpoints/<step>/, resume/), logs/slurm/sft_lora_<jobid>.out, logs/slurm/gpu_<jobid>.csv (the card's utilisation every 30 s). A checkpoint holds every parameter (openpi's layout): about 7.7 GB with pi0.5 LoRA (computed from the parameter counts, not measured), 21 of them about 160 GB per run
+# Time: 4001 steps are about 10 h on an L40S (8.7 s per step, measured) and 7 h on an A100 (6.0 s; `sbatch --gres=gpu:a100l:1 jobs/job_sft_lora.sh ...`), hence 14 h. Time limit: 5 minutes before it, Slurm sends a SIGTERM; the run writes its resume snapshot (4.5 GiB with LoRA) and stops cleanly.
 #
 #SBATCH --job-name=sft_lora
 #SBATCH --ntasks=1

@@ -36,30 +36,46 @@ def _download(uri: str) -> pathlib.Path:
     return download.maybe_download(uri, gs=GCS_ANON)       # already fetched by scripts.fetch_models: a cache hit, no network
 
 
-def init_lora_params(model_cfg, key):
-    """Only the LoRA parameters of `model_cfg.create(key)`, in bfloat16, on the device. Same values as in a full `create(key)` (the random
-    draws are functional in the key), but jit only computes what is returned: the rest of the initialisation is dropped by XLA."""
+def openpi_model_key(seed: int):
+    """The key openpi's train.py gives `config.model.create` for `TrainConfig.seed = seed`: `train_rng, init_rng = split(key(seed))`, then `init` does
+    `rng, model_rng = split(init_rng)`. It decides the random initialisation (the LoRA matrices) of a model that starts from a checkpoint without them."""
+    import jax
+    _, init_rng = jax.random.split(jax.random.key(seed))
+    _, model_rng = jax.random.split(init_rng)
+    return model_rng
+
+
+def init_lora_params(model_cfg, key, dtype=None):
+    """Only the LoRA parameters of `model_cfg.create(key)`, in `dtype` (default bfloat16, what the policy runs with; float32 is openpi's own, the one a training
+    starts from), on the device. Same values as in a full `create(key)` (the random draws are functional in the key), but jit only computes what is returned:
+    the rest of the initialisation is dropped by XLA."""
     import flax.nnx as nnx
     import flax.traverse_util as tu
     import jax
     import jax.numpy as jnp
+    dtype = jnp.bfloat16 if dtype is None else dtype
 
     @jax.jit
     def init(rng):
         _, state = nnx.split(model_cfg.create(rng))
         flat = tu.flatten_dict(state.to_pure_dict())
-        return {k: v.astype(jnp.bfloat16) for k, v in flat.items() if any("lora" in part for part in k)}
+        return {k: v.astype(dtype) for k, v in flat.items() if any("lora" in part for part in k)}
 
     return init(key)
 
 
-def build_params_like_expo_ft(train_cfg, seed: int = 0):
+def build_params_like_expo_ft(train_cfg, seed: int = 0, *, for_training: bool = False):
     """The model of `train_cfg.model`, weights from `train_cfg.weight_loader`, LoRA parameters (absent from the checkpoint) from the
     model's own init (and ONLY those: a checkpoint that holds LoRA tensors, e.g. an expo-ft SFT step, keeps its trained ones), every parameter in bfloat16 (as the strict path does). Returns the nnx model.
+    The LoRA init is the one openpi's train.py draws for `TrainConfig.seed = seed` (`openpi_model_key`).
+
+    for_training=True: the state a training starts from, as openpi's `init_train_state` builds it: the TRAINABLE parameters (`train_cfg.trainable_filter`)
+    in float32 (the checkpoint's own values, the LoRA ones as initialised, no rounding to bfloat16), the frozen ones in bfloat16. A policy in that state is not
+    what is deployed (the trainer casts the trainable part to bfloat16 for an evaluation or a checkpoint's inference, `sft.deployed_state`).
 
     Memory: expo-ft passes the whole float32 checkpoint through a jit that also creates the model (`pi05_init_train_state.init`), which
     puts ~13 GB of float32 on the device on top of the bfloat16 result (measured: JAX peak 19.4 GB for a model of 6.5 GB). Here the
-    checkpoint is cast to bfloat16 on the HOST, only the LoRA parameters are initialised on the device, and the peak is the model."""
+    checkpoint is cast on the HOST (the frozen part to bfloat16), only the LoRA parameters are initialised on the device, and the peak is the model."""
     import flax.nnx as nnx
     import flax.traverse_util as tu
     import jax
@@ -67,7 +83,7 @@ def build_params_like_expo_ft(train_cfg, seed: int = 0):
     import numpy as np
     import openpi.shared.array_typing as at
 
-    key = jax.random.key(seed)
+    key = openpi_model_key(seed)
     model_cfg = train_cfg.model
     abstract = nnx.eval_shape(model_cfg.create, key)
     graphdef, state = nnx.split(abstract)
@@ -77,9 +93,10 @@ def build_params_like_expo_ft(train_cfg, seed: int = 0):
     loaded = train_cfg.weight_loader.load(state.to_pure_dict())
     at.check_pytree_equality(expected=state.to_pure_dict(), got=loaded, check_shapes=True, check_dtypes=False)
     flat = {k: v for k, v in tu.flatten_dict(loaded).items() if not isinstance(v, jax.ShapeDtypeStruct)}
-    flat = {k: np.asarray(v).astype(jnp.bfloat16) for k, v in flat.items()}                      # on the host, before any transfer
+    trainable = set(tu.flatten_dict(state.filter(train_cfg.trainable_filter).to_pure_dict())) if for_training else set()
+    flat = {k: np.asarray(v).astype(jnp.float32 if k in trainable else jnp.bfloat16) for k, v in flat.items()}         # on the host, before any transfer
     flat = jax.device_put(flat)
-    for k, v in init_lora_params(model_cfg, key).items():                  # only the LoRA tensors the checkpoint LACKS: one that it holds (an expo-ft SFT step) is the trained one
+    for k, v in init_lora_params(model_cfg, key, jnp.float32 if for_training else None).items():          # only the LoRA tensors the checkpoint LACKS: one that it holds (an expo-ft SFT step) is the trained one
         flat.setdefault(k, v)
 
     state.replace_by_pure_dict(tu.unflatten_dict(flat))
@@ -137,8 +154,10 @@ def with_yaml_weights(train_cfg, checkpoint_dir: pathlib.Path):
     return dataclasses.replace(train_cfg, weight_loader=weight_loaders.CheckpointWeightLoader(str(checkpoint_dir / "params")))
 
 
-def load_policy(model_cfg: dict):
-    """(policy, openpi TrainConfig actually used: Gemma variants, freeze filter and weight loader as set by the YAML)."""
+def load_policy(model_cfg: dict, seed: int = 0, *, for_training: bool = False):
+    """(policy, openpi TrainConfig actually used: Gemma variants, freeze filter and weight loader as set by the YAML). `seed`: the LoRA initialisation is the one
+    openpi's train.py draws for that `TrainConfig.seed`. `for_training`: the policy holds the state a training starts from (trainable parameters in float32, see
+    `build_params_like_expo_ft`), always through the weight loader (the strict path runs everything in bfloat16)."""
     from src.models.openpi_config import apply_settings
     from src.models.settings import parse_model_settings
 
@@ -155,7 +174,7 @@ def load_policy(model_cfg: dict):
     train_cfg = apply_settings(_config.get_config(model_cfg["openpi_config"]), settings)
     checkpoint = _download(model_cfg["checkpoint"])
     norm_stats = load_norm_stats(model_cfg, train_cfg, checkpoint)
-    if mode == "strict":
+    if mode == "strict" and not for_training:
         return policy_config.create_trained_policy(train_cfg, checkpoint, norm_stats=norm_stats), train_cfg
     train_cfg = with_yaml_weights(train_cfg, checkpoint)
-    return _policy_from(train_cfg, build_params_like_expo_ft(train_cfg), norm_stats), train_cfg
+    return _policy_from(train_cfg, build_params_like_expo_ft(train_cfg, seed, for_training=for_training), norm_stats), train_cfg
