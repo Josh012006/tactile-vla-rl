@@ -62,9 +62,10 @@ distill_epochs: 1           # epochs over the whole buffer (warm-up included) pe
 
 # -- Evaluation -----------------------------------------------------------------------------------------------------------------------
 eval_episodes: 100      # the same starting states as the SFT evaluations
+eval_every_rounds: 5    # an evaluation after the warm-up (round 0), then every this many collection rounds, and after the last one (group, 15 Nov. 2026: 0, 5, 10, 15, 20 for 20 rounds). Each takes about 8 min
 
 # -- Logging, output ------------------------------------------------------------------------------------------------------------------
 seed: 0
 wandb_mode: online      # online / offline / disabled, as the SFT (src/algos/tracking.py)
 wandb_project: tactile-vla-rl
-output_root: runs/rl/probing        # the main runs are the experiment files of configs/experiment/rl/, which put theirs in runs/rl/peg_insert
+output_root: runs/rl/probing        # the main runs are the experiment files of configs/experiment/rl/, which put theirs in runs/rl/peg_insert 

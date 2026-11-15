@@ -113,3 +113,11 @@ def test_an_experiment_file_is_checked(tmp_path):
         rc.load_experiment(tmp_path / "missing.yaml")
     with pytest.raises(ValueError, match="unknown RL keys"):                                                              # a key the algorithm YAML does not have is refused when the config is built
         rc.load_rl_experiment(write(tmp_path, "name: a\nmodel: pi05\nset: {local_step: 3}\n"))
+
+
+def test_the_evaluation_rounds_are_the_warm_up_every_five_and_the_last():
+    assert rc.load_rl_config().eval_rounds == (0, 5, 10, 15, 20)
+    assert rc.load_rl_config(overrides={"total_episodes": 150, "eval_every_rounds": 2}).eval_rounds == (0, 2, 3)            # 3 rounds: 0, 2 and the last
+    assert rc.load_rl_config(overrides={"eval_every_rounds": 50}).eval_rounds == (0, 20)
+    with pytest.raises(ValueError, match="eval_every_rounds"):
+        rc.load_rl_config(overrides={"eval_every_rounds": 0})

@@ -64,6 +64,7 @@ class RLConfig:
     distill_micro_batch_size: int = 16
     distill_epochs: int = 1
     eval_episodes: int = 100
+    eval_every_rounds: int = 5
     seed: int = 0
     wandb_mode: str = "online"
     wandb_project: str = "tactile-vla-rl"
@@ -79,7 +80,7 @@ class RLConfig:
             need(getattr(self, name) in SELECTIONS, f"{name} must be one of {SELECTIONS}, got {getattr(self, name)!r}")
         need(self.softmax_temperature > 0, "softmax_temperature must be > 0")
         positive = ("num_candidates", "keep_top", "envs_per_batch", "total_episodes", "rows_per_sample_call", "critic_image_size", "critic_batch_size", "utd",
-                    "distill_batch_size", "distill_micro_batch_size", "distill_epochs", "eval_episodes")
+                    "distill_batch_size", "distill_micro_batch_size", "distill_epochs", "eval_episodes", "eval_every_rounds")
         for name in positive:
             need(isinstance(getattr(self, name), int) and getattr(self, name) >= 1, f"{name} must be an integer >= 1, got {getattr(self, name)!r}")
         need(self.keep_top <= self.num_candidates, f"keep_top ({self.keep_top}) cannot exceed num_candidates ({self.num_candidates})")
@@ -122,6 +123,11 @@ class RLConfig:
     def rounds(self) -> int:
         """Collection rounds of the run: batches of envs_per_batch episodes."""
         return self.total_episodes // self.envs_per_batch
+
+    @property
+    def eval_rounds(self) -> Tuple[int, ...]:
+        """The rounds after which the VLA + critic is evaluated: 0 (the end of the warm-up), every `eval_every_rounds`, and the last."""
+        return tuple(sorted({0, self.rounds, *range(self.eval_every_rounds, self.rounds + 1, self.eval_every_rounds)}))
 
 
 def config_from_dict(raw: Mapping[str, Any], overrides: Optional[Mapping[str, Any]] = None) -> RLConfig:
