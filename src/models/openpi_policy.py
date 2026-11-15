@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Sequence, Union
 import numpy as np
 
 from src.envs import protocol as P
-from src.models.interface import ModelInfo, VLAPolicy, num_envs_of, padded_batch_size, rows_of, targets_to_chunk
+from src.models.interface import Candidates, ModelInfo, VLAPolicy, chunk_to_targets, num_envs_of, padded_batch_size, rows_of, targets_to_chunk
 from src.models.settings import ModelSettings, parse_model_settings
 from src.touch.injection import build_injection
 
@@ -106,6 +106,7 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         self.max_rows: Optional[int] = None                  # most rows of ONE model call: a larger batch is split in equal calls (see `raw_chunks`); None = never split
         self.decode_stats = DecodeStats()                    # pi0-FAST: what the generated tokens were like (cumulative, reset() to restart)
         self.last_valid: Optional[np.ndarray] = None         # pi0-FAST: (N, S) bool of the last `plan`: False = the chunk could not be decoded
+        self.last_sample = None                              # (model outputs, state rows) of the last `raw_chunks`, before the output transforms: what `sample_candidates` reads
         self._fast = None if self._native_samples else fast_extractor(policy)
         if self._fast is not None:
             silence_fast_decoder_warnings()
@@ -142,6 +143,7 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         other = copy.copy(self)
         other.decode_stats = DecodeStats()
         other.last_valid = None
+        other.last_sample = None
         other.seed(seed)
         return other
 
@@ -233,6 +235,7 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
             states.append(state)
             infer_ms += ms
         out, state = np.concatenate(outs), np.concatenate(states)
+        self.last_sample = (out, state)
         if self._fast is not None:
             self._record_decoding(out, n * s, n, s)
         chunks = []
@@ -243,6 +246,45 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
                 res = self.policy._output_transform({"state": state[src], "actions": out[j]})  # noqa: SLF001
                 chunks.append(np.asarray(res["actions"], dtype=np.float32))
         return np.stack(chunks).reshape(n, s, *chunks[0].shape), infer_ms
+
+    # -- candidates for the RL methods (docs/algos/rl.md) ----------------------------------------------------------------------
+    @property
+    def native_samples(self) -> bool:
+        """True when the S samples of a state are drawn inside ONE model call (pi0.5 / pi0: the prefix is computed once); False for pi0-FAST (one row per sample)."""
+        return self._native_samples
+
+    def sample_candidates(self, obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], num_samples: int, *,
+                          row_seeds: Optional[Sequence[int]] = None, pad_to: Optional[int] = None) -> Candidates:
+        """`plan` that also returns the chunks in the model's NORMALISED space (the first 8 dimensions of what the model outputs, before the output transforms) and the state rows that bring
+        them back to the env's space (`normalized_to_targets`). The env-space chunks are `plan`'s own, unchanged. pi0.5 / pi0 only: pi0-FAST's output is a token string whose normalised chunk
+        is the middle of its output transforms (ExtractFASTActions), to be taken out at the step of docs/algos/rl.md that prepares its path."""
+        if not self._native_samples:
+            raise NotImplementedError("sample_candidates: pi0-FAST's candidates are token strings; their normalised chunks are decoded inside the output transforms (not wired yet)")
+        plan = self.plan(obs, prompt, num_samples, row_seeds=row_seeds, pad_to=pad_to)
+        out, state = self.last_sample
+        n = plan.targets.shape[0]
+        out = np.asarray(out, dtype=np.float32)
+        normalized = out.reshape(n, num_samples, *out.shape[1:])[..., :P.ACTION_DIM]            # (environment, sample)-major, as in `raw_chunks`
+        valid = np.ones((n, num_samples), bool) if self.last_valid is None else np.asarray(self.last_valid, bool)
+        return Candidates(normalized=np.ascontiguousarray(normalized), states=np.asarray(state[:n], dtype=np.float32), targets=plan.targets, valid=valid, infer_ms=plan.infer_ms)
+
+    def normalized_to_targets(self, normalized: np.ndarray, states: np.ndarray, joints: np.ndarray) -> np.ndarray:
+        """The env's chunks (N, S, H, 8) (absolute joint targets + gripper) of normalised chunks (N, S, H, 8), through the SAME output transforms as `plan`: for the chunks `sample_candidates`
+        returned (with its `states`) the result is its `targets`. `joints`: (N, >= 7) the joint positions of the observations (the offsets are from there). Used to execute or to
+        distill a chunk chosen or moved (gradient ascent) in the normalised space."""
+        normalized = np.asarray(normalized, dtype=np.float32)
+        n, s, h, d = normalized.shape
+        if d != P.ACTION_DIM or len(states) != n or len(joints) != n:
+            raise ValueError(f"normalized {normalized.shape}, states {np.shape(states)}, joints {np.shape(joints)}: expected (N, S, H, {P.ACTION_DIM}) and N states and joints")
+        model_dim = self._noise_shape[1]
+        padded = np.zeros((h, model_dim), np.float32)                                          # the model's chunks are wider (padding); what is past the env's 8 dimensions is dropped by the output transforms
+        targets = np.zeros((n, s, h, P.ACTION_DIM), np.float32)
+        for i in range(n):
+            for k in range(s):
+                padded[:, :d] = normalized[i, k]
+                chunk = np.asarray(self.policy._output_transform({"state": np.asarray(states[i]), "actions": padded.copy()})["actions"], dtype=np.float32)      # noqa: SLF001
+                targets[i, k] = chunk_to_targets(chunk, np.asarray(joints[i], dtype=np.float32), self.info.output_semantics)
+        return targets
 
     def _record_decoding(self, tokens: np.ndarray, rows: int, n: int, s: int) -> None:
         """Count the token strings of the first `rows` rows of `tokens` (the padding rows are not chunks) and set `last_valid`."""

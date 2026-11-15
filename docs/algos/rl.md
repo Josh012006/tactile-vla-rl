@@ -1,6 +1,6 @@
 # RL fine-tuning of the VLA: Best-of-N and PA-RL (design, decisions, open points)
 
-Status (15 Nov. 2026): design settled; implementation step 1 of 8 done (section 7: the YAML defaults and their loader). No model, critic or job code yet. Every value below says where it comes from:
+Status (15 Nov. 2026): design settled; implementation steps 1-2 of 8 done (section 7: the YAML defaults and loader; the candidate sampler and cache). No critic, rollout, distillation or job code yet. Every value below says where it comes from:
 **paper** = Policy Agnostic RL (Mark et al., arXiv 2412.06685v1), with the section / page; **group** = decided with Josué (15 Nov. 2026) after the exchange with Jesse;
 **proposal** = chosen by Claude because the paper is silent, to be confirmed before the step that needs it; **open** = to decide.
 Rule: the defaults of the YAMLs are the paper's; where the paper has no value we ask before choosing.
@@ -102,7 +102,11 @@ Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillat
 ## 7. Implementation steps (one at a time, each with its tests, no job launched without a go)
 
 1. DONE (15 Nov. 2026): YAML defaults (`configs/algo/rl.yaml`, one experiment per method in `configs/experiment/rl/`) and their loader (`src/algos/rl_config.py`, `tests/test_rl_config.py`). Open: the SFT checkpoint each run starts from (`start: {run, step}` of the experiment, optional until the launch script exists).
-2. Candidate sampler on the existing `plan(..., num_samples=k)` (pi0.5 first), with the cache.
+2. DONE (15 Nov. 2026): candidate sampler and cache (`src/algos/rl_candidates.py`, `tests/test_rl_candidates.py`; `OpenPIPolicy.sample_candidates` / `normalized_to_targets` and `Candidates` in `src/models/`, checked against the real transforms in `tests/test_openpi_policy.py`, which needs the `vla` group and was NOT run here).
+   - The critic and the local ascent work in the model's NORMALISED chunk space (first 8 dimensions of the model output, before the output transforms): `sample_candidates` returns those chunks with the state rows, `normalized_to_targets` brings a chunk (chosen or moved) back to the env's space to be executed or distilled.
+   - `CandidateSampler`: pi0.5 in calls of `rows_per_sample_call` = 8 environments, every call padded to 8 (one compilation); pi0-FAST one environment per call, its k rows split by `max_rows`.
+   - `CandidateCache`: by state id, with the version of the VLA that drew the candidates (Best-of-N: one version for ever; PA-RL: a new one after each distillation epoch; `stale_ids`), `refresh` recomputes them reading the buffer in chunks, with seeds that are a function of (seed, state id, version). About 16 KiB per state for pi0.5 (20 000 states: about 330 MB).
+   - pi0-FAST is NOT wired (`sample_candidates` raises): its candidates are token strings whose normalised chunk is inside the output transforms, and it has NO sampling temperature (it decodes greedily, so the k candidates of a state would be identical). Both are for step 8.
 3. Critic (without touch, then the touch inputs) and the replay buffer.
 4. Action optimisation (global, local with the acceptance rule) on a toy critic, then on the real one.
 5. Critic update with pi^Opt targets and the warm-up phase; measure the real cost.

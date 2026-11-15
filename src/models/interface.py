@@ -207,6 +207,16 @@ class Plan:
     infer_ms: float           # model time of the whole call (device time included); NaN when the model does not report it
 
 
+@dataclasses.dataclass
+class Candidates:
+    """What `OpenPIPolicy.sample_candidates` returns: S chunks per environment, in the space the RL methods work in (src/algos/rl_candidates.py, docs/algos/rl.md)."""
+    normalized: np.ndarray    # (N, S, H, 8) float32: the model's own NORMALISED chunks (before the output transforms: unnormalisation, offsets -> absolute): the critic's input, where the local ascent steps
+    states: np.ndarray        # (N, Ds) float32: the normalised state row of each environment, what the output transforms need to bring a normalised chunk back to the env's space
+    targets: np.ndarray       # (N, S, H, 8) float32: the same chunks in the env's action space (== Plan.targets)
+    valid: np.ndarray         # (N, S) bool: False = a chunk the model could not produce (pi0-FAST undecodable tokens); always True for pi0.5 / pi0
+    infer_ms: float           # model time of the call(s)
+
+
 class VLAPolicy(abc.ABC):
     """Batched policy over the env's observation dict. Subclasses implement `raw_chunks`; the conversion to env actions is here."""
 

@@ -339,3 +339,16 @@ def test_the_fast_decoders_warnings_are_dropped_and_the_others_are_not(pol, capl
     assert not flt.filter(rec("Error decoding tokens: cannot reshape array of size 79 into shape (8)"))
     assert not flt.filter(rec("Tokens: [1008, 975]"))
     assert flt.filter(rec("Token length (300) exceeds max length (256), truncating."))
+
+
+def test_sample_candidates_gives_plans_own_chunks_plus_their_normalised_form_and_the_round_trip_through_the_output_transforms_is_exact(pol):
+    """What the RL methods rely on (src/algos/rl_candidates.py): the candidates in the model's normalised space, brought back to the env's space by `normalized_to_targets`, are exactly what `plan` returns."""
+    obs = env_obs(3)
+    cands = pol.sample_candidates(obs, "insert the peg", 4, row_seeds=[1, 2, 3], pad_to=4)
+    plan = pol.plan(obs, "insert the peg", 4, row_seeds=[1, 2, 3], pad_to=4)                        # the same seeds: the same chunks
+    assert pol.native_samples and cands.normalized.shape == (3, 4, H, P.ACTION_DIM) and cands.targets.shape == plan.targets.shape and cands.valid.all()
+    assert np.allclose(cands.targets, plan.targets, atol=1e-5)
+    back = pol.normalized_to_targets(cands.normalized, cands.states, obs[P.JOINT_POSITION])
+    assert np.allclose(back, cands.targets, atol=1e-5)
+    moved = pol.normalized_to_targets(cands.normalized + 0.1, cands.states, obs[P.JOINT_POSITION])
+    assert not np.allclose(moved, back)                                                           # a moved chunk gives a moved target
