@@ -134,3 +134,10 @@ def test_what_this_step_does_not_do_is_refused(tmp_path):
         make_run(tmp_path, method="parl", keep_top=2, local_steps=0, rollout_selection="softmax")
     with pytest.raises(ValueError, match="warmup_episodes"):
         make_run(tmp_path, warmup_episodes=0)
+
+
+def test_the_critic_of_every_round_is_kept_even_when_only_some_rounds_are_evaluated(tmp_path):
+    run, _ = make_run(tmp_path, eval_every_rounds=2)
+    summary = run.run()
+    assert summary["evaluated"] == [0, 2]
+    assert [p.name for p in sorted((tmp_path / "run" / "critics").glob("*"))] == ["round_000.msgpack", "round_001.msgpack", "round_002.msgpack"]

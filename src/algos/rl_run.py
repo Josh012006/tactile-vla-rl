@@ -12,7 +12,7 @@ the warm-up uses the rounds 0 .. W - 1 of the server's reset sequence (`reset(se
     resume/state.json          the stage, the update count, the random generators: the file that says the stage is finished.
 A run that is cut resumes after the last finished stage (`--resume`): the stage in progress is played again from its start (its episodes are the ones that were not saved).
 The evaluations (`eval_rounds`: the warm-up, every `eval_every_rounds`, the last) are the 100 fixed episodes of the SFT evaluations (src/eval/episodes.py) with the critic's argmax over the VLA's candidates, on a FRESH
-server (same starts as every SFT evaluation on the same GPU); each is eval/results/<round>.json (the format of the SFT evaluations: the curve and the paired comparisons read it) and the critic of that round is kept in
+server (same starts as every SFT evaluation on the same GPU); each is eval/results/<round>.json (the format of the SFT evaluations: the curve and the paired comparisons read it). The critic of every round (not only the evaluated ones) is kept in
 critics/round_<r>.msgpack. Only one env server runs at a time (Isaac Sim, the VLA and the critic share one GPU): the collection server is stopped for an evaluation and started again after it.
 """
 from __future__ import annotations
@@ -176,6 +176,7 @@ class RLRun:
     def _commit(self, stage: int, collected: List[Collected]) -> None:
         save_episodes(self.run_dir / "episodes" / f"stage_{stage:03d}.npz", collected)
         _atomic(self.run_dir / CRITIC_FILE, critic_bytes(self.trainer.critic, self.trainer.opt_state))
+        _atomic(self.run_dir / "critics" / f"round_{stage:03d}.msgpack", critic_bytes(self.trainer.critic))     # the critic of EVERY round is kept (about 20 MB): any of them can be evaluated later
         state = {"stage": stage, "updates": self.trainer.updates, "rng": self.rng.bit_generator.state, "critic_key": jax.random.key_data(self.trainer.key).tolist()}
         _atomic(self.run_dir / STATE_FILE, json.dumps(state).encode())          # last: the stage is finished only when this file says so
         self.stage = stage
@@ -207,7 +208,6 @@ class RLRun:
         """The fixed episodes with the critic's argmax over the VLA's candidates, on a fresh server (the collection server is stopped: one server at a time on the GPU)."""
         cfg = self.cfg
         self._close_collection()
-        _atomic(self.run_dir / "critics" / f"round_{r:03d}.msgpack", critic_bytes(self.trainer.critic))
         started = time.monotonic()
         with self.open_env(cfg.eval_episodes, f"eval_{r}") as env:
             result = evaluate(self.actor, self.trainer.critic.params, env, self.seeds, replan=self.replan, max_steps=self.max_steps, master_seed=self.eval_seed, label=str(r), step=r,
