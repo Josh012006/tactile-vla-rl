@@ -14,6 +14,7 @@ updates (`utd` per environment step) and, for PA-RL, the distillation of the VLA
 rounds and after the last (the 100 fixed episodes of the SFT evaluations, the critic's argmax over the VLA's candidates, on a fresh server).
 Output <output_root>/<run name>/: config.json, metrics.jsonl (+ wandb), episodes/, resume/, critics/round_<r>.msgpack (every round), vlas/round_<r>/ (PA-RL: the VLA's trainable parameters after every round, an SFT
 checkpoint layout, about 1.7 GB each), eval/results/<round>.json and eval/curve.*, logs/server_*.log.
+The saved rounds are evaluated again, as the SFT checkpoints are, by scripts/eval_rl.py (jobs/job_eval_rl.sh).
 XLA's deterministic GPU ops are NOT switched on here (the flag is global to the process and would slow the critic's training; the SFT evaluations are comparable, not bit-reproducible, because of the cameras: same starts,
 same episode seeds, a standard error). SIGTERM / SIGINT: the run ends after the stage in progress (a second signal kills the servers at once).
 """
