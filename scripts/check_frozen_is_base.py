@@ -1,10 +1,11 @@
 """Is the FROZEN part of a checkpoint the base model's, in bfloat16? (and in which precision is every part of a checkpoint stored?)
 
-    python -m scripts.check_frozen_is_base --checkpoint <expo-ft run>/sft/<exp>/<dataset>/4000 runs/sft/peg_insert/<run>/checkpoints/4000 [--model pi05] [--base <dir with params/>]
+    python -m scripts.check_frozen_is_base --checkpoint <expo-ft run>/sft/<exp>/<dataset>/4000 [--model pi05] [--base <dir with params/>]
 
-A checkpoint written like openpi's holds EVERY parameter (7382 MiB for pi0.5 with LoRA): the trainable ones (467 M, float32) and the frozen ones (2936 M, bfloat16). The frozen ones are never
-trained, so they must be the base checkpoint's (`checkpoint:` of the model YAML, downloaded by scripts.fetch_models) rounded to bfloat16, and a checkpoint of the trainable parameters only (891 MiB in
-bfloat16) would lose nothing (tests/test_checkpoint_trainable_only_equals_full.py shows it on a tiny model; this script checks the premise on the real files).
+A checkpoint written like openpi's (expo-ft's SFT) holds EVERY parameter (7382 MiB for pi0.5 with LoRA): the trainable ones (467 M, float32) and the frozen ones (2936 M, bfloat16). The frozen ones
+are never trained, so they must be the base checkpoint's (`checkpoint:` of the model YAML, downloaded by scripts.fetch_models) rounded to bfloat16, and a checkpoint of the trainable parameters only
+loses nothing (tests/test_checkpoint_trainable_only_equals_full.py shows it on a tiny model; this script checks the premise on the real files: on expo-ft's step-4000 checkpoint, 20 / 20 frozen tensors
+are equal, which is why `sft.save_checkpoint` writes the trainable parameters only). The checkpoints of scripts/sft.py are of that kind: given one, this script reports every frozen tensor as missing.
 
 For each checkpoint it prints
   - the precision it is STORED in, from the files' metadata (no weights read): how many tensors and parameters, per group (trainable / frozen) and dtype, for the checkpoint and the base;
@@ -129,7 +130,7 @@ def read_params(params_dir: Path) -> Dict[Key, np.ndarray]:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--checkpoint", nargs="+", required=True, metavar="DIR", help="checkpoint folders (each holds params/): an expo-ft step folder, or <run>/checkpoints/<step>")
+    ap.add_argument("--checkpoint", nargs="+", required=True, metavar="DIR", help="checkpoint folders (each holds params/): an expo-ft step folder (or any whole openpi checkpoint)")
     ap.add_argument("--model", default="pi05", help="model YAML (configs/model/<name>.yaml) giving the frozen / trainable split and the base checkpoint (default pi05)")
     ap.add_argument("--base", metavar="DIR", help="the base checkpoint folder (holds params/); default: the YAML's `checkpoint`, as scripts.fetch_models downloaded it")
     return ap

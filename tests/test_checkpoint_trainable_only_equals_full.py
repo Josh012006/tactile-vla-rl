@@ -1,12 +1,12 @@
 """Does a checkpoint of the TRAINABLE parameters only give the same evaluated model as the checkpoint of every parameter?
 
-`sft.save_checkpoint` writes what openpi's train.py writes: EVERY parameter (the trainable ones in float32, the frozen ones in bfloat16). For pi0.5 with LoRA that is
-467.0 M trainable parameters (1781 MiB in float32, 891 MiB in bfloat16) and 2936.5 M frozen ones (5601 MiB), so 7382 MiB against 891 or 1781 MiB: the frozen ones are the base model's,
-which every loader of this repo already has (`sft.load_checkpoint` reads and replaces the trainable parameters only). These tests write the two partial candidates (trainable only, in
-float32 and in bfloat16) next to the full checkpoint and show, on the tiny pi0.5 of tests/test_sft.py with its weights in bfloat16 as the evaluation runs them:
+openpi's train.py writes EVERY parameter (the trainable ones in float32, the frozen ones in bfloat16). For pi0.5 with LoRA that is 467.0 M trainable parameters (1781 MiB in float32,
+891 MiB in bfloat16) and 2936.5 M frozen ones (5601 MiB), so 7382 MiB against 891 or 1781 MiB: the frozen ones are the base model's, which every loader of this repo already has
+(`sft.load_checkpoint` reads and replaces the trainable parameters only). `sft.save_checkpoint` writes the trainable parameters in float32 (the whole checkpoint when it is given the frozen
+ones too). These tests compare it, and a bfloat16 variant, with the whole checkpoint on the tiny pi0.5 of tests/test_sft.py with its weights in bfloat16 as the evaluation runs them:
 
-  1. the full checkpoint holds the trainable parameters in float32 and the frozen ones in bfloat16 (what expo-ft's SFT writes);
-  2. loaded into a policy, each partial checkpoint gives EXACTLY the weights of the full one (every leaf, bit for bit) and EXACTLY the same chunks (same noise);
+  1. the whole checkpoint holds the trainable parameters in float32 and the frozen ones in bfloat16 (what expo-ft's SFT writes), the one `save_checkpoint` writes only the trainable ones, in float32;
+  2. loaded into a policy, each trainable-only checkpoint gives EXACTLY the weights of the whole one (every leaf, bit for bit) and EXACTLY the same chunks (same noise);
   3. openpi's own reader for inference (`restore_params(dtype=bfloat16)`, which is what serves expo-ft's checkpoints) gives, for the trainable parameters, the weights of the policy
      that loaded the bfloat16 partial checkpoint: expo-ft's evaluation sees the same numbers;
   4. what is lost: the float32 values of the trainable parameters (a relative error of at most 2**-8 per weight), which only matter to a training that CONTINUES from the checkpoint
@@ -77,21 +77,23 @@ def saved(tmp_path_factory):
     rng = np.random.default_rng(0)
     trained = jax.tree.map(lambda x: x + jnp.asarray(rng.normal(0.0, 0.05, x.shape), jnp.float32), trainable)       # "trained": values that bfloat16 cannot hold exactly
     root = tmp_path_factory.mktemp("checkpoints")
-    sft.save_checkpoint(root / "full", trained, sft.tree_cast(frozen, jnp.bfloat16), {"step": 3, "updates": 4})        # the frozen ones in bfloat16, as in openpi's train state
-    write_trainable_only(root / "partial_float32", trained)
+    sft.save_checkpoint(root / "full", trained, {"step": 3, "updates": 4}, frozen=sft.tree_cast(frozen, jnp.bfloat16))      # openpi's whole checkpoint: the frozen ones in bfloat16, as in its train state
+    sft.save_checkpoint(root / "partial_float32", trained, {"step": 3, "updates": 4})                                # what the SFT writes
     write_trainable_only(root / "partial_bfloat16", sft.tree_cast(trained, jnp.bfloat16))
     del policy
     release_memory()
     return root, trained
 
 
-def test_the_full_checkpoint_holds_the_trainable_parameters_in_float32_and_the_frozen_ones_in_bfloat16(saved):
+def test_the_whole_checkpoint_holds_the_trainable_parameters_in_float32_and_the_frozen_ones_in_bfloat16_and_the_one_the_sft_writes_the_trainable_ones_only(saved):
     root, trained = saved
     params = tu.flatten_dict(_model.restore_params(root / "full" / "params", restore_type=np.ndarray))
     trainable_keys = set(flat(trained))
     assert trainable_keys and trainable_keys < set(params)                            # trainable ones and, besides, frozen ones
     assert all(params[k].dtype == np.float32 for k in trainable_keys)
     assert all(params[k].dtype == jnp.bfloat16.dtype for k in set(params) - trainable_keys)
+    written = tu.flatten_dict(_model.restore_params(root / "partial_float32" / "params", restore_type=np.ndarray))        # what `save_checkpoint` writes by itself
+    assert set(written) == trainable_keys and all(written[k].dtype == np.float32 and np.array_equal(written[k], params[k]) for k in trainable_keys)
 
 
 @pytest.mark.parametrize("partial", PARTIALS)

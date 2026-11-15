@@ -28,9 +28,9 @@ def files(tmp_path_factory):
     base_frozen = jax.tree.map(lambda x: x + jnp.asarray(rng.normal(0.0, 0.05, x.shape), jnp.float32), frozen)         # float32 values that bfloat16 cannot hold exactly
     trained = jax.tree.map(lambda x: x + 0.1, trainable)
     root = tmp_path_factory.mktemp("files")
-    sft.save_checkpoint(root / "base", trainable, base_frozen, {"step": 0})                                          # the base: float32 throughout
-    sft.save_checkpoint(root / "ckpt", trained, sft.tree_cast(base_frozen, jnp.bfloat16), {"step": 3})              # a checkpoint: trained part in float32, frozen part the base's in bfloat16
-    sft.save_checkpoint(root / "unrounded", trained, base_frozen, {"step": 3})                                       # the frozen part kept in float32
+    sft.save_checkpoint(root / "base", trainable, {"step": 0}, frozen=base_frozen)                                          # the base: float32 throughout
+    sft.save_checkpoint(root / "ckpt", trained, {"step": 3}, frozen=sft.tree_cast(base_frozen, jnp.bfloat16))              # a checkpoint: trained part in float32, frozen part the base's in bfloat16
+    sft.save_checkpoint(root / "unrounded", trained, {"step": 3}, frozen=base_frozen)                                       # the frozen part kept in float32
     groups = {"trainable": set(tu.flatten_dict(trainable.to_pure_dict())), "frozen": set(tu.flatten_dict(frozen.to_pure_dict()))}
     del policy
     release_memory()

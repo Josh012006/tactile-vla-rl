@@ -145,8 +145,8 @@ def test_our_checkpoint_route_and_expo_fts_full_params_route_give_the_same_weigh
     trained = jax.tree.map(lambda x: x, trainable)
     trained.replace_by_pure_dict(tu.unflatten_dict(trained_flat, sep="/"))
 
-    # route 1: our checkpoint (openpi's layout: every parameter, the trainable ones in float32), its trainable part laid over the initial model by sft.load_checkpoint
-    sft.save_checkpoint(tmp_path / "ckpt", trained, state.filter(nnx.Not(trainable_filter)), {"step": 4000})
+    # route 1: our checkpoint (openpi's layout, the trainable parameters only, in float32), laid over the initial model by sft.load_checkpoint
+    sft.save_checkpoint(tmp_path / "ckpt", trained, {"step": 4000})
     holder = types.SimpleNamespace(graphdef=graphdef, state=state, trainable_filter=trainable_filter)
     holder.set_state = lambda new: setattr(holder, "state", new)
     sft.load_checkpoint(holder, tmp_path / "ckpt")

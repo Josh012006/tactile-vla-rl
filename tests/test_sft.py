@@ -36,7 +36,7 @@ COMMON = {"wandb_mode": "disabled", "demos": ["x"], "batch_size": 4, "micro_batc
 
 
 def vision_frozen_policy(seed_offset=0):
-    # a tiny vision tower (openpi's variant "mu/14"): a checkpoint now holds EVERY parameter, and the real SigLIP (400M) in float32, its host copy and its serialisation do not fit the 7 GB of the test machine
+    # a tiny vision tower (openpi's variant "mu/14"): the real SigLIP (400M) in float32, its host copy and its serialisation do not fit the 7 GB of the test machine
     import openpi.models.siglip as siglip
     real_siglip = siglip.Module
     patch = pytest.MonkeyPatch()

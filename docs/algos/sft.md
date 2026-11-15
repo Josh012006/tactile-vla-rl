@@ -234,7 +234,7 @@ Looked at and not done:
 | `wandb_id.txt` | the id of the wandb run of this training (section 5b); `--resume` reads it to continue the same run |
 | `wandb/` | the local files of wandb (the whole run when it is offline) |
 | `resume/` | the training state to resume from (section 6), replaced at each snapshot |
-| `checkpoints/<step>/` | `params` (orbax, openpi's layout: `{"params": the whole model}`, trainable parameters in float32, frozen ones in bfloat16: about 7.7 GB with pi0.5 LoRA (computed from the parameter counts: 467 M x 4 bytes + 2936 M x 2 bytes, not measured), 21 of them about 160 GB; what openpi's `restore_params` reads), `assets/` (the normalisation statistics) and `meta.json` (step, updates, model, overrides, demos, settings). `<step>` is openpi's: 200, 400, ..., and the last (4000, after 4001 updates) |
+| `checkpoints/<step>/` | `params` (orbax, openpi's layout: `{"params": the state}`, what openpi's `restore_params` reads, but the TRAINABLE parameters only, in float32: 467.0 M parameters, 1781 MiB with pi0.5 LoRA (computed from the parameter counts, not measured), 21 of them about 36 GB; the frozen ones (2936.5 M, 5601 MiB) are the base checkpoint's in bfloat16, which `scripts/check_frozen_is_base.py` verified bit for bit on expo-ft's step-4000 checkpoint, and `load_checkpoint` leaves the policy's own), `assets/` (the normalisation statistics) and `meta.json` (step, updates, model, overrides, demos, settings). `<step>` is openpi's: 200, 400, ..., and the last (4000, after 4001 updates) |
 | `summary.json` | final loss, checkpoint list, duration |
 
 `eval` lines (every `eval_interval`) hold, for a **fixed** set of `eval_samples` rows, once on training rows and once on held-out rows when `val_episodes > 0`: the loss, and
@@ -308,7 +308,7 @@ of another shape (another rank), naming the first ones. A stopped run is continu
 | pi0-FAST | not run | 10-step chunks, absolute targets (openpi's pipeline for this checkpoint) |
 | steps | `num_train_steps: 4001` (4001 iterations) | `steps: 4001` (the same loop, and the same checkpoint numbering) |
 | order of the rows, noise, LoRA initialisation | torch `DataLoader` (seed 42, workers), `fold_in(train_rng, step)` for the whole batch, `split(split(key(42))[1])` | the same ones, called (section 3) |
-| checkpoint | openpi's: every parameter, trainable ones in float32, frozen ones in bfloat16, plus the optimiser state (`train_state`) | the same `params` and `assets`; the optimiser state is in `resume/` instead |
+| checkpoint | openpi's: every parameter (trainable ones in float32, frozen ones in bfloat16: 7382 MiB with pi0.5 LoRA), plus the optimiser state (`train_state`) | the same `params` layout and `assets`, but the trainable parameters only (the same float32 values: 1781 MiB; the frozen ones are the base's, equal bit for bit to expo-ft's); the optimiser state is in `resume/` instead. Only `sft.load_checkpoint` reads it (openpi's `CheckpointWeightLoader` needs every parameter: `save_checkpoint(..., frozen=...)` writes them too) |
 | batch of 64 | one pass (FSDP over the devices) | micro-batches of 16 on one device, gradients summed, **the same draws**: the gradient differs by the order of the bfloat16 sums (about 0.2 % of its norm measured on the tiny model) |
 | evaluation | none during the run | loss and own-chunk error on a fixed set, FAST decoding statistics |
 | resume | yes (openpi's) | yes (section 6) |

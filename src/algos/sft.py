@@ -10,7 +10,7 @@ are; what this file adds is the optimiser, the loop, the evaluation and the chec
 It does what openpi's own `scripts/train.py` does (the SFT of expo-ft), step for step: the batches come from the same torch `DataLoader` (`row_batches`), seeded with `seed`; the model is
 initialised with the key openpi derives from `seed` (`loading.openpi_model_key`); update number `it` draws its randomness (image augmentation, flow-matching noise and time) from
 `fold_in(train_rng, it)` for the whole batch (`train_rng, _ = split(key(seed))`), whatever the micro-batches; `steps` is openpi's `num_train_steps` (loop `it` = 0 .. steps - 1) and
-what is logged, evaluated and saved at `it` has had `it + 1` updates; a checkpoint is openpi's (`save_checkpoint`).
+what is logged, evaluated and saved at `it` has had `it + 1` updates; a checkpoint holds the trainable parameters, in openpi's layout (`save_checkpoint`).
 
 What is trained is `policy.trainable_filter`: openpi's freeze filter of the model YAML (LoRA matrices + SigLIP + action projections with
 LoRA, everything without it). The trainable parameters are kept in float32 and the frozen ones in bfloat16, as openpi's own train.py does;
@@ -18,8 +18,10 @@ the optimiser is openpi's (AdamW, b2 0.95, gradient clipping at 1) with the sche
 batch is cut into micro-batches of `micro_batch_size` rows whose gradients are summed, so the memory depends on the micro-batch and the
 optimisation on the batch.
 
-A checkpoint is what openpi's train.py saves: `params`, every parameter of the model (the trainable ones in float32, the frozen ones in bfloat16), laid out as `restore_params`
-reads it; `load_checkpoint` puts it on top of a freshly loaded policy built with the same model YAML (and the same overrides: the rank is part of the structure).
+A checkpoint is `params` laid out as openpi's train.py lays out its own (`{"params": the state}`, what `restore_params` reads), but holding the TRAINABLE parameters only, in float32 as they
+are in training: the frozen ones are the base checkpoint's rounded to bfloat16 (scripts/check_frozen_is_base.py checks it on expo-ft's checkpoint), so they are not saved (1781 MiB instead of
+7382 MiB with pi0.5 LoRA, computed from the parameter counts). `load_checkpoint` puts it on top of a freshly loaded policy built with the same model YAML (and the same overrides: the
+rank is part of the structure): the frozen parameters are the policy's own.
 A run can be RESUMED (section "Resume" below): every `resume_interval` steps, at the last step and when the job is told to stop (SIGTERM), the
 full training state is written to <run>/resume/, and `--resume <run>` continues from it with the same data order and the same noise.
 
@@ -27,7 +29,7 @@ The evaluation inside the run (`eval_interval`) is not the success rate, which o
 (training ones, and held-out ones with `val_episodes`) and the error of the policy's own chunks against the demonstration's, with, for
 pi0-FAST, what the generated token strings were like (`OpenPIPolicy.decode_stats`).
 
-Resume. The snapshot holds what the checkpoints do not: the trainable parameters in float32 (the bfloat16 checkpoints are rounded), the optimiser
+Resume. The snapshot holds what the checkpoints do not: the optimiser
 state (AdamW moments, step counts) and the number of updates done. Everything else is a function of the step: the batch of update `it` comes from the loader seeded by
 `seed` (the batches already done are skipped without being prepared) and its noise from `fold_in(train_rng, it)`, so a resumed run sees what an
 uninterrupted one would have seen (up to the non-determinism of the GPU kernels). A snapshot is about 3 times the float32 trainable parameters
@@ -164,15 +166,16 @@ def make_optimizer(cfg: SFTConfig):
 
 
 # -- checkpoints ---------------------------------------------------------------------------------------------------------------------
-def save_checkpoint(directory: Path, trainable, frozen, meta: Mapping[str, Any]) -> None:
-    """<directory>/params and <directory>/meta.json. `params` is what openpi's train.py saves (`checkpoints.save_state`: `{"params": the whole model's state}`, orbax): EVERY parameter, the
-    trainable ones as they are in training (float32), the frozen ones in bfloat16. openpi's `restore_params` (and `loading.build_params_like_expo_ft`) read it."""
+def save_checkpoint(directory: Path, trainable, meta: Mapping[str, Any], frozen=None) -> None:
+    """<directory>/params and <directory>/meta.json. `params` is laid out as openpi's train.py lays out its own (`checkpoints.save_state`: `{"params": the state}`, orbax; `restore_params`
+    reads it) but holds the TRAINABLE parameters only, as they are in training (float32). The frozen ones are the base checkpoint's rounded to bfloat16 and every loader of this repo
+    already has them (`load_checkpoint`). `frozen`, when given, is written too: openpi's whole checkpoint, the one its own loaders (`CheckpointWeightLoader`) need."""
     import jax
     import orbax.checkpoint as ocp
     import flax.nnx as nnx
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
-    state = jax.device_get(nnx.State.merge(trainable, frozen))
+    state = jax.device_get(trainable if frozen is None else nnx.State.merge(trainable, frozen))
     with ocp.PyTreeCheckpointer() as checkpointer:
         checkpointer.save(directory / PARAMS_DIR, {"params": state})
     (directory / META_FILE).write_text(json.dumps(dict(meta), indent=2, default=str))
@@ -193,7 +196,7 @@ def save_norm_stats(model_cfg: Optional[Mapping[str, Any]], directory: Path) -> 
 
 def load_checkpoint(policy, directory) -> dict:
     """Put the trained parameters of a checkpoint into `policy` (loaded from the same model YAML and overrides). Returns the checkpoint's meta.
-    Reads openpi's layout (`params` = `{"params": the whole state}`, what `save_checkpoint` writes) and the older one of this repo (the trainable parameters only, no `params`
+    Reads openpi's layout (`params` = `{"params": the state}`, what `save_checkpoint` writes: the trainable parameters, or all of them as openpi's own checkpoints) and the older one of this repo (the trainable parameters only, no `params`
     level). Only the policy's TRAINABLE parameters are read and replaced, at the policy's own dtype (bfloat16): the frozen ones of the checkpoint are the base model's, which the
     policy already holds (and shares with its forks); they are only checked, from the checkpoint's metadata, for being there and of the right shape.
     Refuses a checkpoint that does not fit the policy: a parameter the policy lacks, one of another shape (another LoRA rank), or a trainable one the checkpoint lacks."""
@@ -616,7 +619,7 @@ def _run(policy, train_set: DemoSet, val_set: Optional[DemoSet], cfg: SFTConfig,
         if path.exists():                                   # saved by the attempt this one resumed: same step, same content
             shutil.rmtree(path)
         t_save = time.monotonic()
-        save_checkpoint(path, trainable, frozen, {**meta, "step": step, "updates": step + 1, "sft": dataclasses.asdict(cfg)})
+        save_checkpoint(path, trainable, {**meta, "step": step, "updates": step + 1, "sft": dataclasses.asdict(cfg)})
         save_norm_stats(meta.get("model_cfg"), path)
         size_mib = round(sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) / 2**20)
         log.write(event="checkpoint", step=step, path=str(path), save_s=round(time.monotonic() - t_save, 1), size_mib=size_mib)

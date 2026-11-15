@@ -4,7 +4,8 @@
   2. the INITIALISATION of the LoRA matrices: `loading.openpi_model_key` / `init_lora_params` against the model that openpi's own `init_train_state` builds;
   3. the NOISE of an update (image augmentation, flow-matching noise and time): the micro-batches of a batch, from `prepare_loss_batch` / `loss_of_rows`, against openpi's
      `compute_loss(rng, whole batch)` (what `train_step` calls), for the loss and for the gradient;
-  4. the CHECKPOINT: what `save_checkpoint` writes is read by openpi's own `restore_params`, and `load_checkpoint` reads it back (and the older layout of this repo).
+  4. the CHECKPOINT: what `save_checkpoint` writes (the trainable parameters, or every parameter when the frozen ones are given: openpi's whole checkpoint) is read by openpi's own
+     `restore_params`, and `load_checkpoint` reads it back (and the older layout of this repo).
 
 openpi's train.py and data_loader.py import lerobot (not installed here): the functions and the class under test are taken from the files' source and run in a namespace holding what
 they use. Tiny pi0.5 with LoRA (gemma `dummy` variants and a small SigLIP, as in tests/test_sft_step_equals_openpi_train_step.py).
@@ -206,24 +207,29 @@ def test_a_checkpoint_is_read_by_openpis_restore_params_and_by_load_checkpoint(t
     trainable, frozen = state.filter(lambda path, _: "lora" in "/".join(map(str, path))), state.filter(lambda path, _: "lora" not in "/".join(map(str, path)))
     trainable = jax.tree.map(lambda x: x + 0.25, trainable)                                          # "trained"
     frozen = jax.tree.map(lambda x: x.astype(jnp.bfloat16), frozen)                                  # as in openpi's train state
-    sft.save_checkpoint(tmp_path / "ckpt", trainable, frozen, {"step": 4000})
+    sft.save_checkpoint(tmp_path / "ckpt", trainable, {"step": 4000})                                 # what the SFT writes: the trainable parameters only
+    sft.save_checkpoint(tmp_path / "whole", trainable, {"step": 4000}, frozen=frozen)                  # with the frozen ones: openpi's whole checkpoint
     # openpi's reader, as expo-ft's and openpi's inference use it
     params = _model.restore_params(tmp_path / "ckpt" / "params", restore_type=np.ndarray)
     flat = tu.flatten_dict(params)
-    assert set(flat) == {("layer", "kernel"), ("layer", "bias"), ("lora_a",)}
+    assert set(flat) == {("lora_a",)}
     np.testing.assert_array_equal(flat[("lora_a",)], np.full((2, 2), 0.75, np.float32))              # trainable: float32, as trained
-    assert flat[("lora_a",)].dtype == np.float32 and flat[("layer", "kernel")].dtype == jnp.bfloat16.dtype      # frozen: bfloat16
+    assert flat[("lora_a",)].dtype == np.float32
+    whole = tu.flatten_dict(_model.restore_params(tmp_path / "whole" / "params", restore_type=np.ndarray))
+    assert set(whole) == {("layer", "kernel"), ("layer", "bias"), ("lora_a",)}
+    assert whole[("layer", "kernel")].dtype == jnp.bfloat16.dtype                                    # frozen: bfloat16
     # ours
-    fresh = types.SimpleNamespace(graphdef=graphdef, state=jax.tree.map(lambda x: x.astype(jnp.bfloat16), nnx.state(Module(nnx.Rngs(5)))),
-                                  trainable_filter=lambda path, _: "lora" in "/".join(map(str, path)))
-    fresh.set_state = lambda s: setattr(fresh, "state", s)
-    kernel_before = np.asarray(fresh.state.to_pure_dict()["layer"]["kernel"]).copy()
-    meta = sft.load_checkpoint(fresh, tmp_path / "ckpt")
-    assert meta["step"] == 4000
-    got = tu.flatten_dict(fresh.state.to_pure_dict())
-    np.testing.assert_array_equal(np.asarray(got[("lora_a",)]).astype(np.float32), np.full((2, 2), 0.75, np.float32))
-    assert got[("lora_a",)].dtype == jnp.bfloat16                                                    # the policy runs in bfloat16
-    np.testing.assert_array_equal(np.asarray(got[("layer", "kernel")]), kernel_before)                  # only the TRAINABLE parameters are replaced: the frozen ones are the policy's own (shared with its forks)
+    for name in ("ckpt", "whole"):
+        fresh = types.SimpleNamespace(graphdef=graphdef, state=jax.tree.map(lambda x: x.astype(jnp.bfloat16), nnx.state(Module(nnx.Rngs(5)))),
+                                      trainable_filter=lambda path, _: "lora" in "/".join(map(str, path)))
+        fresh.set_state = lambda s, fresh=fresh: setattr(fresh, "state", s)
+        kernel_before = np.asarray(fresh.state.to_pure_dict()["layer"]["kernel"]).copy()
+        meta = sft.load_checkpoint(fresh, tmp_path / name)
+        assert meta["step"] == 4000
+        got = tu.flatten_dict(fresh.state.to_pure_dict())
+        np.testing.assert_array_equal(np.asarray(got[("lora_a",)]).astype(np.float32), np.full((2, 2), 0.75, np.float32))
+        assert got[("lora_a",)].dtype == jnp.bfloat16                                                # the policy runs in bfloat16
+        np.testing.assert_array_equal(np.asarray(got[("layer", "kernel")]), kernel_before)           # only the TRAINABLE parameters are replaced: the frozen ones are the policy's own (shared with its forks)
 
 
 def test_a_checkpoint_of_the_older_layout_is_still_read(tmp_path):
