@@ -1,15 +1,19 @@
-"""The run of an RL experiment: warm-up, collection rounds with the critic, its updates, the evaluations, and the resume (docs/algos/rl.md section 3 and 7). Best-of-N is complete here (the VLA stays frozen);
-PA-RL's distillation and its cache refresh are the next step and refused for now.
+"""The run of an RL experiment: warm-up, collection rounds with the critic, its updates, (PA-RL) the distillation and the refresh of the candidate cache, the evaluations, and the resume
+(docs/algos/rl.md section 3 and 7). Best-of-N: the VLA stays frozen. PA-RL (variants A and B): the VLA is distilled after every round.
 
     run = RLRun(cfg, policy, run_dir, open_env, log, max_steps=150)       # open_env(num_envs, label) -> a context manager giving a VectorEnvClient (a server started and stopped by it)
     summary = run.run()                                                   # a stage at a time; `run.stop` (threading.Event) ends it after the current stage
 
 A STAGE is the unit of progress and of resume. Stage 0 is the warm-up: `warmup_episodes` episodes of the base VLA alone (its first candidate is executed), then `warmup_critic_steps` critic updates on them. Stage r >= 1 is
-collection round r: `envs_per_batch` episodes with the critic (the rollout selection of the method), then `utd` x (their environment steps) critic updates. The rounds are numbered so that no start is played twice:
-the warm-up uses the rounds 0 .. W - 1 of the server's reset sequence (`reset(seed, round)`), the online round r the round W + r - 1. After each stage the run writes, in this order,
-    episodes/stage_<r>.npz     the stage's episodes with the VLA's candidates of their states (the replay buffer and the cache are rebuilt from these files, in order),
-    resume/critic.msgpack      the critic, its delayed copy and Adam's state,
-    resume/state.json          the stage, the update count, the random generators: the file that says the stage is finished.
+collection round r: `envs_per_batch` episodes with the critic (the rollout selection of the method), then `utd` x (their environment steps) critic updates and, for PA-RL, the distillation of the VLA on pi^Opt of
+EVERY stored state (src/algos/rl_distill.py) followed by the refresh of the cache of ALL of them with the new VLA (its `version` is the round number; version 0 = the SFT checkpoint). The rounds are numbered so that
+no start is played twice: the warm-up uses the rounds 0 .. W - 1 of the server's reset sequence (`reset(seed, round)`), the online round r the round W + r - 1. After each stage the run writes, in this order,
+    episodes/stage_<r>.npz         the stage's episodes with the VLA's candidates of their states (the replay buffer is rebuilt from these files, in order; Best-of-N's cache too),
+    resume/critic_<r>.msgpack      the critic, its delayed copy and Adam's state,
+    resume/cache_<r>.npz           (PA-RL) the candidate cache with the versions: a refresh is hours of model calls, it is never recomputed,
+    resume/vla_<r>/resume          (PA-RL, r >= 1) the VLA's trainable parameters and Adam's moments,
+    critics/round_<r>.msgpack      the critic of the round (kept for good), vlas/round_<r>/ (PA-RL, r >= 1) the VLA's trainable parameters as an SFT checkpoint (kept for good),
+    resume/state.json              the stage, the update counts, the cache version, the random generators: the file that says the stage is finished (the resume files of every other stage are removed after it).
 A run that is cut resumes after the last finished stage (`--resume`): the stage in progress is played again from its start (its episodes are the ones that were not saved).
 The evaluations (`eval_rounds`: the warm-up, every `eval_every_rounds`, the last) are the 100 fixed episodes of the SFT evaluations (src/eval/episodes.py) with the critic's argmax over the VLA's candidates, on a FRESH
 server (same starts as every SFT evaluation on the same GPU); each is eval/results/<round>.json (the format of the SFT evaluations: the curve and the paired comparisons read it). The critic of every round (not only the evaluated ones) is kept in
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -30,20 +35,35 @@ import numpy as np
 
 from src.algos import rl_critic as rc
 from src.algos.rl_buffer import Episode, ReplayBuffer
-from src.algos.rl_candidates import CandidateCache
+from src.algos.rl_candidates import CandidateCache, refresh
 from src.algos.rl_config import RLConfig
 from src.algos.rl_critic_update import CriticTrainer, run_updates
+from src.algos.rl_distill import Distiller
 from src.algos.rl_rollout import Collected, RLActor, collect_round, evaluate, store_round
 from src.eval import episodes as E
 from src.models.interface import Candidates
 
-STATE_FILE = "resume/state.json"
-CRITIC_FILE = "resume/critic.msgpack"
+RESUME = "resume"
+STATE_FILE = f"{RESUME}/state.json"
 CRITIC_LOG_EVERY = 500                  # updates between two `critic` lines of metrics.jsonl (not sent to wandb: the round line carries the mean)
+REFRESH_LOG_EVERY = 0.05                # fraction of the states between two `refresh_progress` lines (the refresh is hours long)
+DISTILL_KEY_OFFSET, DISTILL_RNG_OFFSET = 4, 3       # the labels' softmax draws come from fold_in(key(seed + 4), round); the order of the batches from default_rng(seed + 3)
 OpenEnv = Callable[[int, str], ContextManager]
 
 
 # -- files -------------------------------------------------------------------------------------------------------------------------------------
+def critic_file(stage: int) -> str:
+    return f"{RESUME}/critic_{stage:03d}.msgpack"
+
+
+def cache_file(stage: int) -> str:
+    return f"{RESUME}/cache_{stage:03d}.npz"
+
+
+def vla_dir(stage: int) -> str:
+    return f"{RESUME}/vla_{stage:03d}"
+
+
 def _atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -52,6 +72,25 @@ def _atomic(path: Path, data: bytes) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+def _atomic_npz(path: Path, arrays: Dict[str, np.ndarray]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        np.savez(f, **arrays)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def save_cache(path: Path, cache: CandidateCache) -> None:
+    _atomic_npz(path, cache.snapshot())
+
+
+def load_cache(path: Path, cache: CandidateCache) -> None:
+    with np.load(path) as z:
+        cache.restore(z["normalized"], z["states"], z["version"])
 
 
 def save_episodes(path: Path, collected: List[Collected]) -> None:
@@ -66,13 +105,7 @@ def save_episodes(path: Path, collected: List[Collected]) -> None:
               "cand_targets": np.concatenate([c.candidates.targets for c in collected])}
     if eps[0].touch is not None:
         arrays["touch"] = np.concatenate([e.touch for e in eps])
-    tmp = path.with_name(path.name + ".tmp")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(tmp, "wb") as f:
-        np.savez(f, **arrays)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    _atomic_npz(path, arrays)
 
 
 def load_episodes(path: Path) -> List[Collected]:
@@ -98,9 +131,8 @@ def critic_bytes(critic, trainer_opt_state=None) -> bytes:
 
 class RLRun:
     def __init__(self, cfg: RLConfig, policy, run_dir: Path, open_env: OpenEnv, log, max_steps: int, stop: Optional[threading.Event] = None, eval_seed: int = E.DEFAULT_SEED,
-                 title: Optional[str] = None):
-        if cfg.distills:
-            raise NotImplementedError("PA-RL's distillation and cache refresh are the next step: for now only method: best_of_n runs")
+                 title: Optional[str] = None, model_cfg: Optional[dict] = None, checkpoint_meta: Optional[dict] = None):
+        """`model_cfg`: the model YAML of the run (the normalisation statistics copied into the VLA checkpoints); `checkpoint_meta`: what the script adds to the meta.json of those checkpoints (the SFT start)."""
         if cfg.warmup_episodes < 1:
             raise ValueError("warmup_episodes must be at least one batch: the critic's batches mix warm-up and online data and it is trained on the warm-up first")
         self.cfg, self.policy, self.run_dir, self.open_env, self.log = cfg, policy, Path(run_dir), open_env, log
@@ -109,7 +141,11 @@ class RLRun:
         self.replan = max(1, min(cfg.replan_steps or horizon // 2, horizon))
         self.trainer = CriticTrainer(rc.CriticNet.from_config(cfg), cfg, horizon)
         self.actor = RLActor(policy, cfg, self.trainer.optimiser)
-        plans = -(-self.max_steps // self.replan)
+        self.distiller = Distiller(policy, self.trainer.optimiser, cfg, model_cfg) if cfg.distills else None
+        self.distill_rng = np.random.default_rng(cfg.seed + DISTILL_RNG_OFFSET)          # the order of the distillation batches
+        self.version = 0                                                  # the VLA whose candidates the cache holds: 0 = the SFT checkpoint, r = after the distillation of round r (Best-of-N: always 0)
+        self.checkpoint_meta = dict(checkpoint_meta or {})
+        plans =-(-self.max_steps // self.replan)
         self.buffer = ReplayBuffer((cfg.warmup_episodes + cfg.total_episodes) * (plans + 1), horizon, cfg.gamma, cfg.step_reward, touch_dim=cfg.critic_touch.dim)
         self.cache: Optional[CandidateCache] = None                       # built with the first candidates (their state dimension)
         self.rng = np.random.default_rng(cfg.seed)                        # the critic's batches
@@ -135,10 +171,11 @@ class RLRun:
             cm, self._env_cm, self._env = self._env_cm, None, None
             cm.__exit__(None, None, None)
 
-    def _store(self, collected: List[Collected], warmup: bool) -> None:
+    def _store(self, collected: List[Collected], warmup: bool, version: Optional[int] = None) -> None:
+        """The episodes into the buffer, their candidates (drawn by the current VLA) into the cache. `version`: only the resume gives one (it rebuilds the buffer from the files, then restores the cache's own versions)."""
         if self.cache is None:
             self.cache = CandidateCache(self.cfg.num_candidates, self.policy.info.action_horizon, collected[0].candidates.states.shape[1], capacity=self.buffer.capacity)
-        store_round(self.buffer, self.cache, collected, warmup=warmup, version=0)             # Best-of-N never refreshes the cache: the VLA never changes
+        store_round(self.buffer, self.cache, collected, warmup=warmup, version=self.version if version is None else version)
 
     def _update_critic(self, steps: int, stage: int) -> Dict[str, float]:
         def log_window(update: int, means: Dict[str, float]) -> None:
@@ -167,37 +204,94 @@ class RLRun:
         self._store(collected, warmup=False)
         n_updates = cfg.utd * stats["env_steps"]
         updates = self._update_critic(n_updates, r)
+        if self.distiller is not None:
+            self._distill(r)
         online = [e for e in self.buffer.episodes if not e["warmup"]]
         self.log.write(event="round", step=r, round_id=round_id, **stats, critic_updates=n_updates, critic=updates, buffer_rows=len(self.buffer), online_episodes=len(online),
-                       online_success_rate=float(np.mean([e["success"] for e in online])), round_wall_s=round(time.monotonic() - started, 1))
+                       online_success_rate=float(np.mean([e["success"] for e in online])), vla_version=self.version, round_wall_s=round(time.monotonic() - started, 1))
         self._commit(r, collected)
 
+    def _distill(self, r: int) -> None:
+        """PA-RL's Stage II after round `r`: the VLA learns pi^Opt of every stored state under the current critic, then the candidates of all of them are drawn again by the new VLA (version r)."""
+        cfg = self.cfg
+        metrics = self.distiller.distill(self.trainer.critic.params, jax.random.fold_in(jax.random.key(cfg.seed + DISTILL_KEY_OFFSET), r), self.distill_rng, self.buffer, self.cache)
+        self.log.write(event="distill", step=r, **metrics, vla_updates=self.distiller.updates)
+        ids = self.buffer.candidate_ids()
+        next_log = [REFRESH_LOG_EVERY]
+
+        def progress(done: int, total: int) -> None:
+            if done / total >= next_log[0]:
+                self.log.write(event="refresh_progress", round=r, done=done, total=total)
+                next_log[0] = (done / total // REFRESH_LOG_EVERY + 1) * REFRESH_LOG_EVERY
+
+        info = refresh(self.cache, self.actor.sampler, self.buffer.observations, ids, r, cfg.seed, progress=progress)
+        if not np.all(self.cache.versions_of(ids) == r):
+            raise RuntimeError(f"the refresh of round {r} left candidates of another version in the cache")
+        self.version = r
+        self.log.write(event="refresh", step=r, version=r, **info)
+
     # -- the end of a stage and the resume ---------------------------------------------------------------------------------------------------------
+    def _save_vla_checkpoint(self, stage: int) -> None:
+        """The VLA's trainable parameters after the distillation of round `stage`, as an SFT checkpoint (written aside and renamed: a stage that is played again replaces it)."""
+        final = self.run_dir / "vlas" / f"round_{stage:03d}"
+        tmp = final.with_name(final.name + ".tmp")
+        for old in (tmp, final):
+            if old.exists():
+                shutil.rmtree(old)
+        final.parent.mkdir(parents=True, exist_ok=True)
+        meta = {"step": self.distiller.updates, "round": stage, "variant": self.cfg.variant, "seed": self.cfg.seed, "vla_version": self.version, **self.checkpoint_meta}
+        self.distiller.save_checkpoint(tmp, meta)
+        tmp.rename(final)
+
+    def _clean(self, keep: int) -> None:
+        """Remove the resume files of every stage but `keep` (the older ones, and those of a stage cut before its state file was written)."""
+        folder = self.run_dir / RESUME
+        wanted = {Path(name).name for name in (STATE_FILE, critic_file(keep), cache_file(keep), vla_dir(keep))}
+        for path in folder.iterdir():
+            if path.name not in wanted:
+                shutil.rmtree(path) if path.is_dir() else path.unlink()
+
     def _commit(self, stage: int, collected: List[Collected]) -> None:
-        save_episodes(self.run_dir / "episodes" / f"stage_{stage:03d}.npz", collected)
-        _atomic(self.run_dir / CRITIC_FILE, critic_bytes(self.trainer.critic, self.trainer.opt_state))
-        _atomic(self.run_dir / "critics" / f"round_{stage:03d}.msgpack", critic_bytes(self.trainer.critic))     # the critic of EVERY round is kept (about 20 MB): any of them can be evaluated later
-        state = {"stage": stage, "updates": self.trainer.updates, "rng": self.rng.bit_generator.state, "critic_key": jax.random.key_data(self.trainer.key).tolist()}
-        _atomic(self.run_dir / STATE_FILE, json.dumps(state).encode())          # last: the stage is finished only when this file says so
+        run = self.run_dir
+        save_episodes(run / "episodes" / f"stage_{stage:03d}.npz", collected)
+        _atomic(run / critic_file(stage), critic_bytes(self.trainer.critic, self.trainer.opt_state))
+        _atomic(run / "critics" / f"round_{stage:03d}.msgpack", critic_bytes(self.trainer.critic))     # the critic of EVERY round is kept (about 20 MB): any of them can be evaluated later
+        state = {"stage": stage, "updates": self.trainer.updates, "rng": self.rng.bit_generator.state, "critic_key": jax.random.key_data(self.trainer.key).tolist(), "version": self.version}
+        if self.distiller is not None:
+            save_cache(run / cache_file(stage), self.cache)
+            if stage >= 1:
+                self.distiller.save_state(run / vla_dir(stage))
+                self._save_vla_checkpoint(stage)
+            state.update(vla_updates=self.distiller.updates, distill_rng=self.distill_rng.bit_generator.state)
+        _atomic(run / STATE_FILE, json.dumps(state).encode())          # last: the stage is finished only when this file says so
+        self._clean(stage)
         self.stage = stage
 
     def resume(self) -> bool:
-        """Rebuild the buffer, the cache, the critic and the random generators from the files of the last finished stage. False when there is nothing to resume."""
+        """Rebuild the buffer, the cache, the critic, the VLA and the random generators from the files of the last finished stage. False when there is nothing to resume."""
         path = self.run_dir / STATE_FILE
         if self.stage >= 0:                                              # already rebuilt (or already run): never twice
             return True
         if not path.exists():
             return False
         state = json.loads(path.read_text())
-        for stage in range(state["stage"] + 1):
-            self._store(load_episodes(self.run_dir / "episodes" / f"stage_{stage:03d}.npz"), warmup=stage == 0)
+        stage = int(state["stage"])
+        for s in range(stage + 1):
+            self._store(load_episodes(self.run_dir / "episodes" / f"stage_{s:03d}.npz"), warmup=s == 0, version=0)
         template = {"params": self.trainer.critic.params, "target_params": self.trainer.critic.target_params, "opt_state": self.trainer.opt_state}
-        loaded = flax.serialization.from_bytes(template, (self.run_dir / CRITIC_FILE).read_bytes())
+        loaded = flax.serialization.from_bytes(template, (self.run_dir / critic_file(stage)).read_bytes())
         self.trainer.critic = rc.CriticState(params=loaded["params"], target_params=loaded["target_params"])
         self.trainer.opt_state, self.trainer.updates = loaded["opt_state"], int(state["updates"])
         self.trainer.key = jax.random.wrap_key_data(np.array(state["critic_key"], dtype=np.uint32))
         self.rng.bit_generator.state = state["rng"]
-        self.stage = int(state["stage"])
+        if self.distiller is not None:
+            load_cache(self.run_dir / cache_file(stage), self.cache)
+            if stage >= 1:
+                self.distiller.load_state(self.run_dir / vla_dir(stage), int(state["vla_updates"]))
+            self.distill_rng.bit_generator.state = state["distill_rng"]
+        self.version = int(state["version"])
+        self._clean(stage)
+        self.stage = stage
         return True
 
     # -- evaluation ---------------------------------------------------------------------------------------------------------------------------------
@@ -212,7 +306,7 @@ class RLRun:
         with self.open_env(cfg.eval_episodes, f"eval_{r}") as env:
             result = evaluate(self.actor, self.trainer.critic.params, env, self.seeds, replan=self.replan, max_steps=self.max_steps, master_seed=self.eval_seed, label=str(r), step=r,
                               mode=cfg.eval_selection)
-        result.update(round=r, critic_updates=self.trainer.updates, buffer_rows=len(self.buffer))
+        result.update(round=r, critic_updates=self.trainer.updates, buffer_rows=len(self.buffer), vla_version=self.version)
         _atomic(self.result_path(r), json.dumps(result, default=float, indent=1).encode())
         self.log.write(event="eval", step=r, **{k: v for k, v in result.items() if k not in ("episodes", "seeds", "successes", "label", "step")}, eval_wall_s=round(time.monotonic() - started, 1))
         try:
@@ -243,6 +337,6 @@ class RLRun:
                     self._evaluate(r)
         finally:
             self._close_collection()
-        summary = {"stage": self.stage, "stopped": stopped, "rounds": cfg.rounds, "updates": self.trainer.updates, "evaluated": sorted(int(p.stem) for p in (self.eval_dir / "results").glob("*.json"))}
+        summary = {"stage": self.stage, "stopped": stopped, "rounds": cfg.rounds, "updates": self.trainer.updates, "vla_version": self.version, "evaluated": sorted(int(p.stem) for p in (self.eval_dir / "results").glob("*.json"))}
         self.log.write(event="stopped" if stopped else "done", **summary)
         return summary

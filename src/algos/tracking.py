@@ -22,7 +22,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 WANDB_ID_FILE = "wandb_id.txt"
 MODES = ("online", "offline", "disabled")
 # metrics.jsonl event -> prefix of its wandb keys (the fields that are not numbers are left out)
-PREFIX = {"train": "train", "eval": "eval", "checkpoint": "checkpoint", "resume_snapshot": "snapshot", "first_step": "perf", "warmup": "warmup", "round": "round"}      # the last two: the RL runs (src/algos/rl_run.py)
+PREFIX = {"train": "train", "eval": "eval", "checkpoint": "checkpoint", "resume_snapshot": "snapshot", "first_step": "perf", "warmup": "warmup", "round": "round", "distill": "distill", "refresh": "refresh"}      # the last four: the RL runs (src/algos/rl_run.py)
 NOT_LOGGED = {"event", "step", "elapsed_s", "from_step"}
 
 

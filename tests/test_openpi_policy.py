@@ -215,6 +215,19 @@ def test_the_training_batch_puts_the_targets_in_the_models_own_space_and_pads_th
     assert loss.shape == () and np.isfinite(float(loss))
 
 
+def test_the_training_batch_of_normalised_chunks_keeps_them_exactly_in_the_first_eight_dimensions_and_pads_the_rest(pol):
+    obs = env_obs(2)
+    normalized = np.random.default_rng(2).normal(size=(2, H, 8)).astype(np.float32)
+    observation, actions = pol.training_batch_from_normalized(obs, "p", normalized)
+    assert actions.shape == (2, H, MODEL_DIM) and observation.state.shape == (2, MODEL_DIM)
+    assert np.array_equal(np.asarray(actions)[:, :, :8], normalized) and not np.asarray(actions)[:, :, 8:].any()          # no round trip through the env's space
+    reference = pol.training_batch(obs, "p", np.zeros((2, H, 8), np.float32))[0]
+    assert np.array_equal(np.asarray(observation.state), np.asarray(reference.state))                                      # the observations take the same path as training_batch's
+    with pytest.raises(ValueError, match="normalized"):
+        pol.training_batch_from_normalized(obs, "p", normalized[:, :-1])
+    assert np.isfinite(float(pol.loss(pol.state, jax.random.key(0), observation, actions)))
+
+
 def test_the_trainable_filter_selects_parameters(pol):
     trainable = nnx.state(pol.graphdef and nnx.merge(pol.graphdef, pol.state), pol.trainable_filter)
     assert len(jax.tree.leaves(trainable)) > 0

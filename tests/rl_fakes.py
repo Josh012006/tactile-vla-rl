@@ -80,3 +80,52 @@ class FakeEnv:
         self.succeeded = getattr(self, "succeeded", np.zeros(self.num_envs, bool)) | term
         self.ended = self.ended | term | trunc
         return self._result(term, trunc, acting)
+
+
+# -- a fake pi0.5 that can be trained: the mean of its candidates is a trainable (H, 8) parameter, so a distillation moves what it samples -----------------------------------------------
+import flax.nnx as nnx  # noqa: E402
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+
+
+class _Model(nnx.Module):
+    def __init__(self):
+        self.bias = nnx.Param(jnp.zeros((H, 8), jnp.float32))           # trainable: the mean of the candidates
+        self.frozen = nnx.Param(jnp.ones((3,), jnp.float32))            # frozen, unused
+
+
+class FakeTrainablePolicy(FakePolicy):
+    """`FakePolicy` + what `Distiller` asks of a policy: `state`, `set_state`, `graphdef`, `trainable_filter`, `prepare_loss_batch`, `loss_of_rows`, `training_batch_from_normalized`.
+    Its candidates are bias + noise (the noise of FakePolicy), its loss the squared distance of `bias` to the labels."""
+
+    def __init__(self):
+        super().__init__()
+        self.graphdef, self._state = nnx.split(_Model())
+        self.trainable_filter = lambda path, x: path[0] == "bias"
+        self.trained_on = []
+
+    @property
+    def state(self):
+        return self._state
+
+    def set_state(self, state):
+        self._state = state
+
+    def bias(self):
+        return np.asarray(self._state.to_pure_dict()["bias"], np.float32)
+
+    def sample_candidates(self, obs, prompt, num_samples, *, row_seeds=None, pad_to=None):
+        out = super().sample_candidates(obs, prompt, num_samples, row_seeds=row_seeds, pad_to=pad_to)
+        norm = out.normalized + self.bias()
+        return Candidates(normalized=norm, states=out.states, targets=fake_targets(norm, np.asarray(obs[P.JOINT_POSITION], np.float32)), infer_ms=out.infer_ms)
+
+    def training_batch_from_normalized(self, obs, prompt, normalized):
+        self.trained_on.append(len(normalized))
+        return jnp.asarray(np.asarray(obs[P.JOINT_POSITION], np.float32)), jnp.asarray(normalized, jnp.float32)
+
+    def prepare_loss_batch(self, rng, observation, actions, *, train=True):
+        return observation, jnp.zeros(actions.shape[0])                  # one array per row, so that the micro-batches can be cut like openpi's draws
+
+    def loss_of_rows(self, state, observation, actions, draws):
+        model = nnx.merge(self.graphdef, state)
+        return jnp.mean((model.bias[...].astype(jnp.float32)[None] - actions) ** 2)

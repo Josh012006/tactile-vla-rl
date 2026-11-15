@@ -49,7 +49,7 @@ def critic_state_from_obs(obs: Dict[str, np.ndarray], touch=None) -> Dict[str, n
     return state
 
 
-def _pad_rows(array: np.ndarray, rows: int) -> np.ndarray:
+def pad_rows(array: np.ndarray, rows: int) -> np.ndarray:
     """`array` (n, ...) with its last row repeated up to `rows` rows."""
     n = len(array)
     if n == rows:
@@ -91,8 +91,8 @@ class RLActor:
         if mode == "softmax" and key is None:
             raise ValueError("softmax needs a jax PRNG key")
         rows = max(n, pad_to or n)
-        state = {name: _pad_rows(arr, rows) for name, arr in critic_state_from_obs(obs, self.touch).items()}
-        result = self.optimiser(params, state, _pad_rows(cands.normalized, rows))
+        state = {name: pad_rows(arr, rows) for name, arr in critic_state_from_obs(obs, self.touch).items()}
+        result = self.optimiser(params, state, pad_rows(cands.normalized, rows))
         chosen = pick(result, mode, key, self.cfg.softmax_temperature)
         normalized = np.asarray(chosen.actions)[:n]
         targets = self.policy.normalized_to_targets(normalized[:, None], cands.states, np.asarray(obs[P.JOINT_POSITION], np.float32))[:, 0]

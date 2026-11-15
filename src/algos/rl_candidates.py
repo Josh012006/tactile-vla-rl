@@ -110,6 +110,19 @@ class CandidateCache:
         self.normalized[ids], self.states[ids], self.version[ids] = cands.normalized, cands.states, version
         self.size = max(self.size, int(ids.max()) + 1)
 
+    def snapshot(self) -> Dict[str, np.ndarray]:
+        """What is stored (ids 0 .. size - 1), for a file: a resumed PA-RL run must get back the candidates of the VLA it had, not recompute them (a refresh takes hours)."""
+        return {"normalized": self.normalized[:self.size], "states": self.states[:self.size], "version": self.version[:self.size]}
+
+    def restore(self, normalized: np.ndarray, states: np.ndarray, version: np.ndarray) -> None:
+        """Replace the content by a `snapshot`'s."""
+        n = len(version)
+        if normalized.shape[1:] != (self.k, self.h, self.d) or states.shape[1:] != (self.ds,) or len(normalized) != n or len(states) != n:
+            raise ValueError(f"snapshot {normalized.shape} / {states.shape} / {version.shape} does not fit the cache (k {self.k}, H {self.h}, {self.d} dims, state {self.ds})")
+        self._alloc(max(self.capacity, n))
+        self.normalized[:n], self.states[:n], self.version[:n] = normalized, states, version
+        self.size = n
+
     def has(self, ids: Sequence[int]) -> np.ndarray:
         ids = np.asarray(ids, np.int64)
         return (ids >= 0) & (ids < self.capacity) & (self.version[np.clip(ids, 0, self.capacity - 1)] >= 0)

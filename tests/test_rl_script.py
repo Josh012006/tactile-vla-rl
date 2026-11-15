@@ -64,3 +64,10 @@ def test_the_dry_run_prints_the_plan_and_writes_nothing(tmp_path, capsys):
         S.main(["--experiment", EXPERIMENT, "--dry-run"])                                                                            # no start
     with pytest.raises(SystemExit):
         S.main(["--dry-run"])                                                                                                       # neither an experiment nor a run to resume
+
+
+def test_the_dry_run_of_a_parl_experiment_says_it_distils_and_keeps_a_vla_checkpoint_per_round(tmp_path, capsys):
+    run = make_sft_run(tmp_path)
+    assert S.main(["--experiment", "configs/experiment/rl/pi05_parl_global_local.yaml", "--start", str(run), "4000", "--dry-run", "--run-name", "never_created"]) == 0
+    out = capsys.readouterr().out
+    assert "method parl_global_local" in out and "distillation after every round" in out and "a VLA checkpoint" in out

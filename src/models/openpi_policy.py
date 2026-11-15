@@ -312,6 +312,24 @@ from (Gemma variants and freeze filter as set by the YAML); `cfg`: the model YAM
         batch, observation = self._stack(items)
         return observation, jnp.asarray(batch["actions"])
 
+    def training_batch_from_normalized(self, obs: Dict[str, np.ndarray], prompt: Union[str, Sequence[str]], normalized: np.ndarray):
+        """`training_batch` for chunks that are already in the model's NORMALISED space (N, H, 8): what `sample_candidates` returns and what the critic reads and moves (the labels of PA-RL's
+        distillation, docs/algos/rl.md). The observations go through the same input transforms; the chunk is not put through the targets' conversion and the normalisation again (it
+        already is their result: the first 8 dimensions of the model's action vector, the rest zero padding), so no information is lost in a round trip through the env's space."""
+        import jax.numpy as jnp
+        n, h = num_envs_of(obs), self.info.action_horizon
+        normalized = np.asarray(normalized, dtype=np.float32)
+        if normalized.shape != (n, h, P.ACTION_DIM):
+            raise ValueError(f"normalized must be ({n}, {h}, {P.ACTION_DIM}) (N, action_horizon, 8), got {normalized.shape}")
+        items = []
+        for row in rows_of(obs, prompt, self.touch):
+            row["actions"] = np.zeros((h, P.ACTION_DIM), dtype=np.float32)                     # a placeholder the input transforms need: replaced below
+            items.append(self.policy._input_transform(row))                                    # noqa: SLF001
+        batch, observation = self._stack(items)
+        actions = np.zeros(np.asarray(batch["actions"]).shape, dtype=np.float32)
+        actions[..., :P.ACTION_DIM] = normalized
+        return observation, jnp.asarray(actions)
+
     def loss(self, state, rng, observation, actions, *, train: bool = True):
         """Mean training loss of the model with weights `state` (an nnx.State: differentiable with respect to it). Flow matching for
         pi0.5 / pi0, next-token cross entropy for pi0-FAST. `train=True` switches on openpi's image augmentation."""

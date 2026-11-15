@@ -1,4 +1,4 @@
-"""Online RL fine-tuning of pi0.5 on the FORGE PegInsert task: Best-of-N now (the VLA stays frozen); PA-RL's distillation is the next step (docs/algos/rl.md).
+"""Online RL fine-tuning of pi0.5 on the FORGE PegInsert task: Best-of-N (the VLA stays frozen) and PA-RL (variants A and B: the VLA is distilled after every round) (docs/algos/rl.md).
 
     python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --start peg_insert_pi05_lora_teleop 4000      # SFT run (folder name or path) and checkpoint step to start from
     python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --start <run> <step> --dry-run                # what would run: no GPU, no model, no server
@@ -10,8 +10,10 @@ Run it through jobs/job_rl.sh (Isaac Sim, the VLA and the critic share one GPU).
 saved in the checkpoint, as in scripts/eval_sft.py).
 
 The run (src/algos/rl_run.py): the warm-up (`warmup_episodes` of the base VLA, then `warmup_critic_steps` critic updates), then `total_episodes / envs_per_batch` rounds of collection with the critic and critic
-updates (`utd` per environment step), with an evaluation after the warm-up, every `eval_every_rounds` rounds and after the last (the 100 fixed episodes of the SFT evaluations, the critic's argmax over the VLA's candidates, on a
-fresh server). Output <output_root>/<run name>/: config.json, metrics.jsonl (+ wandb), episodes/, resume/, critics/, eval/results/<round>.json and eval/curve.*, logs/server_*.log.
+updates (`utd` per environment step) and, for PA-RL, the distillation of the VLA on every stored state and the refresh of the whole candidate cache; with an evaluation after the warm-up, every `eval_every_rounds`
+rounds and after the last (the 100 fixed episodes of the SFT evaluations, the critic's argmax over the VLA's candidates, on a fresh server).
+Output <output_root>/<run name>/: config.json, metrics.jsonl (+ wandb), episodes/, resume/, critics/round_<r>.msgpack (every round), vlas/round_<r>/ (PA-RL: the VLA's trainable parameters after every round, an SFT
+checkpoint layout, about 1.7 GB each), eval/results/<round>.json and eval/curve.*, logs/server_*.log.
 XLA's deterministic GPU ops are NOT switched on here (the flag is global to the process and would slow the critic's training; the SFT evaluations are comparable, not bit-reproducible, because of the cameras: same starts,
 same episode seeds, a standard error). SIGTERM / SIGINT: the run ends after the stage in progress (a second signal kills the servers at once).
 """
@@ -117,6 +119,9 @@ def print_plan(cfg: rl_config.RLConfig, run_dir: Path, start: Optional[dict], mo
         print(f"starts from the SFT run {start['run']} at step {start['step']}; model {model_cfg['name']} ({model_cfg['family']}), chunk {horizon}, replan {replan}")
     print(f"method {cfg.variant}: k = {cfg.num_candidates} candidates, keep {cfg.keep_top}, {cfg.local_steps} local steps; rollouts '{cfg.rollout_selection}', evaluation '{cfg.eval_selection}'")
     print(f"warm-up: {cfg.warmup_episodes} episodes of the base VLA + {cfg.warmup_critic_steps} critic updates; then {cfg.rounds} rounds of {cfg.envs_per_batch} episodes, {cfg.utd} critic update(s) per environment step")
+    if cfg.distills:
+        print(f"distillation after every round: batch {cfg.distill_batch_size} (micro {cfg.distill_micro_batch_size}), lr {cfg.distill_lr}, {cfg.distill_epochs} epoch(s) over every stored state; labels '{cfg.distill_selection}'; "
+              f"the cache of all of them is drawn again after each one; a VLA checkpoint (~1.7 GB) is kept per round")
     print(f"evaluations ({cfg.eval_episodes} episodes each) after the rounds {list(cfg.eval_rounds)}; replay buffer of up to {rows} states (about {rows * 2 * 150528 / 2**30:.1f} GiB of images)")
 
 
@@ -193,7 +198,8 @@ def main(argv=None) -> int:
     sink = tracking.start_tracking(run_dir, resuming, cfg.wandb_project, run_dir.name, cfg.wandb_mode, config, tags=[model_cfg["name"], cfg.variant])
     log = sft_mod.MetricsLog(run_dir / "metrics.jsonl", sink)
     open_env = make_opener(task_config, config.get("env_set", []), run_dir / "logs", int(task["max_steps_per_episode"]), args.ready_timeout, stop)
-    run = rl_run.RLRun(cfg, policy, run_dir, open_env, log, max_steps=int(task["max_steps_per_episode"]), stop=stop, title=f"{run_dir.name}: success rate vs collection round")
+    run = rl_run.RLRun(cfg, policy, run_dir, open_env, log, max_steps=int(task["max_steps_per_episode"]), stop=stop, title=f"{run_dir.name}: success rate vs collection round",
+                         model_cfg=model_cfg, checkpoint_meta={"start_run": start["run"], "start_step": start["step"]})
     try:
         summary = run.run()
     except BaseException as error:

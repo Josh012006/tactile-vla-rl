@@ -1,4 +1,4 @@
-"""src/algos/rl_run.py on CPU: the warm-up, the rounds, the evaluations and the resume of a Best-of-N run, with fake environments and a fake VLA (tests/rl_fakes.py) and a tiny critic."""
+"""src/algos/rl_run.py on CPU: the warm-up, the rounds, the evaluations, the distillation and the resume of a Best-of-N run and of a PA-RL run, with fake environments and a fake VLA (tests/rl_fakes.py) and a tiny critic."""
 import contextlib
 import json
 import threading
@@ -10,7 +10,7 @@ jax = pytest.importorskip("jax")
 pytest.importorskip("flax")
 pytest.importorskip("optax")
 
-from rl_fakes import H, MAX_STEPS, FakeEnv, FakePolicy  # noqa: E402
+from rl_fakes import H, MAX_STEPS, FakeEnv, FakePolicy, FakeTrainablePolicy  # noqa: E402
 
 from src.algos import rl_run as RUN  # noqa: E402
 from src.algos.rl_config import load_rl_config  # noqa: E402
@@ -19,6 +19,7 @@ from src.eval import episodes as E  # noqa: E402
 SMALL = {"method": "best_of_n", "keep_top": 1, "local_steps": 0, "rollout_selection": "argmax", "num_candidates": 4, "envs_per_batch": 4, "total_episodes": 8, "warmup_episodes": 4,
          "warmup_critic_steps": 3, "critic_cameras": ["wrist"], "critic_image_size": 16, "random_shift_px": 0, "critic_hidden": [16, 16], "critic_batch_size": 8, "eval_episodes": 4,
          "eval_every_rounds": 1, "rows_per_sample_call": 3, "seed": 5, "wandb_mode": "disabled"}
+PARL = {"method": "parl", "keep_top": 2, "local_steps": 2, "local_lr": 1e-2, "rollout_selection": "softmax", "distill_batch_size": 4, "distill_micro_batch_size": 2, "distill_lr": 0.05}
 PATTERN = [10, MAX_STEPS + 5, 8, 3]
 
 
@@ -48,9 +49,13 @@ class Opener:
         return contextlib.nullcontext(env)
 
 
-def make_run(tmp_path, log=None, opener=None, stop=None, **overrides):
+def make_run(tmp_path, log=None, opener=None, stop=None, policy=None, **overrides):
     cfg = load_rl_config(overrides={**SMALL, **overrides})
-    return RUN.RLRun(cfg, FakePolicy(), tmp_path / "run", opener or Opener(), log or ListLog(), max_steps=MAX_STEPS, stop=stop), cfg
+    return RUN.RLRun(cfg, policy or FakePolicy(), tmp_path / "run", opener or Opener(), log or ListLog(), max_steps=MAX_STEPS, stop=stop), cfg
+
+
+def make_parl(tmp_path, log=None, opener=None, stop=None, **overrides):
+    return make_run(tmp_path, log, opener, stop, policy=FakeTrainablePolicy(), **{**PARL, **overrides})
 
 
 def leaves(tree):
@@ -61,7 +66,7 @@ def test_a_run_goes_through_the_warm_up_the_rounds_and_the_evaluations_in_order(
     log, opener = ListLog(), Opener()
     run, cfg = make_run(tmp_path, log, opener)
     summary = run.run()
-    assert summary == {"stage": 2, "stopped": False, "rounds": 2, "updates": summary["updates"], "evaluated": [0, 1, 2]}
+    assert summary == {"stage": 2, "stopped": False, "rounds": 2, "updates": summary["updates"], "vla_version": 0, "evaluated": [0, 1, 2]}
     assert [e["event"] for e in log.events if e["event"] != "critic"] == ["start", "warmup", "warmup", "eval", "round", "eval", "round", "eval", "done"]
     assert opener.opened == [(4, "collect"), (4, "eval_0"), (4, "collect"), (4, "eval_1"), (4, "collect"), (4, "eval_2")]        # one server at a time: the collection one is stopped for an evaluation
     collect_resets = [env.resets for label, env in opener.envs if label == "collect"]
@@ -129,9 +134,7 @@ def test_the_episodes_of_a_stage_come_back_from_their_file_with_their_candidates
             assert np.array_equal(getattr(a.candidates, name), getattr(b.candidates, name))
 
 
-def test_what_this_step_does_not_do_is_refused(tmp_path):
-    with pytest.raises(NotImplementedError, match="distillation"):
-        make_run(tmp_path, method="parl", keep_top=2, local_steps=0, rollout_selection="softmax")
+def test_a_run_without_a_warm_up_is_refused(tmp_path):
     with pytest.raises(ValueError, match="warmup_episodes"):
         make_run(tmp_path, warmup_episodes=0)
 
@@ -141,3 +144,89 @@ def test_the_critic_of_every_round_is_kept_even_when_only_some_rounds_are_evalua
     summary = run.run()
     assert summary["evaluated"] == [0, 2]
     assert [p.name for p in sorted((tmp_path / "run" / "critics").glob("*"))] == ["round_000.msgpack", "round_001.msgpack", "round_002.msgpack"]
+
+
+def test_only_the_files_of_the_last_stage_are_kept_for_the_resume_and_a_stage_cut_before_its_state_file_is_ignored(tmp_path):
+    run, _ = make_run(tmp_path)
+    run.run()
+    folder = tmp_path / "run" / "resume"
+    assert sorted(p.name for p in folder.iterdir()) == ["critic_002.msgpack", "state.json"]
+    (folder / "critic_003.msgpack").write_bytes(b"cut while being written")                  # a stage that did not reach its state file
+    (folder / "vla_003").mkdir()
+    again, _ = make_run(tmp_path)
+    assert again.resume() and again.stage == 2
+    assert sorted(p.name for p in folder.iterdir()) == ["critic_002.msgpack", "state.json"]
+
+
+# -- PA-RL --------------------------------------------------------------------------------------------------------------------------------------------
+def parl_state(run):
+    return {"bias": run.policy.bias(), "trainable": leaves(run.distiller.trainer.trainable), "adam": leaves(run.distiller.trainer.opt_state), "cache": run.cache.snapshot(),
+            "critic": leaves(run.trainer.critic.params), "critic_adam": leaves(run.trainer.opt_state), "distill_rng": run.distill_rng.bit_generator.state, "rng": run.rng.bit_generator.state}
+
+
+def same_state(a, b):
+    assert np.array_equal(a["bias"], b["bias"])
+    assert a["distill_rng"] == b["distill_rng"] and a["rng"] == b["rng"]
+    for key in ("trainable", "adam", "critic", "critic_adam"):
+        assert len(a[key]) == len(b[key]) and all(np.array_equal(x, y) for x, y in zip(a[key], b[key])), key
+    assert all(np.array_equal(a["cache"][k], b["cache"][k]) for k in a["cache"])
+
+
+def test_a_parl_run_distils_after_every_round_and_draws_the_candidates_of_every_state_again(tmp_path):
+    log, opener = ListLog(), Opener()
+    run, cfg = make_parl(tmp_path, log, opener)
+    assert cfg.variant == "parl_global_local"
+    summary = run.run()
+    assert summary["stage"] == 2 and summary["vla_version"] == 2 and run.distiller.updates > 0
+    assert [e["event"] for e in log.events if e["event"] not in ("critic", "refresh_progress")] == ["start", "warmup", "warmup", "eval", "distill", "refresh", "round", "eval", "distill", "refresh", "round", "eval", "done"]
+    assert [e["version"] for e in log.of("refresh")] == [1, 2] and [e["vla_version"] for e in log.of("round")] == [1, 2]
+    ids = run.buffer.candidate_ids()
+    assert np.all(run.cache.versions_of(ids) == 2) and log.of("refresh")[0]["states"] < log.of("refresh")[1]["states"] == len(ids)       # all of them, the warm-up's too
+    assert np.abs(run.policy.bias()).max() > 0
+    assert [d["states"] for d in log.of("distill")] == [r["states"] for r in log.of("refresh")]                      # the VLA learns from every state that is then refreshed
+    assert [json.loads(run.result_path(r).read_text())["vla_version"] for r in (0, 1, 2)] == [0, 1, 2]
+
+
+def test_the_cache_holds_the_vla_that_drew_it_the_new_episodes_under_the_current_version_and_the_old_ones_refreshed(tmp_path):
+    seen = []
+    run, _ = make_parl(tmp_path, ListLog(on_event=lambda e: seen.append(np.unique(run.cache.versions_of(run.buffer.candidate_ids()))) if e["event"] == "round" else None))
+    run.run()
+    assert [v.tolist() for v in seen] == [[1], [2]]                                     # after each round every state of the cache was drawn by the VLA of that round
+
+
+def test_each_round_keeps_the_vlas_trainable_parameters_as_a_checkpoint_and_the_last_stage_as_the_resume_state(tmp_path):
+    run, _ = make_parl(tmp_path)
+    run.run()
+    base = tmp_path / "run"
+    assert sorted(p.name for p in (base / "vlas").iterdir()) == ["round_001", "round_002"]
+    meta = json.loads((base / "vlas" / "round_002" / "meta.json").read_text())
+    assert meta["round"] == 2 and meta["step"] == run.distiller.updates and meta["variant"] == "parl_global_local" and (base / "vlas" / "round_002" / "params").is_dir()
+    assert sorted(p.name for p in (base / "resume").iterdir()) == ["cache_002.npz", "critic_002.msgpack", "state.json", "vla_002"]
+    state = json.loads((base / RUN.STATE_FILE).read_text())
+    assert state["stage"] == 2 and state["version"] == 2 and state["vla_updates"] == run.distiller.updates
+
+
+def test_a_parl_run_that_is_cut_resumes_with_the_same_vla_cache_critic_and_generators_as_an_uninterrupted_one(tmp_path):
+    stop = threading.Event()
+    run_a, _ = make_parl(tmp_path / "a", ListLog(on_event=lambda e: stop.set() if e["event"] == "round" and e["step"] == 1 else None), stop=stop)
+    assert run_a.run()["stage"] == 1
+    mid = parl_state(run_a)
+    run_b, _ = make_parl(tmp_path / "a")                                                  # a new process: a fresh policy, nothing in memory
+    assert run_b.resume() and run_b.stage == 1 and run_b.version == 1
+    same_state(parl_state(run_b), mid)                                                    # the resume rebuilds exactly what was committed (cache with its versions, VLA, Adam, generators)
+    run_b.run()
+    reference, _ = make_parl(tmp_path / "b")
+    reference.run()
+    same_state(parl_state(run_b), parl_state(reference))
+    assert run_b.distiller.updates == reference.distiller.updates and run_b.version == reference.version == 2
+
+
+def test_a_parl_resume_after_the_warm_up_alone_starts_the_distillation_from_the_base_vla(tmp_path):
+    stop = threading.Event()
+    run_a, _ = make_parl(tmp_path / "a", ListLog(on_event=lambda e: stop.set() if e["event"] == "warmup" else None), stop=stop)
+    assert run_a.run()["stage"] == 0
+    run_b, _ = make_parl(tmp_path / "a")
+    run_b.run()
+    reference, _ = make_parl(tmp_path / "b")
+    reference.run()
+    same_state(parl_state(run_b), parl_state(reference))

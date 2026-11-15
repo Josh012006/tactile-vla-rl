@@ -115,6 +115,21 @@ def test_refresh_recomputes_the_asked_states_with_seeds_of_their_id_and_version_
     assert rcand.candidate_seed(11, 7, 2) != rcand.candidate_seed(11, 7, 3) != rcand.candidate_seed(12, 7, 3)    # a new version draws new noise
 
 
+def test_a_snapshot_of_the_cache_restores_it_with_its_versions_in_a_cache_of_any_capacity():
+    cache = rcand.CandidateCache(3, H, DS)
+    cache.put([0, 1, 2], fake_candidates([0.0, 1.0, 2.0], [5, 6, 7], 3), version=0)
+    cache.put([1], fake_candidates([1.0], [9], 3), version=4)
+    snap = cache.snapshot()
+    assert snap["normalized"].shape[0] == snap["version"].shape[0] == cache.size and snap["version"].tolist() == [0, 4, 0]
+    for capacity in (1, 100):                                                                          # smaller than the snapshot (it grows) and larger
+        other = rcand.CandidateCache(3, H, DS, capacity=capacity)
+        other.restore(**snap)
+        assert other.size == cache.size and other.versions_of(range(3)).tolist() == [0, 4, 0] and np.array_equal(other.get(range(3)), cache.get(range(3)))
+        assert np.array_equal(other.snapshot()["states"], snap["states"])
+    with pytest.raises(ValueError, match="does not fit"):
+        rcand.CandidateCache(5, H, DS).restore(**snap)                                                 # another k
+
+
 def test_concat_refuses_nothing_to_join():
     with pytest.raises(ValueError):
         rcand.concat_candidates([])
