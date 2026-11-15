@@ -2,6 +2,8 @@
 # What does the model cost when it plans for K environments at once? (scripts/probe_batch_cost.py: no simulator, a few minutes)
 #   sbatch jobs/job_probe_batch_cost.sh --model pi05 --batch-sizes 32 50 64 --split 64 100        # calls of 32 / 50 / 64 rows, then 100 rows in ONE plan split in equal calls of at most 64 (two of 50)
 #   sbatch jobs/job_probe_batch_cost.sh --model pi0_fast --batch-sizes 8 12 16 20 24 --split 16 100
+#   sbatch jobs/job_probe_batch_cost.sh --model pi05 --batch-sizes 1 8 50 --num-samples 1 32          # RL: k = 32 candidates per row (best-of-N rollouts, PA-RL cache refresh)
+#   sbatch jobs/job_probe_batch_cost.sh --model pi0_fast --batch-sizes 1 4 --num-samples 1 8 32 --steps 150 --replan 5      # pi0-FAST: B * S model rows per call
 # Every option goes to `python -m scripts.probe_batch_cost` (see its --help). Output: logs/slurm/probe_batch_cost_<jobid>.out, reports/probe_batch_cost_<model>_<tag>.json.
 # Use the GPU of the evaluation (an L40S). No mail (not a training job).
 #

@@ -9,13 +9,16 @@ from src.models.interface import Plan
 
 
 class Fake:
-    def __init__(self):
+    def __init__(self, native=True):
         self.calls = []
+        self.samples = []
+        self._native_samples = native
 
     def plan(self, obs, prompt, num_samples=1, *, row_seeds=None, pad_to=None):
         n = len(obs[P.JOINT_POSITION])
         self.calls.append((n, list(row_seeds), pad_to))
-        raw = np.zeros((n, 1, 4, 8), np.float32)
+        self.samples.append(num_samples)
+        raw = np.zeros((n, num_samples, 4, 8), np.float32)
         return Plan(targets=raw.copy(), raw=raw, infer_ms=1.0)
 
 
@@ -62,3 +65,27 @@ def test_split_measures_one_plan_of_many_rows_cut_in_equal_calls_and_puts_max_ro
     assert rows[0]["batch"] == 100 and rows[0]["max_rows"] == 64 and (rows[0]["call_rows"], rows[0]["calls_per_plan"]) == (50, 2)
     assert PB.split_calls(64, 64) == {"call_rows": 64, "calls_per_plan": 1} and PB.split_calls(24, 16) == {"call_rows": 12, "calls_per_plan": 2}
     assert PB.split_calls(100, 16) == {"call_rows": 15, "calls_per_plan": 7} and PB.estimate(rows, 150, 8)[0]["batch"] == 100
+
+
+def test_num_samples_goes_to_the_policy_and_pi0_fast_pads_to_one_model_row_per_sample():
+    native, fast = Fake(native=True), Fake(native=False)
+    a = PB.measure(native, [4], 2, memory=lambda: {}, say=lambda m: None, num_samples=32)
+    b = PB.measure(fast, [4], 2, memory=lambda: {}, say=lambda m: None, num_samples=8)
+    assert set(native.samples) == {32} and all(c[2] == 4 for c in native.calls)               # pi0.5: the samples are inside the call, B rows
+    assert set(fast.samples) == {8} and all(c[2] == 32 for c in fast.calls)                   # pi0-FAST: B * S rows
+    assert (a[0]["num_samples"], a[0]["model_rows"]) == (32, 4) and (b[0]["num_samples"], b[0]["model_rows"]) == (8, 32)
+    assert a[0]["median_ms_per_candidate"] == round(a[0]["median_ms"] / (4 * 32), 3)
+
+
+def test_the_split_of_pi0_fast_counts_model_rows_not_environments():
+    fast = Fake(native=False)
+    rows = PB.measure(fast, [10], 1, memory=lambda: {}, say=lambda m: None, max_rows=16, num_samples=8)       # 80 model rows, calls of at most 16
+    assert (rows[0]["call_rows"], rows[0]["calls_per_plan"]) == (16, 5)
+
+
+def test_the_estimate_of_the_cache_refresh_uses_the_time_per_row_and_the_runs_states():
+    assert PB.refresh_states(19) == 19 * sum(50 + 50 * r for r in range(1, 21)) == 218_500          # 20 rounds, the buffer grows from 100 to 1050 episodes
+    est = PB.estimate([{"batch": 50, "num_samples": 32, "median_ms": 5_000.0}, {"batch": 50, "num_samples": 1, "median_ms": 100.0}], steps=150, replan=8)
+    assert est[0]["refresh_states"] == 218_500 and est[0]["refresh_h"] == round(218_500 * 5_000.0 / 50 / 3.6e6, 1)      # 100 ms per state: 6.1 h
+    assert "refresh_h" not in est[1]                                                                 # one candidate per row: no refresh to estimate
+    assert PB.estimate([{"batch": 50, "num_samples": 32, "median_ms": 5_000.0}], 150, 8, states_to_refresh=1000)[0]["refresh_states"] == 1000
