@@ -4,7 +4,7 @@
 # Rule: the DEFAULTS are the paper's (Appendix B.1, pp. 22-23). Where the paper has no value the comment says "group" (decided with Josue, 15 Nov. 2026) or "proposal", and docs/algos/rl.md
 # gives the reasoning. Read by src/algos/rl_config.py (an unknown key is an error, never ignored).
 #
-# One online-trained critic, UTD 1, no ensemble, no pessimism bias (group). Touch goes to the CRITIC only (`use_touch`): the SFT checkpoint is the same for every run.
+# One online-trained critic, UTD 1, no ensemble, no pessimism bias (group). Touch goes to the CRITIC only (`critic_use_tactile`, `critic_use_force`): the SFT checkpoint is the same for every run.
 
 # -- Method -----------------------------------------------------------------------------------------------------------------------------
 # best_of_n: the VLA stays frozen; the action executed is the argmax of Q over the k candidates (Alg. 2 of the paper without the distillation, global optimisation only).
@@ -43,7 +43,11 @@ step_reward: -1.0                   # per plan until success; 0 at success (pape
 cal_ql_alpha: 0.01                  # Cal-QL regulariser weight (paper B.1, CALVIN and real robot; group: as close to the paper as possible)
 mixing_ratio: 0.5                   # share of each critic batch taken from the warm-up data (paper B.1)
 hl_gauss: false                     # distributional critic, only if the Q values explode (paper B.1)
-use_touch: false                    # the tactile variant of the critic: touch features added after the image encoder (docs/algos/rl.md; the exact features are decided at step 3)
+# Touch seen by the critic (src/touch/features.py: the same three switches as every component of the system; all off = the task alone). The vector [ft_force (3) | gripper_effort (1) | tactile (56)],
+# each entry scaled by sign(x) * log1p(|x|), is concatenated to the state feature after the image encoders; nothing else changes (group: the comparison with / without touch is this switch).
+critic_use_tactile: false           # the taxels (robot robotiq_2f85_tsf only)
+critic_use_force: false             # wrist force sensor + gripper effort (Robotiq robots)
+critic_force_mode: measured         # only "measured" is implemented
 
 # -- Warm-up of the critic before it ranks or distills anything (group) -------------------------------------------------------------------
 warmup_episodes: 50     # episodes of the base VLA (paper: 50 rollouts for OpenVLA); a multiple of envs_per_batch

@@ -14,6 +14,8 @@ from typing import Any, Mapping, Optional, Tuple
 
 import yaml
 
+from src.touch.features import TouchSpec
+
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "configs" / "algo" / "rl.yaml"
 METHODS = ("best_of_n", "parl")
@@ -52,7 +54,9 @@ class RLConfig:
     cal_ql_alpha: float = 0.01
     mixing_ratio: float = 0.5
     hl_gauss: bool = False
-    use_touch: bool = False
+    critic_use_tactile: bool = False
+    critic_use_force: bool = False
+    critic_force_mode: str = "measured"
     warmup_episodes: int = 50
     warmup_critic_steps: int = 5000
     distill_lr: float = 2.5e-5
@@ -93,6 +97,7 @@ class RLConfig:
         need(self.distill_batch_size % self.distill_micro_batch_size == 0,
              f"distill_batch_size ({self.distill_batch_size}) must be a multiple of distill_micro_batch_size ({self.distill_micro_batch_size})")
         need(self.wandb_mode in WANDB_MODES, f"wandb_mode must be one of {WANDB_MODES}, got {self.wandb_mode!r}")
+        self.critic_touch                                      # builds the TouchSpec: a wrong switch is an error here, not at the first batch
         if self.method == "best_of_n":
             need(self.keep_top == 1, "best_of_n takes the argmax of the k candidates: keep_top must be 1")
             need(self.local_steps == 0, "best_of_n has no local optimisation: local_steps must be 0")
@@ -102,6 +107,11 @@ class RLConfig:
     def variant(self) -> str:
         """best_of_n, parl_global (variant A) or parl_global_local (variant B)."""
         return self.method if self.method == "best_of_n" else ("parl_global_local" if self.local_steps > 0 else "parl_global")
+
+    @property
+    def critic_touch(self) -> TouchSpec:
+        """The touch signals the critic sees (src/touch/features.py: the same three switches as every component of the system)."""
+        return TouchSpec(use_tactile=self.critic_use_tactile, use_force=self.critic_use_force, force_mode=self.critic_force_mode, where="critic")
 
     @property
     def distills(self) -> bool:

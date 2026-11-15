@@ -21,7 +21,7 @@ def test_the_yaml_defaults_are_the_papers_and_the_groups():
     assert (c.utd, c.tau, c.envs_per_batch, c.total_episodes) == (1, 0.005, 50, 1000)                                    # group
     assert (c.warmup_episodes, c.warmup_critic_steps, c.critic_image_size, c.critic_cameras) == (50, 5000, 128, ("exterior", "wrist"))
     assert (c.distill_lr, c.distill_batch_size, c.distill_epochs, c.eval_episodes) == (2.5e-5, 64, 1, 100)
-    assert (c.rollout_selection, c.distill_selection, c.eval_selection) == ("softmax", "softmax", "argmax") and not c.use_touch
+    assert (c.rollout_selection, c.distill_selection, c.eval_selection) == ("softmax", "softmax", "argmax") and not c.critic_touch.enabled
     assert c.rounds == 20 and c.distills and c.variant == "parl_global_local"
 
 
@@ -73,6 +73,19 @@ def test_the_command_line_wins_over_the_experiment():
 def test_a_wrong_key_or_value_is_an_error(overrides, message):
     with pytest.raises(ValueError, match=message):
         rc.load_rl_config(overrides=overrides)
+
+
+def test_the_critics_touch_is_the_systems_touch_spec():
+    from src.touch.features import TouchSpec
+    c = rc.load_rl_config(overrides={"critic_use_force": True, "critic_use_tactile": True})
+    assert c.critic_touch == TouchSpec(use_tactile=True, use_force=True) and c.critic_touch.dim == 60
+    assert rc.load_rl_config().critic_touch.dim == 0
+    with pytest.raises(ValueError, match="critic.use_tactile"):
+        rc.load_rl_config(overrides={"critic_use_tactile": "false"})                                   # a string would be truthy: refused
+    with pytest.raises(ValueError, match="no effect"):
+        rc.load_rl_config(overrides={"critic_force_mode": "proxy"})
+    with pytest.raises(NotImplementedError):
+        rc.load_rl_config(overrides={"critic_use_force": True, "critic_force_mode": "proxy"})
 
 
 def test_best_of_n_cannot_be_given_what_it_does_not_do():

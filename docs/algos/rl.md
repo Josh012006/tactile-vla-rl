@@ -1,6 +1,6 @@
 # RL fine-tuning of the VLA: Best-of-N and PA-RL (design, decisions, open points)
 
-Status (15 Nov. 2026): design settled; implementation steps 1-2 of 8 done (section 7: the YAML defaults and loader; the candidate sampler and cache). No critic, rollout, distillation or job code yet. Every value below says where it comes from:
+Status (15 Nov. 2026): design settled; implementation steps 1-3 of 7 done (section 7: the YAML defaults and loader; the candidate sampler and cache; the critic network and the replay buffer). No critic update, rollout, distillation or job code yet. Every value below says where it comes from:
 **paper** = Policy Agnostic RL (Mark et al., arXiv 2412.06685v1), with the section / page; **group** = decided with Josué (15 Nov. 2026) after the exchange with Jesse;
 **proposal** = chosen by Claude because the paper is silent, to be confirmed before the step that needs it; **open** = to decide.
 Rule: the defaults of the YAMLs are the paper's; where the paper has no value we ask before choosing.
@@ -46,7 +46,9 @@ Evaluation is the paper's: the VLA WITH action optimisation at inference (so the
 | dataset action in the candidate set | no | group |
 | critic count / UTD | 1 critic / 1 update per environment step (not per plan: 8 per plan) | group |
 | critic | image encoder + MLP 3 x 512, the action concatenated to the input of every layer, random shift 4 px, Adam, lr 3e-4, batch 256 | paper B.1 (image domains, Kumar et al. 2023) |
-| critic inputs (state) | both cameras (exterior + wrist) resized to 128 x 128, a small CNN encoder trained from scratch with the critic (random shift 4 px), concatenated with the 7 joint positions and the gripper position, then the MLP above; the action input is the whole chunk (pi0.5: 16 x 8, normalised space). The tactile variant ADDS the touch features (taxels or force / torque, per robot) after the encoder; nothing else changes, so the comparison with / without touch is clean. Fallback if the Q values do not learn from ~20 000 transitions: a frozen pre-trained encoder (ResNet-18), not before | group (15 Nov. 2026); paper: from scratch with random shift, no camera or resolution given |
+| critic inputs (state) | both cameras (exterior + wrist) resized to 128 x 128, a small CNN encoder trained from scratch with the critic (random shift 4 px), concatenated with the 7 joint positions and the gripper position, then the MLP above; the action input is the whole chunk (pi0.5: 16 x 8, normalised space). The tactile variant ADDS the touch vector after the encoders; nothing else changes, so the comparison with / without touch is clean. Fallback if the Q values do not learn from ~20 000 transitions: a frozen pre-trained encoder (ResNet-18), not before | group (15 Nov. 2026); paper: from scratch with random shift, no camera or resolution given |
+| critic touch | the same three switches as every component of the system (`critic_use_tactile`, `critic_use_force`, `critic_force_mode`; `src/touch/features.py`): the vector [ft_force (3) \| gripper_effort (1) \| tactile (56)], each entry sign(x) * log1p(\|x\|), concatenated to the state feature, no history | repo convention (src/touch/features.py), applied to the critic |
+| critic architecture | one CNN per camera (4 convolutions 3x3, stride 2, 32-64-128-128 channels, GroupNorm + ReLU, average pooling to 4x4, Dense 256, LayerNorm), proprioception as it is, MLP 3 x 512 with LayerNorm + ReLU and the action at every layer, scalar Q (about 2.5 M parameters); the images are stored at 224 and resized on the device | proposal (the paper gives only the MLP shape and the random shift) |
 | critic loss | Cal-QL (Eq. 3.3): TD in MSE with pi^Opt targets + alpha * (E[max(Q(s,a~VLA), V^mu(s))] - E[Q(s,a_data)]), alpha = 0.01 | paper B.1 (alpha 0.01 for CALVIN and the real robot; MSE there, HL-Gauss only when Q explodes); group: stay as close as possible to the paper (Jesse) |
 | Cal-QL mixing ratio | 0.5: half of each critic batch from the warm-up data, half from the online buffer | paper B.1 ("rest" = CALVIN and real robot) |
 | Cal-QL regulariser actions a ~ pi | the VLA's cached candidates of the state (no extra sampling) | proposal (the paper only says "sampled from the learned policy", Eq. 3.3) |
@@ -92,9 +94,8 @@ MEASURED on 15 Nov. 2026 (L40S, policy limited to half of the card, `scripts/pro
 ## 6. Open points (no reference in the paper), to decide one at a time before the step that needs them
 
 1. Cost of a run: the target is under 10 h in total (group); the measured pieces (section 5) add up to more (refresh about 10-12 h, distillation about 8 h, rollouts about 1.5 h). To revisit once the implementation is complete: fewer distillation / refresh steps, more parallelism.
-2. Which touch features exactly enter the tactile critic (taxel array vs force / torque, normalisation, history): decided at implementation step 3, when the tactile variant is built.
 
-Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillation epoch per round, which critic ranks (Q_theta) and evaluates (Q_bar), the critic's inputs, the distillation recipe, the code stack (JAX / Flax) and the cache refresh policy (full).
+Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillation epoch per round, which critic ranks (Q_theta) and evaluates (Q_bar), the critic's inputs and touch (the repo's convention), the distillation recipe, the code stack (JAX / Flax) and the cache refresh policy (full).
 
 ## 7. Implementation steps (one at a time, each with its tests, no job launched without a go)
 
@@ -103,7 +104,7 @@ Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillat
    - The critic and the local ascent work in the model's NORMALISED chunk space (first 8 dimensions of the model output, before the output transforms): `sample_candidates` returns those chunks with the state rows, `normalized_to_targets` brings a chunk (chosen or moved) back to the env's space to be executed or distilled.
    - `CandidateSampler`: pi0.5 in calls of `rows_per_sample_call` = 8 environments, every call padded to 8 (one compilation).
    - `CandidateCache`: by state id, with the version of the VLA that drew the candidates (Best-of-N: one version for ever; PA-RL: a new one after each distillation epoch; `stale_ids`), `refresh` recomputes them reading the buffer in chunks, with seeds that are a function of (seed, state id, version). About 16 KiB per state for pi0.5 (20 000 states: about 330 MB).
-3. Critic (without touch, then the touch inputs) and the replay buffer.
+3. DONE (15 Nov. 2026): critic network and replay buffer (`src/algos/rl_critic.py`, `src/algos/rl_buffer.py`, `tests/test_rl_critic.py`, `tests/test_rl_buffer.py`; JAX / Flax, tested on CPU). The network: `q_values(net, params, state, actions)` gives Q of N chunks per state (a state is encoded once), the target is a delayed copy (`soft_update`), touch is a switch of the config. The buffer: one row per state, the rows of an episode contiguous (the next state of row i is row i + 1, the ids are the candidate cache's), reward -1 per plan and 0 at success (the only terminal), V^mu = Monte-Carlo return-to-go of every episode, a time-out (any end without success) bootstraps from its last state (`needs_candidates`), batches that mix warm-up and online rows by `mixing_ratio`. About 300 KB per state (6.3 GB for the 1050 episodes of a run, allocated lazily).
 4. Action optimisation (global, local with the acceptance rule) on a toy critic, then on the real one.
 5. Critic update with pi^Opt targets and the warm-up phase; measure the real cost.
 6. Best-of-N rollouts and its evaluation (environment servers of the evaluation).
