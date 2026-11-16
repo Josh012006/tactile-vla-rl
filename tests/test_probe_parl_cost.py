@@ -74,3 +74,33 @@ def test_nothing_runs_when_no_micro_batch_fits():
     with pytest.raises(SystemExit, match="no micro-batch fits"):
         PP.measure_parl(FakeTrainablePolicy(), cfg, None, states=16, refresh_states=4, state_dim=3, plans=3, micros=(4, 2), memory=lambda: {"bytes_in_use": 8 * 2 ** 30, "bytes_limit": 8 * 2 ** 30},
                         say=lambda s: None)
+
+
+def test_the_memory_is_read_from_arguments_that_type_check_their_leaves():
+    """openpi's `Observation` refuses placeholders for its leaves: `jit(f).lower(obs)` failed on the cluster; `compiled_memory` hands the compiler flat arrays."""
+    import dataclasses
+    import jax.numpy as jnp
+
+    @jax.tree_util.register_pytree_node_class
+    @dataclasses.dataclass
+    class Strict:
+        x: object
+        y: object = None
+
+        def __post_init__(self):
+            for leaf in jax.tree.leaves(self):
+                assert isinstance(leaf, (jax.Array, np.ndarray)) or hasattr(leaf, "aval"), f"not an array: {type(leaf)}"
+
+        def tree_flatten(self):
+            return (self.x, self.y), None
+
+        @classmethod
+        def tree_unflatten(cls, aux, children):
+            return cls(*children)
+
+    strict = Strict(jnp.ones((4, 8)))
+    f = lambda w, s: jnp.tanh(s.x @ w).sum()                                                                               # noqa: E731
+    with pytest.raises(Exception):
+        jax.jit(f).lower(jnp.ones((8, 8)), strict)
+    stats = PP.compiled_memory(f, jnp.ones((8, 8)), strict)
+    assert stats is not None and getattr(stats, "argument_size_in_bytes", 0) > 0

@@ -52,6 +52,14 @@ def stage_states(cfg, plans: int) -> List[int]:
     return [(cfg.warmup_episodes + r * cfg.envs_per_batch) * plans for r in range(1, cfg.rounds + 1)]
 
 
+def compiled_memory(fn, *args):
+    """The compiler's memory statistics of `fn(*args)`, compiled and not run. The arguments go in as flat arrays and are put back together INSIDE the traced function: `jit(fn).lower(obs)` rebuilds
+    `obs` with placeholders (`ArgInfo`) for its leaves, and openpi's `Observation` type-checks its leaves in its constructor and refuses them (the first version of this probe failed there)."""
+    import jax
+    leaves, treedef = jax.tree.flatten(args)
+    return jax.jit(lambda *xs: fn(*jax.tree.unflatten(treedef, xs))).lower(*leaves).compile().memory_analysis()
+
+
 def grad_memory(distiller, buf, ids, micros: Sequence[int], memory: Callable[[], dict] = device_memory, margin: float = 0.03) -> Dict[str, object]:
     """What XLA itself says the gradient pass needs at each micro-batch size, WITHOUT running it (`lower().compile().memory_analysis()`: the compiler's buffer plan, exact for the compiled program).
     A pass needs, on top of what is resident (the VLA, the trainable copy, Adam, the critic: `bytes_in_use` now), its temporaries and its output (the loss and one gradient tree), and the running sum of the
@@ -67,7 +75,7 @@ def grad_memory(distiller, buf, ids, micros: Sequence[int], memory: Callable[[],
     rows, chosen = {}, None
     for micro in sorted({m for m in micros if 0 < m <= batch and batch % m == 0}, reverse=True):
         cut = lambda x: x[:micro]                                                                                                  # noqa: E731
-        stats = trainer._grad.lower(trainer.trainable, trainer.frozen, jax.tree.map(cut, observation), actions[:micro], jax.tree.map(cut, draws)).compile().memory_analysis()
+        stats = compiled_memory(trainer._grad, trainer.trainable, trainer.frozen, jax.tree.map(cut, observation), actions[:micro], jax.tree.map(cut, draws))
         temp, out = int(getattr(stats, "temp_size_in_bytes", 0) or 0), int(getattr(stats, "output_size_in_bytes", 0) or 0)
         need = resident + temp + 2 * out
         rows[micro] = {"temp_gib": round(temp / 2 ** 30, 2), "output_gib": round(out / 2 ** 30, 2), "need_gib": round(need / 2 ** 30, 2), "fits": bool(limit and need <= limit * (1 - margin))}
