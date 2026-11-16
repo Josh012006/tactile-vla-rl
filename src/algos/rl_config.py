@@ -38,7 +38,7 @@ class RLConfig:
     eval_selection: str = "argmax"
     softmax_temperature: float = 1.0
     envs_per_batch: int = 50
-    total_episodes: int = 1000
+    total_episodes: int = 500
     replan_steps: int = 0
     rows_per_sample_call: int = 8
     critic_cameras: Tuple[str, ...] = ("exterior", "wrist")

@@ -59,8 +59,8 @@ Evaluation is the paper's: the VLA WITH action optimisation at inference (so the
 | critic target network | a delayed copy of the same critic (not a second Q), tau = 0.005 | paper Eq. 3.3 ("delayed target Q"); tau: group (standard SAC / CQL value, the paper gives none) |
 | reward / discount | -1 per plan until success, 0 at success; gamma = 0.99 per plan | paper B.1 (bias -1, gamma 0.99); group (a plan = a transition) |
 | collection | synchronous batches: K environments play a batch of K episodes with the critic and the VLA frozen; then UTD = 1 critic updates (as many as the batch's environment steps), then (PA-RL) distillation and cache refresh | group; Alg. 2 of the paper |
-| parallel environments K | 50 per batch (about 20 rounds for 1000 episodes; simulator alone about 32 min for 1000 episodes, estimate from docs/envs) | group |
-| budget | 1000 online episodes in total (paper: 1000 in simulation) = 20 rounds of 50 episodes; PA-RL distils ONE epoch over the whole buffer per round, then refreshes the cache | paper (1000 episodes); group (1 epoch per round) |
+| parallel environments K | 50 per batch (10 rounds for 500 episodes; simulator alone about 16 min for 500 episodes, estimate from docs/envs) | group |
+| budget | **500 online episodes** in total = 10 rounds of 50 episodes (decided 15 Nov. 2026; the paper's simulation budget is 1000 = 20 rounds, which costs a PA-RL run about 24 h against 7.5 h: distillation and refresh grow with the buffer, so they scale with the square of the rounds); PA-RL distils ONE epoch over the whole buffer per round, then refreshes the cache (not after the last round) | group (the budget: cost); paper (1 epoch per round, refresh) |
 | which critic ranks and optimises | the CURRENT critic Q_theta ranks the candidates (global), does the gradient ascent (local) and picks the pi^Opt action at s'; the delayed target network Q_bar only EVALUATES that retained action in the TD target (y = r + gamma * Q_bar(s', a'_Opt)). Distillation annotation and rollouts use Q_theta | group; paper Alg. 1 and Eq. 3.3 (the paper does not say which of the two ranks) |
 | warm-up | 50 episodes of the base VLA, then 5 000 critic gradient steps | group (paper: 50 rollouts for OpenVLA, 5e5 steps of offline pre-training) |
 | distillation | lr 2.5e-5 constant, batch 64, the LoRA of the SFT, one epoch over the whole buffer per round (about 30 steps in the first round to about 330 in the last, about 3 400 in total, about 8 h at 8.7 s per step: estimate); Adam state kept from one round to the next (one continuous fine-tuning cut in 20 rounds) | group (15 Nov. 2026); paper: 5e-5 (1e-5 kitchens), "reduced" for OpenVLA without a value; same loop as src/algos/sft.py |
@@ -113,9 +113,9 @@ MEASURED on 15 Nov. 2026 (L40S, policy limited to half of the card, `scripts/pro
 
 ## 6. Open points (no reference in the paper), to decide one at a time before the step that needs them
 
-1. Cost of a run: the target is under 10 h in total (group); the measured pieces (section 5) add up to more (refresh about 10-12 h, distillation about 8 h, rollouts about 1.5 h). To revisit once the implementation is complete: fewer distillation / refresh steps, more parallelism.
+1. Cost of a run: the target is under 10 h in total (group). With the 1000 episodes of the paper the measured pieces add up to 23.8 h for PA-RL (section 5); DECIDED 15 Nov. 2026: 10 rounds x 50 = 500 online episodes (+ 50 warm-up), `total_episodes: 500`: 960 distillation steps (2.5 h), 51 300 refreshed states (2.8 h), 80 000 critic updates (1.0 h), 0.9 h of collection, 0.4 h of evaluations (rounds 0, 5, 10) = about 7.5 h at 19 plans per episode (upper bound), about 5 h at 10, plus saves and server starts; Best-of-N about 2.5 h. The same budget for every method (the comparison). Not measured end to end.
 
-Settled on 15 Nov. 2026 (see section 3): budget 1000 episodes with one distillation epoch per round, which critic ranks (Q_theta) and evaluates (Q_bar), the critic's inputs and touch (the repo's convention), the distillation recipe, the code stack (JAX / Flax) and the cache refresh policy (full).
+Settled on 15 Nov. 2026 (see section 3): budget 500 episodes (10 rounds of 50; 1000 in the paper, cut for cost) with one distillation epoch per round, which critic ranks (Q_theta) and evaluates (Q_bar), the critic's inputs and touch (the repo's convention), the distillation recipe, the code stack (JAX / Flax) and the cache refresh policy (full).
 
 ## 7. Implementation steps (one at a time, each with its tests, no job launched without a go)
 

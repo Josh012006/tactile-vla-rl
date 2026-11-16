@@ -79,8 +79,8 @@ def test_num_samples_goes_to_the_policy_with_one_row_per_environment_and_pi0_fas
 
 
 def test_the_estimate_of_the_cache_refresh_uses_the_time_per_row_and_the_runs_states():
-    assert PB.refresh_states(19) == 19 * sum(50 + 50 * r for r in range(1, 21)) == 218_500          # 20 rounds, the buffer grows from 100 to 1050 episodes
+    assert PB.refresh_states(19) == 19 * sum(50 + 50 * r for r in range(1, 10)) == 51_300           # 10 rounds, none after the last: the buffer grows from 100 to 500 episodes
     est = PB.estimate([{"batch": 50, "num_samples": 32, "median_ms": 5_000.0}, {"batch": 50, "num_samples": 1, "median_ms": 100.0}], steps=150, replan=8)
-    assert est[0]["refresh_states"] == 218_500 and est[0]["refresh_h"] == round(218_500 * 5_000.0 / 50 / 3.6e6, 1)      # 100 ms per state: 6.1 h
+    assert est[0]["refresh_states"] == 51_300 and est[0]["refresh_h"] == round(51_300 * 5_000.0 / 50 / 3.6e6, 1)      # 100 ms per state: 1.4 h
     assert "refresh_h" not in est[1]                                                                 # one candidate per row: no refresh to estimate
     assert PB.estimate([{"batch": 50, "num_samples": 32, "median_ms": 5_000.0}], 150, 8, states_to_refresh=1000)[0]["refresh_states"] == 1000

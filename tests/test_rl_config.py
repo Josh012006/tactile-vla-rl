@@ -18,11 +18,11 @@ def test_the_yaml_defaults_are_the_papers_and_the_groups():
     assert (c.num_candidates, c.keep_top, c.local_steps, c.local_lr) == (32, 10, 10, 3e-4)                              # paper B.1
     assert (c.critic_lr, c.critic_batch_size, c.gamma, c.cal_ql_alpha, c.mixing_ratio) == (3e-4, 256, 0.99, 0.01, 0.5)   # paper B.1
     assert c.critic_hidden == (512, 512, 512) and c.random_shift_px == 4 and c.step_reward == -1.0 and not c.hl_gauss
-    assert (c.utd, c.tau, c.envs_per_batch, c.total_episodes) == (1, 0.005, 50, 1000)                                    # group
+    assert (c.utd, c.tau, c.envs_per_batch, c.total_episodes) == (1, 0.005, 50, 500)                                    # group
     assert (c.warmup_episodes, c.warmup_critic_steps, c.critic_image_size, c.critic_cameras) == (50, 5000, 128, ("exterior", "wrist"))
     assert (c.distill_lr, c.distill_batch_size, c.distill_epochs, c.eval_episodes) == (2.5e-5, 64, 1, 100)
     assert (c.rollout_selection, c.distill_selection, c.eval_selection) == ("softmax", "softmax", "argmax") and not c.critic_touch.enabled
-    assert c.rounds == 20 and c.distills and c.variant == "parl_global_local"
+    assert c.rounds == 10 and c.distills and c.variant == "parl_global_local"
 
 
 def test_the_yaml_has_exactly_the_keys_of_the_dataclass_and_the_dataclass_defaults_are_the_yamls():
@@ -117,8 +117,8 @@ def test_an_experiment_file_is_checked(tmp_path):
 
 
 def test_the_evaluation_rounds_are_the_warm_up_every_five_and_the_last():
-    assert rc.load_rl_config().eval_rounds == (0, 5, 10, 15, 20)
+    assert rc.load_rl_config().eval_rounds == (0, 5, 10)
     assert rc.load_rl_config(overrides={"total_episodes": 150, "eval_every_rounds": 2}).eval_rounds == (0, 2, 3)            # 3 rounds: 0, 2 and the last
-    assert rc.load_rl_config(overrides={"eval_every_rounds": 50}).eval_rounds == (0, 20)
+    assert rc.load_rl_config(overrides={"eval_every_rounds": 50}).eval_rounds == (0, 10)
     with pytest.raises(ValueError, match="eval_every_rounds"):
         rc.load_rl_config(overrides={"eval_every_rounds": 0})

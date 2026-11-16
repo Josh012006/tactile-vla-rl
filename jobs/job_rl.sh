@@ -6,11 +6,11 @@
 # Every option goes to `python -m scripts.rl` (see its --help). Look first, on the login node, at what would run:  python -m scripts.rl --experiment <file> --start <run> <step> --dry-run
 # Before the first run: the learner venv and the models fetched (uv sync --group vla; python -m scripts.fetch_models), the Isaac Lab venv (scripts/setup_isaac_venv.sh), wandb login (--set wandb_mode=offline | disabled to change).
 # Output: runs/rl/peg_insert/<name>/ (config.json, metrics.jsonl, wandb_id.txt, episodes/, resume/, critics/, vlas/ (PA-RL), eval/results/<round>.json and eval/curve.png, logs/server_*.log), logs/slurm/rl_<jobid>.out, logs/slurm/gpu_<jobid>.csv.
-# Disk: about 0.25 GB of episodes per round (images, uncompressed) + the critic's state (about 30 MB) rewritten every round. PA-RL adds the VLA's trainable parameters of EVERY round (vlas/round_<r>/, about 1.7 GB each: about 35 GB for 20 rounds)
-# and, for the resume, the last stage's cache (up to a few GB) and VLA + Adam state (about 5 GB): about 45 GB in all per PA-RL run.
-# Time: NOT MEASURED end to end. Parts measured before (docs/algos/rl.md section 5): a round of 50 episodes about 280 s of collection, an evaluation of 100 episodes about 8 min; the critic's updates (about 5000 per round) are
-# unmeasured (jobs/job_probe_critic_cost.sh); PA-RL adds the distillation (about 8 h in all, estimate) and the refresh of the whole cache after every round (10-12 h in all, estimate): the 12 h below is for Best-of-N
-# and does NOT fit a PA-RL run (to set once measured). A SIGTERM is honoured between stages only: a PA-RL stage is long, so a stage cut by the time limit is played again on --resume. The time limit is a first guess; a run that hits it ends cleanly on the SIGTERM sent 5 minutes before (after the stage in progress) and continues with --resume.
+# Disk: about 0.25 GB of episodes per round (images, uncompressed) + the critic's state (about 30 MB) rewritten every round. PA-RL adds the VLA's trainable parameters of EVERY round (vlas/round_<r>/, about 1.7 GB each: about 17 GB for 10 rounds)
+# and, for the resume, the last stage's cache (up to a few GB) and VLA + Adam state (about 5 GB): about 25 GB in all per PA-RL run.
+# Time: NOT MEASURED end to end; estimated from the parts measured on 15 Nov. 2026 (docs/algos/rl.md sections 3 and 5) for the 10 rounds of 50 episodes of the defaults: Best-of-N about 2.5 h, PA-RL about 7.5 h (5 h if the episodes
+# average 10 plans) plus saves and server starts, so the 12 h below holds for both. A SIGTERM is honoured between stages only: a PA-RL stage is up to an hour at the end of a run, so a stage cut by the time limit is played again on --resume.
+# A run that hits the limit ends cleanly on the SIGTERM sent 5 minutes before (after the stage in progress) and continues with --resume.
 #
 #SBATCH --job-name=rl
 #SBATCH --ntasks=1

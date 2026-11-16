@@ -47,13 +47,13 @@ SIM_STEP_FIXED_MS = 531.0        # docs/envs/isaaclab_env.md: step = 531 ms + 2.
 SIM_STEP_PER_ENV_MS = 2.29
 
 
-RL_EPISODES, RL_ROUND, RL_WARMUP = 1000, 50, 50     # docs/algos/rl.md: 1000 online episodes in rounds of 50, after 50 warm-up episodes
+RL_EPISODES, RL_ROUND, RL_WARMUP = 500, 50, 50      # docs/algos/rl.md: 500 online episodes in rounds of 50, after 50 warm-up episodes
 
 
 def refresh_states(plans_per_episode: int, episodes: int = RL_EPISODES, round_size: int = RL_ROUND, warmup: int = RL_WARMUP) -> int:
-    """States whose candidates PA-RL recomputes over the whole run: after each round the buffer (warm-up + all rounds so far) is refreshed, one state per plan."""
+    """States whose candidates PA-RL recomputes over the whole run: after each round but the last (nothing reads the cache after it) the buffer (warm-up + all rounds so far) is refreshed, one state per plan."""
     rounds = -(-episodes // round_size)
-    return sum((warmup + min(episodes, r * round_size)) * plans_per_episode for r in range(1, rounds + 1))
+    return sum((warmup + min(episodes, r * round_size)) * plans_per_episode for r in range(1, rounds))
 
 
 def batch_obs(rows: int, seed: int = 0) -> dict:

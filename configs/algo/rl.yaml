@@ -24,8 +24,8 @@ softmax_temperature: 1.0
 
 # -- Collection (group): synchronous batches ----------------------------------------------------------------------------------------------
 # K environments play K episodes with the critic and the VLA frozen; then the critic updates (UTD updates per environment step), then (parl) the distillation and the cache refresh.
-envs_per_batch: 50      # K (about 20 rounds for 1000 episodes)
-total_episodes: 1000    # online episodes in total (paper: 1000 in simulation); a multiple of envs_per_batch
+envs_per_batch: 50      # K (10 rounds for 500 episodes)
+total_episodes: 500     # online episodes in total = 10 rounds of 50 (group, 15 Nov. 2026: the paper's simulation budget is 1000, which a PA-RL run could not afford: about 24 h against 7.5 h, section 5 of docs/algos/rl.md); a multiple of envs_per_batch
 replan_steps: 0         # steps executed per chunk before the model is called again; 0 = half the model's chunk, as the evaluation (8 for pi0.5)
 rows_per_sample_call: 8 # environments per model call when sampling the k candidates: 50 x 32 does not fit on an L40S (measured, docs/algos/rl.md section 5)
 
@@ -64,7 +64,7 @@ distill_epochs: 1           # epochs over the whole buffer (warm-up included) pe
 
 # -- Evaluation -----------------------------------------------------------------------------------------------------------------------
 eval_episodes: 100      # the same starting states as the SFT evaluations
-eval_every_rounds: 5    # an evaluation after the warm-up (round 0), then every this many collection rounds, and after the last one (group, 15 Nov. 2026: 0, 5, 10, 15, 20 for 20 rounds). Each takes about 8 min
+eval_every_rounds: 5    # an evaluation after the warm-up (round 0), then every this many collection rounds, and after the last one (group, 15 Nov. 2026: 0, 5, 10 for 10 rounds). Each takes about 8 min
 
 # -- Logging, output ------------------------------------------------------------------------------------------------------------------
 seed: 0
