@@ -106,7 +106,7 @@ class CriticTrainer:
 def run_updates(trainer: CriticTrainer, buffer: ReplayBuffer, cache: CandidateCache, rng: np.random.Generator, steps: int, log_every: int = 0,
                 log: Optional[Callable[[int, Dict[str, float]], None]] = None, clock: Callable[[], float] = time.monotonic) -> Dict[str, float]:
     """`steps` updates, each on a fresh batch of `make_batch`. Returns the mean of the metrics over the steps (and the wall time per step, `seconds_per_update`); with `log_every`, `log(update count,
-    mean metrics of the last log_every steps)` is called every that many steps (the metrics are read from the device only then, so the steps are not synchronised one by one)."""
+    mean metrics of the last log_every steps)` is called every that many steps and at the end for the steps left over (the metrics are read from the device only then, so the steps are not synchronised one by one)."""
     if steps < 1:
         raise ValueError("steps must be >= 1")
     window: list = []
@@ -120,6 +120,8 @@ def run_updates(trainer: CriticTrainer, buffer: ReplayBuffer, cache: CandidateCa
             window = []
             if log is not None:
                 log(trainer.updates, means)
+    if window and log_every and log is not None:                 # the last, shorter window: the end of the stage is on the curve too
+        log(trainer.updates, _mean([to_floats(m) for m in window]))
     total.extend(window)
     jax.block_until_ready(total[-1])
     result = _mean([to_floats(m) for m in total])

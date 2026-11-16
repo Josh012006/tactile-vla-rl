@@ -196,7 +196,7 @@ def main(argv=None) -> int:
     meta = sft_mod.load_checkpoint(policy, Path(start["checkpoint"]))
     if int(meta.get("step", start["step"])) != start["step"]:
         raise SystemExit(f"{start['checkpoint']} says it is step {meta.get('step')}")
-    sink = tracking.start_tracking(run_dir, resuming, cfg.wandb_project, run_dir.name, cfg.wandb_mode, config, tags=[model_cfg["name"], cfg.variant])
+    sink = tracking.start_tracking(run_dir, resuming, cfg.wandb_project, run_dir.name, cfg.wandb_mode, config, tags=[model_cfg["name"], cfg.variant], axes=tracking.RL_AXES)
     log = sft_mod.MetricsLog(run_dir / "metrics.jsonl", sink)
     open_env = make_opener(task_config, config.get("env_set", []), run_dir / "logs", int(task["max_steps_per_episode"]), args.ready_timeout, stop)
     run = rl_run.RLRun(cfg, policy, run_dir, open_env, log, max_steps=int(task["max_steps_per_episode"]), stop=stop, title=f"{run_dir.name}: success rate vs collection round",

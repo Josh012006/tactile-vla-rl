@@ -72,6 +72,35 @@ def test_a_run_whose_critic_sees_the_force_proxy_goes_through_warm_up_rounds_and
     assert cfg.critic_touch.dim == 7 and run.buffer.touch.shape[1] == 7 and np.all(np.isfinite(run.buffer.touch[:len(run.buffer)]))
 
 
+@pytest.mark.parametrize("parl", [False, True])
+def test_what_a_run_sends_to_wandb_is_finite_grouped_and_has_the_curves_one_looks_for(tmp_path, parl):
+    from src.algos import tracking
+
+    class Run:
+        def __init__(self):
+            self.logs, self.summary = [], {}
+
+        def log(self, data):
+            self.logs.append(data)
+
+    run_out = Run()
+    sink = tracking.WandbSink(run_out)
+    log = ListLog(on_event=sink)
+    run, _ = (make_parl if parl else make_run)(tmp_path, log=log)
+    run.run()
+    keys = set().union(*run_out.logs)
+    assert all(np.isfinite(v) for d in run_out.logs for v in d.values())
+    windows = [d for d in run_out.logs if "critic_update" in d]
+    assert windows and all("step" not in d and all(k.startswith("critic") or k.startswith("time/") for k in d) for d in windows)       # the critic's curve, on its own axis
+    assert [d["critic_update"] for d in windows] == sorted(d["critic_update"] for d in windows)
+    must = {"eval/success_rate", "eval/success_se", "eval/opt/chosen_q_gain_mean", "eval/opt/chosen_shift_l1_mean", "rollout/success_rate", "rollout/opt/candidate_q_std_mean",
+            "warmup/success_rate", "critic/td_loss", "critic/q_minus_return", "critic/grad_norm", "buffer/rows"}
+    assert must <= keys, must - keys
+    assert not {"round/round_id", "round/steps", "eval/n_episodes", "eval/round", "eval/wall_s_total", "warmup/critic/loss"} & keys
+    assert any(k.startswith("distill/") for k in keys) == parl and any(k.startswith("refresh/") for k in keys) == parl and ("eval/opt/local_q_gain_mean" in keys) == parl
+    assert [d["step"] for d in run_out.logs if "eval/success_rate" in d] == [0, 1, 2]                     # the evaluations, on the round axis
+
+
 def test_a_run_goes_through_the_warm_up_the_rounds_and_the_evaluations_in_order(tmp_path):
     log, opener = ListLog(), Opener()
     run, cfg = make_run(tmp_path, log, opener)

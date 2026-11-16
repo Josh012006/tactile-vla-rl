@@ -78,6 +78,19 @@ Candidate Q standard deviation (mean over states, and the distribution), Q mean 
 success rate of the rollouts, the share of states where the argmax differs from the VLA's first sample, local optimisation: Q gain, share of accepted steps, L1 norm of the displacement (paper Fig. 13), distillation loss,
 Jesse's warning: value-estimation error (over- or under-estimation) drives many collapses, so the Q statistics are watched as much as the success rate.
 
+What wandb shows (`rl_metrics` in `src/algos/tracking.py`; `metrics.jsonl` keeps every field and stays the reference). Each key says what it measures and has its own axis:
+
+| section | content | x axis |
+|---|---|---|
+| `eval/*` | `success_rate` +- `success_se` of the 100 fixed episodes, `steps_mean`, `steps_mean_success`; `eval/opt/*`: the critic's statistics on the states the evaluation visited | round |
+| `warmup/*` | the BASE VLA's success rate on the warm-up episodes (`success_rate`, `success_se`): the baseline of the rollout curve | 0 |
+| `rollout/*` | the round's own rollouts: `success_rate` +- `success_se`, `online_success_rate_cumulative`, `plans_per_episode`, `env_steps`; `rollout/opt/*`: the same critic statistics as `eval/opt/*`, on the training states | round |
+| `critic/*` | loss, `td_loss`, `cal_ql_term`, `grad_norm`, `q_data_*`, `q_candidates_mean`, `q_minus_return` (over- / under-estimation), `candidates_below_vmu_share`, `next_*` (the TD target's action); every window of 500 updates (and the end of each stage), warm-up included | `critic_update` (number of critic updates) |
+| `distill/*` | PA-RL: `loss_first` / `loss_mean` / `loss_last`, `grad_norm_mean`, `states`, `steps`, `vla_updates`; `distill/labels/*`: the labels' statistics | round |
+| `refresh/*`, `buffer/*`, `time/*` | cache refresh size, buffer size, seconds per phase | round |
+
+The `opt/*` statistics (the same names for rollouts, evaluation and labels): `candidate_q_std_{mean,p10,p50,p90}` (the spread of Q among the k candidates: 0 = the critic cannot rank), `candidate_q_mean`, `optimised_q_mean`, `chosen_q_mean`, `chosen_q_gain_mean` (chosen minus the mean candidate: what the critic expects to gain), `chosen_shift_l1_mean` (L1 distance, over the chunk and in the normalised space, between the chosen chunk and the VLA's first sample: how far the critic moves the action) and `chosen_differs_from_first_sample_share` (about 1 - 1/k for Best-of-N, so only a sanity check: the two above are the informative ones); PA-RL with local steps: `local_q_gain_mean`, `local_accepted_share`, `local_displacement_l1_mean`. Left out of wandb: constants (episode counts, round ids), the loop's own step counter, copies of the same wall time, the per-collection lines of the warm-up, the critic's mean over a whole round (the windows are the finer curve).
+
 ## 5. Costs
 
 MEASURED on 15 Nov. 2026 (L40S, policy limited to half of the card, `scripts/probe_batch_cost.py`, synthetic observations, 5 timed calls per row, log 11716915):

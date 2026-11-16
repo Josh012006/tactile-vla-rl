@@ -159,5 +159,8 @@ def test_run_updates_logs_every_window_and_returns_the_mean():
     seen = []
     result = cu.run_updates(trainer, buf, cache, np.random.default_rng(0), steps=6, log_every=2, log=lambda n, m: seen.append((n, m["td_loss"])))
     assert [n for n, _ in seen] == [2, 4, 6] and "td_loss" in result and trainer.updates == 6
+    seen.clear()
+    cu.run_updates(trainer, buf, cache, np.random.default_rng(0), steps=5, log_every=2, log=lambda n, m: seen.append((n, m["td_loss"])))      # 5 = 2 + 2 + the 1 left over
+    assert [n for n, _ in seen] == [8, 10, 11]
     with pytest.raises(ValueError):
         cu.run_updates(trainer, buf, cache, np.random.default_rng(0), steps=0)

@@ -8,6 +8,8 @@ Every point carries our own `step` and the x axis of every metric is `step` (`de
 the step of its snapshot (some steps after it were already logged by the attempt that died), and wandb's own step may only increase, it drops the points
 that go back. The steps that were run twice therefore appear twice on the curve; with a SIGTERM stop (snapshot at the stop step) there are none.
 
+The events of the RL runs (src/algos/rl_run.py) have their own view, `rl_metrics`: grouped by what they measure, without constants or copies, the critic's windows on the number of critic updates (docs/algos/rl.md section 4).
+
 Modes: "online", "offline" (written to <run>/wandb/, uploaded later with `wandb sync <run>/wandb/offline-run-*`), "disabled". An online run that cannot
 start (no login, no network on the node) falls back to offline, with a warning; a package that is not installed disables the logging. wandb is
 imported only when it is used.
@@ -15,6 +17,7 @@ imported only when it is used.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -23,6 +26,7 @@ WANDB_ID_FILE = "wandb_id.txt"
 MODES = ("online", "offline", "disabled")
 # metrics.jsonl event -> prefix of its wandb keys (the fields that are not numbers are left out)
 PREFIX = {"train": "train", "eval": "eval", "checkpoint": "checkpoint", "resume_snapshot": "snapshot", "first_step": "perf", "warmup": "warmup", "round": "round", "distill": "distill", "refresh": "refresh"}      # the last four: the RL runs (src/algos/rl_run.py)
+RL_AXES = {"critic/*": "critic_update"}         # the RL runs: the critic's windows are plotted against the number of critic updates
 NOT_LOGGED = {"event", "step", "elapsed_s", "from_step"}
 
 
@@ -41,14 +45,80 @@ def flatten(prefix: str, value: Any, out: Optional[Dict[str, float]] = None) -> 
     return out
 
 
+def _se(rate: float, n: Any) -> Optional[float]:
+    return math.sqrt(max(rate * (1.0 - rate), 0.0) / n) if n else None
+
+
+def rl_metrics(event: str, fields: Mapping[str, Any]) -> Optional[Dict[str, float]]:
+    """The wandb view of the events of an RL run (src/algos/rl_run.py), or None for an event that is not one of theirs (the SFT's events keep the generic view above).
+    metrics.jsonl keeps every field, as the reference; wandb gets the ones that say something, grouped by what they measure, each on its natural axis:
+        eval/*        the fixed evaluation episodes (success_rate +- success_se, lengths), eval/opt/* the critic's view of the states visited by the evaluation   x = step (the round)
+        rollout/*     the round's own rollouts (the ones the critic is trained on), rollout/opt/* the same critic statistics                                      x = step
+        warmup/*      the base VLA's episodes of the warm-up (the baseline to compare the curves to)                                                          x = step 0
+        distill/*     PA-RL's distillation: its labels (distill/labels/*), loss, gradient, size                                                                  x = step
+        refresh/*, buffer/*, time/*                                                                                                                              x = step
+        critic/*      the critic's losses and Q statistics, the mean of every window of CRITIC_LOG_EVERY updates                                                   x = critic_update (the number of updates)
+    Left out of wandb on purpose: constants (episode counts, round ids), the loop's own step counter, three copies of the same wall time, the per-collection lines of the warm-up
+    (their sum is the warm-up line) and the critic's mean over a whole round (the windows are the finer curve)."""
+    m: Dict[str, float] = {}
+    get = fields.get
+    if event == "critic":
+        flatten("critic", {k: v for k, v in fields.items() if k not in ("event", "stage", "update", "seconds_per_update")}, m)
+        if "seconds_per_update" in fields:
+            m["time/critic_update_s"] = fields["seconds_per_update"]
+        m["critic_update"] = fields["update"]
+        return m
+    if event == "warmup":
+        if not fields.get("summary"):
+            return {}
+        m.update({"warmup/success_rate": fields["success_rate"], "warmup/env_steps": fields["env_steps"], "warmup/buffer_rows": fields["buffer_rows"], "time/warmup_s": fields["wall_s"]})
+        if _se(fields["success_rate"], fields["episodes"]) is not None:
+            m["warmup/success_se"] = _se(fields["success_rate"], fields["episodes"])
+        return m
+    if event == "round":
+        m.update({"rollout/success_rate": fields["success_rate"], "rollout/online_success_rate_cumulative": fields["online_success_rate"], "rollout/plans_per_episode": fields["plans_mean"],
+                  "rollout/env_steps": fields["env_steps"], "buffer/rows": fields["buffer_rows"], "buffer/online_episodes": fields["online_episodes"],
+                  "time/round_s": fields["round_wall_s"], "time/collect_s": fields["wall_s"], "time/model_s": fields["model_s"]})
+        if _se(fields["success_rate"], get("episodes")) is not None:
+            m["rollout/success_se"] = _se(fields["success_rate"], get("episodes"))
+        for key, value in fields.items():
+            if key.startswith("opt_"):
+                m[f"rollout/opt/{key[4:]}"] = value
+        return m
+    if event == "eval" and "success_rate" in fields:                       # an RL evaluation (the SFT's carry `train` / `val` dictionaries)
+        for key in ("success_rate", "success_se", "steps_mean", "steps_mean_success"):
+            if key in fields:
+                m[f"eval/{key}"] = fields[key]
+        flatten("eval/opt", get("optimisation", {}), m)
+        if "eval_wall_s" in fields:
+            m["time/eval_s"] = fields["eval_wall_s"]
+        return m
+    if event == "distill":
+        for key, value in fields.items():
+            if key in NOT_LOGGED or not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            if key.startswith("label_"):
+                m[f"distill/labels/{key[6:]}"] = value
+            elif key in ("annotate_s", "train_s", "step_s"):
+                m[f"time/distill_{key}"] = value
+            else:
+                m[f"distill/{key}"] = value
+        return m
+    if event == "refresh":
+        m.update({"refresh/states": fields["states"], "time/refresh_s": fields["seconds"], "time/refresh_model_s": fields["model_ms"] / 1e3})
+        return m
+    return None
+
+
 def read_run_id(run_dir: Path) -> Optional[str]:
     path = Path(run_dir) / WANDB_ID_FILE
     return path.read_text().strip() or None if path.exists() else None
 
 
 def init_wandb(run_dir: Path, resuming: bool, project: str, name: str, mode: str = "online", config: Optional[Mapping[str, Any]] = None,
-               tags: Optional[Sequence[str]] = None):
+               tags: Optional[Sequence[str]] = None, axes: Optional[Mapping[str, str]] = None):
     """Start (or, with resuming=True, re-attach to) the wandb run of `run_dir`; returns it, or None when nothing is logged.
+    `axes`: {"prefix*": "metric used as the x axis of the keys that start with it", ...}, for the keys that are not on `step` (the critic's windows are on the number of updates).
     The run goes to <run_dir>/wandb/ and its id to <run_dir>/wandb_id.txt. A resumed run is a run that already has an id there: without one (the first
     attempt had no wandb) a new run starts."""
     if mode not in MODES:
@@ -88,6 +158,9 @@ def init_wandb(run_dir: Path, resuming: bool, project: str, name: str, mode: str
     if config is not None:
         run.config.update(json.loads(json.dumps(config, default=str)), allow_val_change=resuming)
     run.define_metric("step")
+    for pattern, axis in (axes or {}).items():                  # BEFORE the "*" below: wandb applies the first pattern that matches a key, in the order of definition
+        run.define_metric(axis)
+        run.define_metric(pattern, step_metric=axis)
     run.define_metric("*", step_metric="step")
     return run
 
@@ -108,6 +181,14 @@ class WandbSink:
         elif event == "resume":
             self.step = int(fields["from_step"])
             self.run.log({"step": self.step, "resume/from_step": self.step})
+        elif (view := rl_metrics(event, fields)) is not None:         # an event of an RL run: its own view (rl_metrics)
+            if event == "critic":                                   # on its own axis (the number of updates): no `step`
+                self.run.log(view)
+            else:
+                step = int(fields["step"])
+                self.step = step
+                if view:
+                    self.run.log({"step": step, **view})
         elif event in PREFIX:
             step = int(fields["step"]) if "step" in fields else self.step + 1       # first_step: the first step of this attempt is done
             self.step = step
@@ -137,7 +218,7 @@ class WandbSink:
 
 
 def start_tracking(run_dir: Path, resuming: bool, project: str, name: str, mode: str, config: Optional[Mapping[str, Any]] = None,
-                   tags: Optional[Sequence[str]] = None) -> Optional[WandbSink]:
+                   tags: Optional[Sequence[str]] = None, axes: Optional[Mapping[str, str]] = None) -> Optional[WandbSink]:
     """init_wandb wrapped as the sink of a MetricsLog (None when nothing is logged)."""
-    run = init_wandb(run_dir, resuming, project, name, mode, config, tags)
+    run = init_wandb(run_dir, resuming, project, name, mode, config, tags, axes)
     return None if run is None else WandbSink(run)

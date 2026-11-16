@@ -110,6 +110,9 @@ def test_the_summary_reports_the_spread_of_q_the_local_gain_and_whether_the_vla_
     plain = none(None, toy_state([1.0]), cands)
     plain_logs = none.summarise(plain, ao.pick(plain, "argmax"), cands)
     assert plain_logs["chosen_differs_from_first_sample_share"] == 0.0 and "local_q_gain_mean" not in plain_logs
+    assert plain_logs["chosen_shift_l1_mean"] == 0.0 and logs["chosen_shift_l1_mean"] > 0                      # the first sample itself / moved by the local steps
+    q = -16 * np.array([0.01, 9, 1, 4])
+    assert np.isclose(plain_logs["chosen_q_gain_mean"], q.max() - q.mean(), rtol=1e-4)                       # best candidate minus the mean one
 
 
 # ---- the real critic (small images), the same code path as the runs ----

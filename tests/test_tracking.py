@@ -174,3 +174,51 @@ def test_the_config_knows_the_wandb_modes():
     assert cfg.wandb_mode in tracking.MODES and cfg.wandb_project
     with pytest.raises(ValueError, match="wandb_mode"):
         sft.load_config(overrides={"wandb_mode": "sometimes"})
+
+
+# -- the wandb view of the RL runs -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+ROUND = {"event": "round", "step": 3, "round_id": 5, "success_rate": 0.5, "episodes": 50, "plans_mean": 7.5, "steps": 150, "env_steps": 900, "model_s": 12.0, "wall_s": 80.0,
+         "opt_candidate_q_std_mean": 0.3, "opt_chosen_q_gain_mean": 0.2, "critic_updates": 900, "critic": {"loss": 1.0}, "buffer_rows": 400, "online_episodes": 150,
+         "online_success_rate": 0.4, "vla_version": 3, "round_wall_s": 400.0}
+
+
+def test_the_rl_events_are_sent_grouped_by_what_they_measure_without_constants_or_copies(fake, tmp_path):
+    sink = tracking.start_tracking(tmp_path, False, "proj", "name", "online", axes=tracking.RL_AXES)
+    run = fake.runs[0]
+    sink({"event": "warmup", "step": 0, "round_id": 0, "success_rate": 0.3, "episodes": 50, "plans_mean": 7.0, "steps": 150, "env_steps": 800, "model_s": 1.0, "wall_s": 10.0})     # a collection: not sent
+    sink({"event": "warmup", "step": 0, "summary": True, "episodes": 50, "success_rate": 0.3, "env_steps": 800, "buffer_rows": 350, "critic_updates": 5000, "critic": {"loss": 2.0}, "wall_s": 900.0})
+    sink({"event": "critic", "stage": 0, "update": 500, "loss": 1.5, "q_data_mean": 0.1})
+    sink(ROUND)
+    sink({"event": "distill", "step": 3, "label_candidate_q_mean": 0.1, "label_chosen_q_mean": 0.4, "states": 400, "steps": 20, "loss_first": 1.0, "loss_last": 0.5, "grad_norm_mean": 0.3,
+          "annotate_s": 30.0, "train_s": 200.0, "step_s": 10.0, "vla_updates": 60})
+    sink({"event": "refresh_progress", "round": 3, "done": 100, "total": 400})
+    sink({"event": "refresh", "step": 3, "version": 3, "states": 400, "seconds": 600.0, "model_ms": 500000.0})
+    sink({"event": "eval", "step": 3, "n_episodes": 100, "n_success": 60, "success_rate": 0.6, "success_se": 0.049, "steps_mean": 80.0, "steps_mean_success": 60.0, "wall_s_total": 400.0, "wall_s_batch": 399.0,
+          "optimisation": {"candidate_q_mean": 0.1, "chosen_q_gain_mean": 0.3}, "round": 3, "critic_updates": 2700, "buffer_rows": 400, "vla_version": 3, "eval_wall_s": 450.0})
+    logs = run.logs
+    assert len(logs) == 6                                                           # the warm-up summary, a critic window, round, distill, refresh, eval
+    assert logs[0] == {"step": 0, "warmup/success_rate": 0.3, "warmup/env_steps": 800, "warmup/buffer_rows": 350, "time/warmup_s": 900.0, "warmup/success_se": pytest.approx(np.sqrt(0.3 * 0.7 / 50))}
+    assert logs[1] == {"critic/loss": 1.5, "critic/q_data_mean": 0.1, "critic_update": 500}                  # its own axis: no `step`
+    assert logs[2]["step"] == 3 and logs[2]["rollout/success_rate"] == 0.5 and logs[2]["rollout/success_se"] == pytest.approx(np.sqrt(0.25 / 50))
+    assert logs[2]["rollout/opt/chosen_q_gain_mean"] == 0.2 and logs[2]["rollout/online_success_rate_cumulative"] == 0.4 and logs[2]["time/round_s"] == 400.0
+    assert not {"rollout/steps", "rollout/episodes", "rollout/round_id", "vla/version"} & set(logs[2]) and not any(k.startswith("critic") for k in logs[2])
+    assert logs[3]["distill/labels/chosen_q_mean"] == 0.4 and logs[3]["time/distill_train_s"] == 200.0 and logs[3]["distill/loss_last"] == 0.5 and logs[3]["distill/vla_updates"] == 60
+    assert logs[4] == {"step": 3, "refresh/states": 400, "time/refresh_s": 600.0, "time/refresh_model_s": 500.0}
+    assert logs[5] == {"step": 3, "eval/success_rate": 0.6, "eval/success_se": 0.049, "eval/steps_mean": 80.0, "eval/steps_mean_success": 60.0, "eval/opt/candidate_q_mean": 0.1,
+                       "eval/opt/chosen_q_gain_mean": 0.3, "time/eval_s": 450.0}
+    assert sink.step == 3
+
+
+def test_the_critic_axis_is_defined_before_the_star_because_wandb_applies_the_first_pattern_that_matches(fake, tmp_path):
+    tracking.start_tracking(tmp_path, False, "proj", "name", "online", axes=tracking.RL_AXES)
+    names = [n for n, _ in fake.runs[0].metric_defs]
+    assert names.index("critic/*") < names.index("*") and ("critic/*", {"step_metric": "critic_update"}) in fake.runs[0].metric_defs
+    (tmp_path / "sft").mkdir()
+    assert tracking.start_tracking(tmp_path / "sft", False, "proj", "name", "online") and [n for n, _ in fake.runs[1].metric_defs] == ["step", "*"]      # the SFT is as it was
+
+
+def test_an_sft_evaluation_keeps_the_generic_view(fake, tmp_path):
+    sink = tracking.start_tracking(tmp_path, False, "proj", "name", "online")
+    sink({"event": "eval", "step": 6, "eval_s": 3.0, "train": {"loss": 0.4}})
+    assert fake.runs[0].logs == [{"step": 6, "eval/eval_s": 3.0, "eval/train/loss": 0.4}]

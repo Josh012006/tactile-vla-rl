@@ -113,8 +113,10 @@ class ActionOptimiser:
             logs["local_displacement_l1_mean"] = float(np.asarray(result.displacement).mean())
         if chosen is not None:
             logs["chosen_q_mean"] = float(np.asarray(chosen.q).mean())
+            logs["chosen_q_gain_mean"] = float((np.asarray(chosen.q) - candidate_q.mean(axis=1)).mean())       # what the critic expects to gain over a candidate drawn at random
             if candidates is not None:                                                                   # the VLA's first sample is the action it would have executed alone
                 first = np.asarray(candidates)[:, 0]
+                logs["chosen_shift_l1_mean"] = float(np.abs(np.asarray(chosen.actions) - first).reshape(len(first), -1).sum(axis=1).mean())     # how far, in the normalised chunk space (L1 over the chunk), from it
                 logs["chosen_differs_from_first_sample_share"] = float((np.abs(np.asarray(chosen.actions) - first).reshape(len(first), -1).max(axis=1) > 0).mean())
         return logs
 
