@@ -43,7 +43,7 @@ SYNTHETIC_PLANS = 19               # plans per synthetic episode (150 steps, a c
 # What the earlier measurements say of the rest of a run (docs/algos/rl.md section 5, the critic probe of 15 Nov. 2026): used by the estimate, change them on the command line.
 COLLECT_ROUND_S = 280.0            # a round of 50 episodes: about 182 s of model + 97 s of simulator
 EVAL_S = 480.0                     # an evaluation of 100 episodes
-CRITIC_H = 3.44                    # 155 000 critic updates at 79.9 ms (variant B)
+CRITIC_H = 1.92                    # 155 000 critic updates at 44.7 ms in the run's loop (batches prepared ahead; 78.9 ms one after the other = 3.4 h), variant B, probe of 15 Nov. 2026
 SERVER_GIB, CARD_GIB = 11.0, 46.0  # an env server of 50-100 environments takes 9-11 GB; the L40S has 46 GB
 
 
