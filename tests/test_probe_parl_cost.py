@@ -41,8 +41,8 @@ def test_the_estimate_adds_up_the_stages_over_the_rounds():
     m = {"annotate_s_per_state": 0.01, "step_s": 8.0, "refresh_s_per_state": 0.2, "save_state_s": 30.0, "save_checkpoint_s": 30.0}
     est = PP.estimate_run(m, cfg, plans=10, collect_round_s=100.0, eval_s=600.0, critic_h=1.0)
     n = [1000, 1500]
-    assert est["state_recomputations"] == sum(n) and est["vla_steps"] == 1000 // 64 + 1500 // 64                              # 15 + 23, one epoch
-    assert est["annotate_h"] == round(2500 * 0.01 / 3600, 2) and est["train_h"] == round(38 * 8.0 / 3600, 2) and est["refresh_h"] == round(2500 * 0.2 / 3600, 2)
+    assert est["state_recomputations"] == n[0] and est["vla_steps"] == 1000 // 64 + 1500 // 64                                # 15 + 23, one epoch; the last round's refresh is not made
+    assert est["annotate_h"] == round(2500 * 0.01 / 3600, 2) and est["train_h"] == round(38 * 8.0 / 3600, 2) and est["refresh_h"] == round(1000 * 0.2 / 3600, 2)
     assert est["saves_h"] == round(2 * 60.0 / 3600, 2) and est["collect_h"] == round(3 * 100.0 / 3600, 2) and est["eval_h"] == round(2 * 600.0 / 3600, 2) and est["critic_h"] == 1.0
     assert est["total_h"] == round(sum(est[k] for k in ("annotate_h", "train_h", "refresh_h", "saves_h", "collect_h", "eval_h", "critic_h")), 1)
 

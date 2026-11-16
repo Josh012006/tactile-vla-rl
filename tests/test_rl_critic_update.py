@@ -164,3 +164,29 @@ def test_run_updates_logs_every_window_and_returns_the_mean():
     assert [n for n, _ in seen] == [8, 10, 11]
     with pytest.raises(ValueError):
         cu.run_updates(trainer, buf, cache, np.random.default_rng(0), steps=0)
+
+
+@pytest.mark.parametrize("extra", [BEST_OF_N, PARL])
+def test_the_prefetched_batches_give_exactly_the_same_training_and_leave_the_generator_where_it_was(extra):
+    """A thread prepares the batches ahead (host work + transfer overlapped with the update): same batches, same updates, same generator state afterwards (it is saved for the resume)."""
+    buf, cache = filled([episode(3, True, seed=1), episode(3, False, seed=2), episode(4, True, seed=3)])
+    results, params, states = [], [], []
+    for prefetch in (0, 1, 3):
+        trainer, _ = trainer_of(extra)
+        rng = np.random.default_rng(0)
+        results.append(cu.run_updates(trainer, buf, cache, rng, steps=7, log_every=3, prefetch=prefetch))
+        params.append(jax.tree.leaves(trainer.critic.params))
+        states.append(rng.bit_generator.state)
+        assert trainer.updates == 7
+    for other in (1, 2):
+        assert states[other] == states[0]
+        assert all(np.array_equal(a, b) for a, b in zip(params[other], params[0]))
+        assert {k: v for k, v in results[other].items() if k != "seconds_per_update"} == {k: v for k, v in results[0].items() if k != "seconds_per_update"}
+
+
+def test_an_error_while_preparing_a_batch_reaches_the_update_loop():
+    buf, cache = filled([episode(3, True, seed=1), episode(3, False, seed=2)])
+    trainer, _ = trainer_of(BEST_OF_N)
+    cache.version[:] = -1                                                                  # nothing stored: `make_batch` raises in the thread
+    with pytest.raises(KeyError, match="no candidates"):
+        cu.run_updates(trainer, buf, cache, np.random.default_rng(0), steps=4, prefetch=2)

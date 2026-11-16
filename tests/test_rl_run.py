@@ -211,18 +211,18 @@ def same_state(a, b):
     assert all(np.array_equal(a["cache"][k], b["cache"][k]) for k in a["cache"])
 
 
-def test_a_parl_run_distils_after_every_round_and_draws_the_candidates_of_every_state_again(tmp_path):
+def test_a_parl_run_distils_after_every_round_and_draws_the_candidates_of_every_state_again_except_after_the_last(tmp_path):
     log, opener = ListLog(), Opener()
     run, cfg = make_parl(tmp_path, log, opener)
     assert cfg.variant == "parl_global_local"
     summary = run.run()
     assert summary["stage"] == 2 and summary["vla_version"] == 2 and run.distiller.updates > 0
-    assert [e["event"] for e in log.events if e["event"] not in ("critic", "refresh_progress")] == ["start", "warmup", "warmup", "eval", "distill", "refresh", "round", "eval", "distill", "refresh", "round", "eval", "done"]
-    assert [e["version"] for e in log.of("refresh")] == [1, 2] and [e["vla_version"] for e in log.of("round")] == [1, 2]
+    assert [e["event"] for e in log.events if e["event"] not in ("critic", "refresh_progress")] == ["start", "warmup", "warmup", "eval", "distill", "refresh", "round", "eval", "distill", "round", "eval", "done"]
+    assert [e["version"] for e in log.of("refresh")] == [1] and [e["vla_version"] for e in log.of("round")] == [1, 2]           # round 2 is the last: its refresh would feed nothing
     ids = run.buffer.candidate_ids()
-    assert np.all(run.cache.versions_of(ids) == 2) and log.of("refresh")[0]["states"] < log.of("refresh")[1]["states"] == len(ids)       # all of them, the warm-up's too
+    assert np.all(run.cache.versions_of(ids) == 1) and log.of("refresh")[0]["states"] < len(ids)                      # the cache stays as round 1 left it
     assert np.abs(run.policy.bias()).max() > 0
-    assert [d["states"] for d in log.of("distill")] == [r["states"] for r in log.of("refresh")]                      # the VLA learns from every state that is then refreshed
+    assert [d["states"] for d in log.of("distill")] == [log.of("refresh")[0]["states"], len(ids)]                      # the VLA learns from every state, the warm-up's too
     assert [json.loads(run.result_path(r).read_text())["vla_version"] for r in (0, 1, 2)] == [0, 1, 2]
 
 
@@ -230,7 +230,7 @@ def test_the_cache_holds_the_vla_that_drew_it_the_new_episodes_under_the_current
     seen = []
     run, _ = make_parl(tmp_path, ListLog(on_event=lambda e: seen.append(np.unique(run.cache.versions_of(run.buffer.candidate_ids()))) if e["event"] == "round" else None))
     run.run()
-    assert [v.tolist() for v in seen] == [[1], [2]]                                     # after each round every state of the cache was drawn by the VLA of that round
+    assert [v.tolist() for v in seen] == [[1], [1]]                                     # after round 1 every state was drawn by its VLA; after the last round nothing is redrawn (the cache is not read any more)
 
 
 def test_each_round_keeps_the_vlas_trainable_parameters_as_a_checkpoint_and_the_last_stage_as_the_resume_state(tmp_path):

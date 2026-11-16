@@ -143,7 +143,7 @@ class RLRun:
         self.actor = RLActor(policy, cfg, self.trainer.optimiser)
         self.distiller = Distiller(policy, self.trainer.optimiser, cfg, model_cfg) if cfg.distills else None
         self.distill_rng = np.random.default_rng(cfg.seed + DISTILL_RNG_OFFSET)          # the order of the distillation batches
-        self.version = 0                                                  # the VLA whose candidates the cache holds: 0 = the SFT checkpoint, r = after the distillation of round r (Best-of-N: always 0)
+        self.version = 0                                                  # the VLA whose candidates the cache holds: 0 = the SFT checkpoint, r = after the distillation of round r (Best-of-N: always 0); after the last round the VLA's version, the cache is left as it was
         self.checkpoint_meta = dict(checkpoint_meta or {})
         plans =-(-self.max_steps // self.replan)
         self.buffer = ReplayBuffer((cfg.warmup_episodes + cfg.total_episodes) * (plans + 1), horizon, cfg.gamma, cfg.step_reward, touch_dim=cfg.critic_touch.dim)
@@ -212,10 +212,13 @@ class RLRun:
         self._commit(r, collected)
 
     def _distill(self, r: int) -> None:
-        """PA-RL's Stage II after round `r`: the VLA learns pi^Opt of every stored state under the current critic, then the candidates of all of them are drawn again by the new VLA (version r)."""
+        """PA-RL's Stage II after round `r`: the VLA learns pi^Opt of every stored state under the current critic, then the candidates of all of them are drawn again by the new VLA (version r), except after the LAST round: nothing uses them any more."""
         cfg = self.cfg
         metrics = self.distiller.distill(self.trainer.critic.params, jax.random.fold_in(jax.random.key(cfg.seed + DISTILL_KEY_OFFSET), r), self.distill_rng, self.buffer, self.cache)
         self.log.write(event="distill", step=r, **metrics, vla_updates=self.distiller.updates)
+        if r == cfg.rounds:
+            self.version = r                      # the VLA is the one of round r; the cache is not redrawn (below)
+            return                                # nothing reads the cache after the last round (the evaluations draw their own candidates): the dearest refresh of the run, for nothing
         ids = self.buffer.candidate_ids()
         next_log = [REFRESH_LOG_EVERY]
 

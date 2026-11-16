@@ -159,13 +159,13 @@ def estimate_run(m: Dict[str, object], cfg, plans: int, *, collect_round_s: floa
     steps = [(s // cfg.distill_batch_size) * cfg.distill_epochs for s in n]
     annotate_h = sum(n) * m["annotate_s_per_state"] / 3600
     train_h = sum(steps) * m["step_s"] / 3600
-    refresh_h = sum(n) * m["refresh_s_per_state"] / 3600
+    refresh_h = sum(n[:-1]) * m["refresh_s_per_state"] / 3600                                   # no refresh after the last round (src/algos/rl_run.py `_distill`)
     saves_h = cfg.rounds * (m.get("save_state_s", 0.0) + m.get("save_checkpoint_s", 0.0)) / 3600
     collect_h = (cfg.warmup_episodes // cfg.envs_per_batch + cfg.rounds) * collect_round_s / 3600
     eval_h = len(cfg.eval_rounds) * eval_s / 3600
     parts = {"annotate_h": annotate_h, "train_h": train_h, "refresh_h": refresh_h, "saves_h": saves_h, "collect_h": collect_h, "eval_h": eval_h, "critic_h": critic_h}
     parts = {k: round(v, 2) for k, v in parts.items()}
-    return {"plans_per_episode": plans, "state_recomputations": int(sum(n)), "vla_steps": int(sum(steps)), **parts, "total_h": round(sum(parts.values()), 1)}
+    return {"plans_per_episode": plans, "state_recomputations": int(sum(n[:-1])), "vla_steps": int(sum(steps)), **parts, "total_h": round(sum(parts.values()), 1)}
 
 
 def memory_verdict(memory: Dict[str, int], server_gib: float = SERVER_GIB, card_gib: float = CARD_GIB) -> str:

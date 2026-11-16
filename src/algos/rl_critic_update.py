@@ -27,6 +27,7 @@ import numpy as np
 import optax
 
 from src.algos import rl_critic as rc
+from src.algos import sft
 from src.algos.rl_action_opt import ActionOptimiser, pick
 from src.algos.rl_buffer import ReplayBuffer
 from src.algos.rl_candidates import CandidateCache
@@ -41,6 +42,19 @@ def make_batch(buffer: ReplayBuffer, cache: CandidateCache, rng: np.random.Gener
     batch["cand"] = cache.get(ids)
     batch["next_cand"] = cache.get(np.where(terminal, ids, ids + 1))                   # a terminal transition has no candidates at s': the value is masked, any valid ones do
     return batch
+
+
+BATCH_KEYS = ("state", "next_state", "action", "reward", "terminal", "vmu", "cand", "next_cand")      # what `CriticTrainer.update` reads of a batch
+PREFETCH_DEPTH = 3                                                                                       # batches prepared ahead of the update
+
+
+def prepared_batches(buffer: ReplayBuffer, cache: CandidateCache, rng: np.random.Generator, cfg: RLConfig, steps: int):
+    """The `steps` batches of `make_batch`, in order, with the arrays already on the device: the host work of a batch (gathering 2 x 256 images and the candidates from the numpy buffer, about as long
+    as the update itself) and its transfer are done by a thread while the previous update runs. The generator draws from `rng` exactly as `steps` calls of `make_batch` one after the other would, and
+    stops after `steps`: the batches, the generator's state afterwards and so the training are the same as without the thread (the buffer and the cache do not change during the updates)."""
+    for _ in range(steps):
+        batch = make_batch(buffer, cache, rng, cfg)
+        yield {k: jax.device_put(batch[k]) for k in BATCH_KEYS}
 
 
 def to_floats(metrics: Dict[str, jnp.ndarray]) -> Dict[str, float]:
@@ -104,16 +118,18 @@ class CriticTrainer:
 
 
 def run_updates(trainer: CriticTrainer, buffer: ReplayBuffer, cache: CandidateCache, rng: np.random.Generator, steps: int, log_every: int = 0,
-                log: Optional[Callable[[int, Dict[str, float]], None]] = None, clock: Callable[[], float] = time.monotonic) -> Dict[str, float]:
+                log: Optional[Callable[[int, Dict[str, float]], None]] = None, clock: Callable[[], float] = time.monotonic, prefetch: int = PREFETCH_DEPTH) -> Dict[str, float]:
     """`steps` updates, each on a fresh batch of `make_batch`. Returns the mean of the metrics over the steps (and the wall time per step, `seconds_per_update`); with `log_every`, `log(update count,
-    mean metrics of the last log_every steps)` is called every that many steps and at the end for the steps left over (the metrics are read from the device only then, so the steps are not synchronised one by one)."""
+    mean metrics of the last log_every steps)` is called every that many steps and at the end for the steps left over (the metrics are read from the device only then, so the steps are not synchronised one by one).
+    `prefetch` batches are prepared ahead by a thread (`prepared_batches`: the same batches and the same training, in about half the time on the cluster's card); 0 = one after the other."""
     if steps < 1:
         raise ValueError("steps must be >= 1")
     window: list = []
     total: list = []
     start = clock()
-    for i in range(1, steps + 1):
-        window.append(trainer.update(make_batch(buffer, cache, rng, trainer.cfg)))
+    batches = sft.prefetch(prepared_batches(buffer, cache, rng, trainer.cfg, steps), prefetch) if prefetch > 0 else (make_batch(buffer, cache, rng, trainer.cfg) for _ in range(steps))
+    for i, batch in enumerate(batches, start=1):
+        window.append(trainer.update(batch))
         if log_every and i % log_every == 0:
             means = _mean([to_floats(m) for m in window])
             total.extend(window)

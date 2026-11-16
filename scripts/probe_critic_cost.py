@@ -81,7 +81,11 @@ def measure(trainer, buf, cache, steps: int, warmup_steps: int, clock: Callable[
         host.append((t1 - t0) * 1e3)
         device.append((t2 - t1) * 1e3)
     total = [h + d for h, d in zip(host, device)]
-    return {"first_update_ms": round(first_ms, 1), "host_batch_ms": summarise_ms(host), "update_ms": summarise_ms(device), "total_ms": summarise_ms(total), "steps": steps}
+    from src.algos.rl_critic_update import run_updates
+    t0 = clock()
+    run_updates(trainer, buf, cache, rng, steps=steps)                                       # the loop of the run: the batches of the next updates prepared by a thread
+    overlapped = (clock() - t0) * 1e3 / steps
+    return {"first_update_ms": round(first_ms, 1), "host_batch_ms": summarise_ms(host), "update_ms": summarise_ms(device), "total_ms": summarise_ms(total), "overlapped_ms": round(overlapped, 2), "steps": steps}
 
 
 def estimate(rows: List[dict], cfg_by_name: Dict[str, object], episodes: int, steps_per_episode: int) -> List[dict]:
@@ -91,6 +95,8 @@ def estimate(rows: List[dict], cfg_by_name: Dict[str, object], episodes: int, st
         cfg = cfg_by_name[row["variant"]]
         updates = cfg.utd * episodes * steps_per_episode + cfg.warmup_critic_steps
         out.append({"variant": row["variant"], "updates": updates, "hours": round(updates * row["total_ms"]["median"] / 3.6e6, 2)})
+        if "overlapped_ms" in row:
+            out[-1]["hours_overlapped"] = round(updates * row["overlapped_ms"] / 3.6e6, 2)
     return out
 
 
@@ -122,12 +128,12 @@ def main(argv=None) -> int:
         print(f"[{name}] k={cfg.num_candidates} keep_top={cfg.keep_top} local_steps={cfg.local_steps} batch={cfg.critic_batch_size} parameters={rl_critic.num_parameters(trainer.critic.params)}", flush=True)
         row = {"variant": name, **measure(trainer, buf, cache, args.steps, args.warmup_steps), "memory": device_memory()}
         rows.append(row)
-        print(f"  first update (compilation) {row['first_update_ms']} ms | host batch {row['host_batch_ms']} | update {row['update_ms']} | total {row['total_ms']} | memory {row['memory']}", flush=True)
+        print(f"  first update (compilation) {row['first_update_ms']} ms | host batch {row['host_batch_ms']} | update {row['update_ms']} | total {row['total_ms']} | in the run's loop (batches prepared ahead) {row['overlapped_ms']} ms | memory {row['memory']}", flush=True)
         del trainer, buf, cache
     est = estimate(rows, cfgs, args.run_episodes, args.run_steps)
     print(f"\n=== ESTIMATE of the critic updates of a run ({args.run_episodes} episodes of {args.run_steps} steps, UTD per environment step, warm-up included)")
     for e in est:
-        print(f"  {e['variant']:<18} {e['updates']} updates -> {e['hours']} h")
+        print(f"  {e['variant']:<18} {e['updates']} updates -> {e['hours']} h" + (f" ({e['hours_overlapped']} h in the run's loop, batches prepared ahead)" if "hours_overlapped" in e else ""))
     stamp = time.strftime("%Y%m%d_%H%M%S")
     path = ROOT / "reports" / f"probe_critic_cost_{stamp}_{os.environ.get('SLURM_JOB_ID') or 'pid' + str(os.getpid())}.json"
     path.parent.mkdir(exist_ok=True)

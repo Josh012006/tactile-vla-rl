@@ -34,7 +34,8 @@ def test_measure_times_the_host_and_the_device_parts_after_the_compiling_calls()
     trainer = CriticTrainer(rc.CriticNet.from_config(cfg), cfg, horizon=PC.HORIZON)
     ticks = iter(np.arange(0, 100, 0.5))
     row = PC.measure(trainer, buf, cache, steps=3, warmup_steps=2, clock=lambda: float(next(ticks)))
-    assert trainer.updates == 2 + 3 and row["steps"] == 3
+    assert trainer.updates == 2 + 3 + 3 and row["steps"] == 3                                                     # + the 3 of the run's loop (batches prepared ahead), timed as a whole
+    assert row["overlapped_ms"] == pytest.approx(500.0 / 3, abs=0.01)
     assert row["host_batch_ms"]["median"] == 500.0 and row["update_ms"]["median"] == 500.0 and row["total_ms"]["median"] == 1000.0         # the fake clock moves 0.5 s per reading
 
 
