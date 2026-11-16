@@ -59,7 +59,7 @@ warmup_critic_steps: 5000   # critic gradient steps on that data (paper: 5e5 ste
 # The optimiser's other settings (AdamW b1 / b2 / eps / weight decay, gradient clipping) are configs/algo/sft.yaml's. The Adam state is kept from one round to the next.
 distill_lr: 2.5e-5          # constant (paper: 5e-5, 1e-5 for the kitchens; "reduced" for OpenVLA without a value)
 distill_batch_size: 64
-distill_micro_batch_size: 16
+distill_micro_batch_size: 8      # rows per pass (sets the memory only, not the optimisation). 16 ran out of memory in the PA-RL probe of 15 Nov. 2026: the SFT's LoRA peak at 16 is about 24 GiB, JAX is limited to 22 GiB (half of the L40S, the env server has the rest)
 distill_epochs: 1           # epochs over the whole buffer (warm-up included) per round
 
 # -- Evaluation -----------------------------------------------------------------------------------------------------------------------

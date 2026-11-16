@@ -61,7 +61,7 @@ class RLConfig:
     warmup_critic_steps: int = 5000
     distill_lr: float = 2.5e-5
     distill_batch_size: int = 64
-    distill_micro_batch_size: int = 16
+    distill_micro_batch_size: int = 8
     distill_epochs: int = 1
     eval_episodes: int = 100
     eval_every_rounds: int = 5

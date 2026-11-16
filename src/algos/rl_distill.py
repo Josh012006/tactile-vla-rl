@@ -17,6 +17,7 @@ After the epochs the policy is given the new weights (`policy.set_state`); refre
 """
 from __future__ import annotations
 
+import functools
 import json
 import time
 from pathlib import Path
@@ -61,13 +62,19 @@ class VLATrainer:
             loss_of = lambda t: policy.loss_of_rows(nnx.State.merge(t, frozen), observation, actions, draws)     # noqa: E731
             return jax.value_and_grad(loss_of)(trainable)
 
-        @jax.jit
+        # Memory (as in src/algos/sft.py, where the probes showed about two gradient trees still allocated after each step): the running sum is donated (it becomes the new sum),
+        # the python names of the gradient trees are dropped as soon as they are used, and the state the update replaces is donated.
+        @functools.partial(jax.jit, donate_argnums=(0,))
+        def add_fn(total, grads):
+            return jax.tree.map(jnp.add, total, grads)
+
+        @functools.partial(jax.jit, donate_argnums=(0, 1))
         def apply_fn(trainable, opt_state, grads):
             grads = jax.tree.map(lambda g: g / self.n_micro, grads)
             updates, opt_state = self.tx.update(grads, opt_state, trainable)
             return optax.apply_updates(trainable, updates), opt_state, optax.global_norm(grads)
 
-        self._grad, self._apply = grad_fn, apply_fn
+        self._grad, self._add, self._apply = grad_fn, add_fn, apply_fn
 
     def step(self, observation, actions) -> Dict[str, jnp.ndarray]:
         """One update on a batch of `distill_batch_size` rows (`policy.training_batch_from_normalized`)."""
@@ -77,9 +84,12 @@ class VLATrainer:
             rows = slice(i * micro, (i + 1) * micro)
             cut = lambda x, rows=rows: x[rows]                                                          # noqa: E731
             loss, grads = self._grad(self.trainable, self.frozen, jax.tree.map(cut, observation), actions[rows], jax.tree.map(cut, draws))
-            total = grads if total is None else jax.tree.map(jnp.add, total, grads)
+            total = grads if total is None else self._add(total, grads)
+            del grads
             losses.append(loss)
+        del observation, draws
         self.trainable, self.opt_state, grad_norm = self._apply(self.trainable, self.opt_state, total)
+        total = None
         self.updates += 1
         return {"loss": jnp.mean(jnp.stack(losses)), "grad_norm": grad_norm}
 

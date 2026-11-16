@@ -168,6 +168,12 @@ def main(argv=None) -> int:
     scratch = tempfile.mkdtemp(prefix="probe_parl_", dir=args.save_dir) if args.save_dir else None
     try:
         measured = measure_parl(policy, cfg, model_cfg, states=args.states, refresh_states=args.refresh_states, save_dir=Path(scratch) if scratch else None)
+    except (ValueError, RuntimeError) as err:
+        if "RESOURCE_EXHAUSTED" not in str(err):
+            raise
+        print(f"\n=== OUT OF MEMORY with distill_micro_batch_size={cfg.distill_micro_batch_size}: {str(err)[:200]}\nmemory: {device_memory()}\n"
+              f"JAX is limited to half of the card (the env server has the other half): lower it, e.g. --set distill_micro_batch_size=4 (the optimisation is the same, the memory is not).", flush=True)
+        return 2
     finally:
         if scratch:
             shutil.rmtree(scratch, ignore_errors=True)
