@@ -272,7 +272,7 @@ def test_the_sft_experiments_are_the_three_pi05_runs_and_the_three_pi0_fast_runs
         if model == "pi05":                                                                              # the noisy set's statistics for the three, as in expo-ft
             assert stats == (ROOT / "assets" / "forge_demo_norm", "forge_demos_robotiq_noisy")
         else:
-            assert stats is None                                                                         # pi0-FAST: the checkpoint's own (DROID), for the three (decided 2026-11-14)
+            assert stats is None                                                                         # pi0-FAST: the checkpoint's own (DROID), for the three (docs/algos/sft.md)
 
 
 def test_a_checkpoint_carries_the_normalisation_statistics_it_was_trained_with(tmp_path):

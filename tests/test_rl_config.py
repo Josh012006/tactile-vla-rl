@@ -1,4 +1,4 @@
-"""src/algos/rl_config.py and the YAMLs of configs/algo/rl.yaml, configs/experiment/rl/: the defaults are the paper's (PA-RL, Appendix B.1) and the group's decisions of docs/algos/rl.md,
+"""src/algos/rl_config.py and the YAMLs of configs/algo/rl.yaml, configs/experiment/rl/: the defaults are the paper's (PA-RL, Appendix B.1) and the decisions of docs/algos/rl.md,
 a method cannot be given what it does not do, and a wrong key or value is an error."""
 import dataclasses
 from pathlib import Path
@@ -18,7 +18,7 @@ def test_the_yaml_defaults_are_the_papers_and_the_groups():
     assert (c.num_candidates, c.keep_top, c.local_steps, c.local_lr) == (32, 10, 10, 3e-4)                              # paper B.1
     assert (c.critic_lr, c.critic_batch_size, c.gamma, c.cal_ql_alpha, c.mixing_ratio) == (3e-4, 256, 0.99, 0.01, 0.5)   # paper B.1
     assert c.critic_hidden == (512, 512, 512) and c.random_shift_px == 4 and c.step_reward == -1.0 and not c.hl_gauss
-    assert (c.utd, c.tau, c.envs_per_batch, c.total_episodes) == (1, 0.005, 50, 500)                                    # group
+    assert (c.utd, c.tau, c.envs_per_batch, c.total_episodes) == (1, 0.005, 50, 500)                                    # decisions
     assert (c.warmup_episodes, c.warmup_critic_steps, c.critic_image_size, c.critic_cameras) == (50, 5000, 128, ("exterior", "wrist"))
     assert (c.distill_lr, c.distill_batch_size, c.distill_epochs, c.eval_episodes) == (2.5e-5, 64, 1, 100)
     assert (c.rollout_selection, c.distill_selection, c.eval_selection) == ("softmax", "softmax", "argmax") and not c.critic_touch.enabled

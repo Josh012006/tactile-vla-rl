@@ -68,7 +68,7 @@ Which statistics the SFT normalises with is the `norm_stats` block of the model 
   expo-ft (`configs/task/isaaclab/peg_insert_forge_sft_robotiq_*.yaml` there): the same file for the three runs, so that the demonstrations are the only difference
   between them; the noisy set was the one that covered the other two best. The three pi0.5 experiment files carry the block (`model_set: norm_stats.*`). The file is
   the one expo-ft wrote (`scripts/demos/compute_demo_norm_stats.py`, identical in both repositories); copy it, do not recompute it.
-- **pi0-FAST: the checkpoint's own statistics (DROID), decided 2026-11-14.** Its openpi pipeline normalises OFFSETS from the chunk-start state too (`RLDSDroidDataConfig`, JOINT_POSITION: `DeltaActions` before
+- **pi0-FAST: the checkpoint's own statistics (DROID), by decision.** Its openpi pipeline normalises OFFSETS from the chunk-start state too (`RLDSDroidDataConfig`, JOINT_POSITION: `DeltaActions` before
   `Normalize`, `AbsoluteActions` after the inverse), so statistics computed on the demonstrations have the same kind as pi0.5's and only the chunk length differs (10 steps:
   `compute_demo_norm_stats --horizon 10 --droid-stats <the polaris checkpoint's norm_stats.json>`, asset `forge_demos_robotiq_noisy_h10`). Measured on the 150 demonstrations with
   `scripts/fast_tokens.py` (CPU, 2026-11-12; `--norm-stats-dir` / `--norm-stats-asset-id` give the other statistics):
@@ -235,7 +235,7 @@ Looked at and not done:
   a thread to join at every stop) is not worth that.
 - **Two runs on one card.** The steps are compute-bound: two LoRA runs on one A100 would each take about twice as long.
 - **A larger micro-batch.** The noise and the augmentation of a micro-batch come from `fold_in(key, step * n_micro + i)`: a different number of micro-batches draws other numbers, so the run would no longer be the same one.
-- **Remat policy (needs a decision).** openpi's Gemma recomputes the forward pass in the backward (`nothing_saveable`, hard-coded in `gemma.py` of the pinned fork). Keeping activations would remove that
+- **Remat policy (open).** openpi's Gemma recomputes the forward pass in the backward (`nothing_saveable`, hard-coded in `gemma.py` of the pinned fork). Keeping activations would remove that
   recomputation, a quarter to a third of the step if the memory allows it (LoRA on an A100 has room, the L40S probably not), with the same maths. It means changing the pinned openpi commit (checked by `tests/test_models_pin.py`),
   so it is not done; a probe on the cluster would tell the gain and the memory.
 

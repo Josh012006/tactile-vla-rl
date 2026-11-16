@@ -7,12 +7,12 @@
 
 The loss, for a batch of transitions (s, a, r, s') of the buffer (a = the chunk that was executed, in the model's normalised space):
     y        = r + gamma * (1 - terminal) * Qbar(s', a'),     a' = the action of pi^Opt at s' chosen with the CURRENT critic Q_theta (global top-m, local ascent, then `rollout_selection`: a sample of the
-               softmax over the optimised set for PA-RL, the argmax for Best-of-N: the policy that is executed), Qbar = the delayed copy, which only EVALUATES it (group, docs/algos/rl.md);
+               softmax over the optimised set for PA-RL, the argmax for Best-of-N: the policy that is executed), Qbar = the delayed copy, which only EVALUATES it (decision, docs/algos/rl.md);
     TD       = mean (Q_theta(s, a) - y)^2                      (MSE: HL-Gauss only if Q explode, paper B.1);
     Cal-QL   = mean_s [ mean_k max(Q_theta(s, a_k), V^mu(s)) ] - mean Q_theta(s, a)      a_k = the k candidates of the VLA cached at s, V^mu = the Monte-Carlo return-to-go stored with the row;
     loss     = TD + cal_ql_alpha * Cal-QL                      (alpha = 0.01, paper B.1).
 A success is terminal (y = r, no bootstrap, so s' needs no candidates: s' is replaced by s in the candidate lookup and the value is masked); a time-out is not (its last state has candidates: `needs_candidates`).
-The image of s is augmented (random shift 4 px, DrQ), the one of s' is not (proposal: the ranking and the target see the clean state; the paper gives nothing on this). The three evaluations of
+The image of s is augmented (random shift 4 px, DrQ), the one of s' is not (decision: the ranking and the target see the clean state; the paper gives nothing on this). The three evaluations of
 the critic at s (data action, the k candidates) share one encoding of the shifted images.
 Every number the metrics of docs/algos/rl.md section 4 ask of the critic update is in `metrics` (TD loss, Q mean / min / max on the data actions, Q minus the Monte-Carlo return, the candidates' Q spread, the target, ...).
 """

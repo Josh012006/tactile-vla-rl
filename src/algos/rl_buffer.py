@@ -8,7 +8,7 @@
 A ROW is a state. The rows of an episode are contiguous (s_0 .. s_T): the transition of row i (a plan: the chunk executed at s_i) goes to row i + 1, so the next state needs no storage of its own, and the
 state ids are the ids of `CandidateCache` (the VLA's candidates of a state are cached under its row). The last row of an episode has no action.
 
-Reward and ending (docs/algos/rl.md, group): a plan costs `step_reward` (-1) until the plan that reaches the success, whose reward is 0 and which is TERMINAL (its target is the reward alone). An episode that
+Reward and ending (docs/algos/rl.md, decision): a plan costs `step_reward` (-1) until the plan that reaches the success, whose reward is 0 and which is TERMINAL (its target is the reward alone). An episode that
 ends without success (the 150-step horizon) is a time-out, NOT terminal: the target of its last plan bootstraps from the last state, so that state needs candidates too (`needs_candidates`).
 V^mu (the reference value of Cal-QL) is the Monte-Carlo return-to-go of the episode's own plans, with the plan-level reward and gamma, of EVERY stored trajectory (warm-up and online).
 """

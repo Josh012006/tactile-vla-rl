@@ -1,10 +1,10 @@
 # Online RL fine-tuning of pi0.5 (pi0 shares its sampler; pi0-FAST is NOT part of these methods, docs/algos/rl.md) on the FORGE PegInsert task: Best-of-N and PA-RL (Policy Agnostic RL, Mark et al., arXiv 2412.06685v1). The ALGORITHM side only: the model, the SFT
 # checkpoint it starts from and the method are chosen by the experiment file (configs/experiment/rl/*.yaml). Design, decisions and sources of every value: docs/algos/rl.md.
 #
-# Rule: the DEFAULTS are the paper's (Appendix B.1, pp. 22-23). Where the paper has no value the comment says "group" (decided with Josue, 15 Nov. 2026) or "proposal", and docs/algos/rl.md
+# Rule: the DEFAULTS are the paper's (Appendix B.1, pp. 22-23). Where the paper has no value the comment says "decision" (a choice made for this repository) and docs/algos/rl.md
 # gives the reasoning. Read by src/algos/rl_config.py (an unknown key is an error, never ignored).
 #
-# One online-trained critic, UTD 1, no ensemble, no pessimism bias (group). Touch goes to the CRITIC only (`critic_use_tactile`, `critic_use_force`): the SFT checkpoint is the same for every run.
+# One online-trained critic, UTD 1, no ensemble, no pessimism bias (decision: a conservatism bias is likely harmful online). Touch goes to the CRITIC only (`critic_use_tactile`, `critic_use_force`): the SFT checkpoint is the same for every run.
 
 # -- Method -----------------------------------------------------------------------------------------------------------------------------
 # best_of_n: the VLA stays frozen; the action executed is the argmax of Q over the k candidates (Alg. 2 of the paper without the distillation, global optimisation only).
@@ -12,59 +12,59 @@
 method: parl
 
 # -- Stage I: action optimisation at a state (paper Alg. 1) ---------------------------------------------------------------------------
-num_candidates: 32      # k: chunks sampled from the VLA per state (paper B.1; group: 32 for both models)
+num_candidates: 32      # k: chunks sampled from the VLA per state (paper B.1; decision: 32 for both models)
 keep_top: 10            # m: the top-m of the k by Q are kept (paper B.1); best_of_n needs 1
 local_steps: 10         # T: gradient-ascent steps a <- a + local_lr * grad_a Q(s, a) on each kept action (paper B.1); 0 = global only. A step is kept only if Q rises (Alg. 1), per action
-local_lr: 3.0e-4        # alpha (paper B.1), in the model's normalised chunk space, no clipping (group: the paper gives no bounding)
+local_lr: 3.0e-4        # alpha (paper B.1), in the model's normalised chunk space, no clipping (decision: the paper gives no bounding)
 # Which action is taken from the optimised set: softmax over Q (Eq. 4.3, temperature `softmax_temperature`) or the argmax.
 rollout_selection: softmax      # action executed while collecting (paper Alg. 2 line 7); best_of_n: argmax
-distill_selection: softmax      # action each buffer state is annotated with for the distillation (paper B.1: argmax when the candidates' Q std is small, softmax otherwise: no threshold, group: both paths, switch here; the std is logged every round)
-eval_selection: argmax          # action executed in the evaluation, WITH optimisation at inference (paper; group)
+distill_selection: softmax      # action each buffer state is annotated with for the distillation (paper B.1: argmax when the candidates' Q std is small, softmax otherwise: no threshold, so decision: both paths exist, switch here; the std is logged every round)
+eval_selection: argmax          # action executed in the evaluation, WITH optimisation at inference (paper; decision)
 softmax_temperature: 1.0
 
-# -- Collection (group): synchronous batches ----------------------------------------------------------------------------------------------
+# -- Collection (decision): synchronous batches ----------------------------------------------------------------------------------------------
 # K environments play K episodes with the critic and the VLA frozen; then the critic updates (UTD updates per environment step), then (parl) the distillation and the cache refresh.
 envs_per_batch: 50      # K (10 rounds for 500 episodes)
-total_episodes: 500     # online episodes in total = 10 rounds of 50 (group, 15 Nov. 2026: the paper's simulation budget is 1000, which a PA-RL run could not afford: about 24 h against 7.5 h, section 5 of docs/algos/rl.md); a multiple of envs_per_batch
+total_episodes: 500     # online episodes in total = 10 rounds of 50 (decision: the paper's simulation budget is 1000, which a PA-RL run could not afford within the 10 h target: about 24 h against 7.5 h, section 6 of docs/algos/rl.md); a multiple of envs_per_batch
 replan_steps: 0         # steps executed per chunk before the model is called again; 0 = half the model's chunk, as the evaluation (8 for pi0.5)
 rows_per_sample_call: 8 # environments per model call when sampling the k candidates: 50 x 32 does not fit on an L40S (measured, docs/algos/rl.md section 5)
 
 # -- Critic (paper B.1, image domains; one critic + a delayed copy) --------------------------------------------------------------------
-critic_cameras: [exterior, wrist]   # group: both cameras
-critic_image_size: 128              # group: 128 x 128 (the paper gives none)
+critic_cameras: [exterior, wrist]   # decision: both cameras
+critic_image_size: 128              # decision: 128 x 128 (the paper gives none)
 random_shift_px: 4                  # paper (Kumar et al. 2023)
 critic_hidden: [512, 512, 512]      # MLP, the action concatenated to the input of every layer (paper B.1)
 critic_lr: 3.0e-4                   # Adam (paper B.1)
 critic_batch_size: 256              # paper B.1
-utd: 1                              # critic updates per ENVIRONMENT step (group): 8 per plan for pi0.5
-gamma: 0.99                         # per plan: a plan (one chunk) is one transition (paper B.1; group)
-tau: 0.005                          # delayed target network: soft update (group; the paper gives none)
-step_reward: -1.0                   # per plan until success; 0 at success (paper B.1 reward bias -1; group). A time-out at the horizon is not terminal: the target bootstraps (group)
-cal_ql_alpha: 0.01                  # Cal-QL regulariser weight (paper B.1, CALVIN and real robot; group: as close to the paper as possible)
+utd: 1                              # critic updates per ENVIRONMENT step (decision): 8 per plan for pi0.5
+gamma: 0.99                         # per plan: a plan (one chunk) is one transition (paper B.1; decision)
+tau: 0.005                          # delayed target network: soft update (decision; the paper gives none)
+step_reward: -1.0                   # per plan until success; 0 at success (paper B.1 reward bias -1; decision). A time-out at the horizon is not terminal: the target bootstraps (decision)
+cal_ql_alpha: 0.01                  # Cal-QL regulariser weight (paper B.1, CALVIN and real robot; decision: as close to the paper as possible)
 mixing_ratio: 0.5                   # share of each critic batch taken from the warm-up data (paper B.1)
 hl_gauss: false                     # distributional critic, only if the Q values explode (paper B.1)
 # Touch seen by the critic (src/touch/features.py: the same three switches as every component of the system; all off = the task alone). The vector [force | tactile (56)], force = [ft_force (3) |
 # gripper_effort (1)] (measured) or the 7 joint tracking residuals (proxy), each entry scaled by sign(x) * log1p(|x|), is concatenated to the state feature after the image encoders; nothing else
-# changes (group: the comparison with / without touch is this switch).
+# changes (decision: the comparison with / without touch is this switch alone).
 critic_use_tactile: false           # the taxels (robot robotiq_2f85_tsf only)
 critic_use_force: false             # the force: wrist force sensor + gripper effort (Robotiq robots), or the proxy (critic_force_mode)
 critic_force_mode: measured         # "measured" (4 values read from the sensors) | "proxy" (7 values estimated from the encoders: (last commanded joint target - measured joint) / 0.02 rad, the principle of
 #                                     arXiv 2610.23849; no force sensor needed. Does not include the velocity term of an impedance law nor a history: src/touch/features.py)
 
-# -- Warm-up of the critic before it ranks or distills anything (group) -------------------------------------------------------------------
+# -- Warm-up of the critic before it ranks or distills anything (decision) -------------------------------------------------------------------
 warmup_episodes: 50     # episodes of the base VLA (paper: 50 rollouts for OpenVLA); a multiple of envs_per_batch
 warmup_critic_steps: 5000   # critic gradient steps on that data (paper: 5e5 steps of offline pre-training); the stopping criterion of the warm-up
 
-# -- Stage II: distillation (parl only; group: the recipe of the SFT) ----------------------------------------------------------------------
+# -- Stage II: distillation (parl only; decision: the recipe of the SFT) ----------------------------------------------------------------------
 # The optimiser's other settings (AdamW b1 / b2 / eps / weight decay, gradient clipping) are configs/algo/sft.yaml's. The Adam state is kept from one round to the next.
 distill_lr: 2.5e-5          # constant (paper: 5e-5, 1e-5 for the kitchens; "reduced" for OpenVLA without a value)
 distill_batch_size: 64
-distill_micro_batch_size: 4      # rows per pass (sets the memory only, not the optimisation). Probe of 15 Nov. 2026 (JAX limited to 22.3 GiB, half of the L40S): the compiler needs 21.9 / 22.3 GiB at 16 / 8 (does not fit), 21.1 at 4 (ran, peak at the limit), 20.4 at 2; 9.4 s per step at 4
+distill_micro_batch_size: 4      # rows per pass (sets the memory only, not the optimisation). Probe of 15 Nov. 2026 (JAX limited to 22.3 GiB, half of the L40S): the compiler needs 21.9 / 22.3 GiB at 16 / 8 (does not fit), 21.1 at 4 (ran, peak at the limit), 20.4 at 2; 9.3 s per step at 4
 distill_epochs: 1           # epochs over the whole buffer (warm-up included) per round
 
 # -- Evaluation -----------------------------------------------------------------------------------------------------------------------
 eval_episodes: 100      # the same starting states as the SFT evaluations
-eval_every_rounds: 5    # an evaluation after the warm-up (round 0), then every this many collection rounds, and after the last one (group, 15 Nov. 2026: 0, 5, 10 for 10 rounds). Each takes about 8 min
+eval_every_rounds: 5    # an evaluation after the warm-up (round 0), then every this many collection rounds, and after the last one (decision: rounds 0, 5, 10 for 10 rounds). Each takes about 8 min
 
 # -- Logging, output ------------------------------------------------------------------------------------------------------------------
 seed: 0

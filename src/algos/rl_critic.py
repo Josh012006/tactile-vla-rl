@@ -144,7 +144,7 @@ def q_values(net: CriticNet, params: dict, state: Dict[str, jnp.ndarray], action
 
 
 def soft_update(state: CriticState, tau: float) -> CriticState:
-    """The delayed target network: target <- tau * params + (1 - tau) * target (paper Eq. 3.3's delayed target Q; tau = 0.005, group)."""
+    """The delayed target network: target <- tau * params + (1 - tau) * target (paper Eq. 3.3's delayed target Q; tau = 0.005, a decision: the paper gives none)."""
     if not 0 < tau <= 1:
         raise ValueError("tau must be in (0, 1]")
     return CriticState(params=state.params, target_params=jax.tree.map(lambda t, p: (1 - tau) * t + tau * p, state.target_params, state.params))

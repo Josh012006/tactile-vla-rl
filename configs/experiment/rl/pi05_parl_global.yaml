@@ -1,7 +1,7 @@
 # RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE PegInsert task: PA-RL variant A (global optimisation: top-m of k = 32 by Q, then distillation, no gradient ascent).
-# Touch is NOT in the VLA (the SFT checkpoint is the same for every run); `use_touch` is the critic's: false here, the tactile variant is this file with it true.
+# Touch is NOT in the VLA (the SFT checkpoint is the same for every run); the critic's touch inputs (`critic_use_tactile`, `critic_use_force`) are off here, and a tactile variant is this file with them on.
 # Everything not written here is configs/algo/rl.yaml (the paper's values); the model is configs/model/pi05.yaml. The SFT checkpoint to start from (`start: {run, step}`) is
-# decided before the first launch (docs/algos/rl.md); nothing is launched without Josue's go.
+# given on the command line (`--start <SFT run> <step>`, jobs/job_rl_*.sh), so that one experiment file serves every starting point (docs/algos/rl.md).
 name: peg_insert_pi05_parl_global
 description: "pi0.5 PA-RL variant A (global), PegInsert, one online critic, no touch"
 model: pi05
