@@ -43,11 +43,13 @@ step_reward: -1.0                   # per plan until success; 0 at success (pape
 cal_ql_alpha: 0.01                  # Cal-QL regulariser weight (paper B.1, CALVIN and real robot; group: as close to the paper as possible)
 mixing_ratio: 0.5                   # share of each critic batch taken from the warm-up data (paper B.1)
 hl_gauss: false                     # distributional critic, only if the Q values explode (paper B.1)
-# Touch seen by the critic (src/touch/features.py: the same three switches as every component of the system; all off = the task alone). The vector [ft_force (3) | gripper_effort (1) | tactile (56)],
-# each entry scaled by sign(x) * log1p(|x|), is concatenated to the state feature after the image encoders; nothing else changes (group: the comparison with / without touch is this switch).
+# Touch seen by the critic (src/touch/features.py: the same three switches as every component of the system; all off = the task alone). The vector [force | tactile (56)], force = [ft_force (3) |
+# gripper_effort (1)] (measured) or the 7 joint tracking residuals (proxy), each entry scaled by sign(x) * log1p(|x|), is concatenated to the state feature after the image encoders; nothing else
+# changes (group: the comparison with / without touch is this switch).
 critic_use_tactile: false           # the taxels (robot robotiq_2f85_tsf only)
-critic_use_force: false             # wrist force sensor + gripper effort (Robotiq robots)
-critic_force_mode: measured         # only "measured" is implemented
+critic_use_force: false             # the force: wrist force sensor + gripper effort (Robotiq robots), or the proxy (critic_force_mode)
+critic_force_mode: measured         # "measured" (4 values read from the sensors) | "proxy" (7 values estimated from the encoders: (last commanded joint target - measured joint) / 0.02 rad, the principle of
+#                                     arXiv 2610.23849; no force sensor needed. Does not include the velocity term of an impedance law nor a history: src/touch/features.py)
 
 # -- Warm-up of the critic before it ranks or distills anything (group) -------------------------------------------------------------------
 warmup_episodes: 50     # episodes of the base VLA (paper: 50 rollouts for OpenVLA); a multiple of envs_per_batch
@@ -68,4 +70,4 @@ eval_every_rounds: 5    # an evaluation after the warm-up (round 0), then every 
 seed: 0
 wandb_mode: online      # online / offline / disabled, as the SFT (src/algos/tracking.py)
 wandb_project: tactile-vla-rl
-output_root: runs/rl/probing        # the main runs are the experiment files of configs/experiment/rl/, which put theirs in runs/rl/peg_insert 
+output_root: runs/rl/probing        # the main runs are the experiment files of configs/experiment/rl/, which put theirs in runs/rl/peg_insert

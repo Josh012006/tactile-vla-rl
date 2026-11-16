@@ -20,7 +20,7 @@ checkpoint: gs://openpi-assets/checkpoints/pi05_droid_jointpos          # params
 #                 structure: use the same value wherever a checkpoint trained with it is loaded.
 #   use_tactile   the 56 taxels (extra/tactile) are given to this component.            Default false.
 #   use_force     the force signals (extra/ft_force, extra/gripper_effort) are given to it.   Default false.
-#   force_mode    measured | proxy. `proxy` (force estimated instead of read, arXiv 2610.23849) is routed but not implemented.
+#   force_mode    measured | proxy. `proxy`: the force is estimated from the encoders instead of read (7 joint tracking residuals, arXiv 2610.23849's principle: src/touch/features.py).
 # Touch is OFF everywhere: this is the task-only baseline. Turning it on needs a robot with the signals (robotiq_2f85_tsf for the taxels)
 # and an injection for the component (src/touch/injection: none is written yet, a component that asks for touch stops with an error that
 # says so). Command-line / algorithm overrides use the same names: vlm.use_lora=false, action_head.use_tactile=true, ...

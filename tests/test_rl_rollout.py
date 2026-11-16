@@ -116,6 +116,76 @@ def test_the_touch_of_the_critic_is_stored_with_the_states_when_the_critic_sees_
         assert c.episode.touch.shape == (c.episode.plans + 1, 4)
 
 
+class LaggingEnv(FakeEnv):
+    """A FakeEnv whose joints only go half way to the commanded target each step (q <- q + 0.5 (a - q)): a non-zero tracking residual. Keeps what was commanded and the joints it saw."""
+
+    def __init__(self, success_at):
+        super().__init__(success_at)
+        self.commanded, self.q_seen = [], []
+
+    def reset(self, seed=0, round=0):
+        out = super().reset(seed, round)
+        self.commanded, self.q_seen = [], [self.q.copy()]
+        return out
+
+    def step(self, actions, auto_reset=False):
+        self.commanded.append(np.array(actions, np.float32))
+        lagged = np.array(actions, np.float32)
+        lagged[:, :7] = self.q + 0.5 * (lagged[:, :7] - self.q)
+        out = super().step(lagged, auto_reset)
+        self.q_seen.append(self.q.copy())
+        return out
+
+
+def _proxy(prev, q):
+    raw = (prev - q) / 0.02
+    return np.sign(raw) * np.log1p(np.abs(raw))
+
+
+def test_the_proxy_critic_sees_the_residual_between_the_last_command_and_the_joints_at_every_stored_state():
+    actor, cfg, net, critic = actor_of(critic_use_force=True, critic_force_mode="proxy")
+    assert cfg.critic_touch.dim == 7 and actor.touch.needs_previous_target
+    env = LaggingEnv([MAX_STEPS + 5, 10, 3])                                         # a time-out, a success after 10 steps (plans at 0, 4, 8), one after 3
+    collected, _ = RR.collect_round(env, actor, mode="argmax", params=critic.params, seed=0, round_id=0, replan=REPLAN)
+    for c in collected:
+        e, t_end = c.env, c.steps
+        times = [k * REPLAN for k in range(c.episode.plans)] + [t_end]                 # the plans, then the last state
+        assert c.episode.touch.shape == (len(times), 7)
+        for row, t in zip(c.episode.touch, times):
+            prev = env.q_seen[0][e] if t == 0 else env.commanded[t - 1][e, :7]         # nothing commanded yet at step 0: the joints themselves
+            assert np.allclose(row, _proxy(prev, env.q_seen[t][e]), atol=1e-5), (e, t)
+        assert not np.any(c.episode.touch[0]) and np.any(c.episode.touch[1])           # zero at the start, a real residual afterwards (the arm lags)
+
+
+def test_the_proxy_is_not_asked_of_a_critic_that_does_not_use_it():
+    actor, cfg, net, critic = actor_of(critic_use_force=True)
+    assert not actor.touch.needs_previous_target and not RR.OptimisingPolicy(actor, critic.params).uses_previous_target
+    assert RR.OptimisingPolicy(actor_of(critic_use_force=True, critic_force_mode="proxy")[0], critic.params).uses_previous_target
+
+
+def test_the_evaluation_gives_the_proxy_critic_the_last_command_and_leaves_the_others_alone():
+    actor, cfg, net, critic = actor_of(method="best_of_n", keep_top=1, local_steps=0, rollout_selection="argmax", critic_use_force=True, critic_force_mode="proxy")
+    seen = []
+    original = actor.act
+
+    def spy(obs, *args, **kwargs):
+        seen.append({k: np.array(v) for k, v in obs.items() if k in ("client/previous_joint_target", "observation/joint_position")})
+        return original(obs, *args, **kwargs)
+
+    actor.act = spy
+    env = LaggingEnv([MAX_STEPS + 5, MAX_STEPS + 5])
+    RR.evaluate(actor, critic.params, env, [1, 2], replan=REPLAN, max_steps=MAX_STEPS, master_seed=42)
+    assert len(seen) == MAX_STEPS // REPLAN and all("client/previous_joint_target" in s for s in seen)
+    assert np.array_equal(seen[0]["client/previous_joint_target"], seen[0]["observation/joint_position"])          # the first plan: zero residual
+    assert np.allclose(seen[1]["client/previous_joint_target"], env.commanded[REPLAN - 1][:, :7])                  # the next: what was commanded last
+    plain, _, _, plain_critic = actor_of(method="best_of_n", keep_top=1, local_steps=0, rollout_selection="argmax", critic_use_force=True)
+    seen.clear()
+    original_plain = plain.act
+    plain.act = lambda obs, *a, **k: (seen.append(set(obs)), original_plain(obs, *a, **k))[1]
+    RR.evaluate(plain, plain_critic.params, LaggingEnv([MAX_STEPS + 5, MAX_STEPS + 5]), [1, 2], replan=REPLAN, max_steps=MAX_STEPS, master_seed=42)
+    assert seen and all("client/previous_joint_target" not in keys for keys in seen)
+
+
 def test_store_round_fills_the_buffer_and_the_cache_for_exactly_the_states_that_need_candidates():
     actor, cfg, net, critic = actor_of()
     collected, _ = RR.collect_round(FakeEnv([10, MAX_STEPS + 5, 3]), actor, mode="vla", seed=0, round_id=0, replan=REPLAN)

@@ -30,6 +30,7 @@ from src.algos.rl_buffer import Episode, ReplayBuffer
 from src.algos.rl_candidates import CandidateCache, CandidateSampler
 from src.algos.rl_config import RLConfig
 from src.envs import protocol as P
+from src.eval.rollout import with_previous_target
 from src.models.interface import Candidates, Plan, num_envs_of, take
 
 MODES = ("vla", "softmax", "argmax")
@@ -111,6 +112,7 @@ class OptimisingPolicy:
         if mode == "softmax":
             raise ValueError("an evaluation takes the argmax (or the VLA alone), not a sample")
         self.actor, self.params, self.mode = actor, params, mode
+        self.uses_previous_target = actor.touch.needs_previous_target      # the force proxy of the critic: src/eval/rollout.py then adds the last commanded joint targets
         self.info = actor.policy.info
         self.logs: List[Dict[str, float]] = []
 
@@ -159,6 +161,10 @@ def collect_round(env, actor: RLActor, *, mode: str, params=None, seed: int, rou
     model_ms, logs = 0.0, []
     touch = actor.touch
 
+    def with_prev(obs):
+        """The observation + the joint targets last commanded (the force proxy of the critic, src/touch/features.py): `actions` holds the last action sent to each environment."""
+        return with_previous_target(obs, actions, ep_steps) if touch.needs_previous_target else obs
+
     def record(obs, idx):
         sub = take(obs, idx)
         state = critic_state_from_obs(sub, touch)
@@ -174,12 +180,13 @@ def collect_round(env, actor: RLActor, *, mode: str, params=None, seed: int, rou
     while t < max_steps and not ended.all():
         need = [e for e in range(n) if not ended[e] and (targets_now[e] is None or used[e] >= replan)]
         if need:
-            obs_need = take(res.obs, need)
+            obs_now = with_prev(res.obs)
+            obs_need = take(obs_now, need)
             step_key = None if key is None else jax.random.fold_in(key, t)
             acted = actor.act(obs_need, prompt, [rollout_seed(seed, round_id, e, len(chunks[e])) for e in need], mode, params, step_key, pad_to=pad_to)
             model_ms += acted.infer_ms
             logs.append(acted.logs)
-            record(res.obs, need)
+            record(obs_now, need)
             for j, e in enumerate(need):
                 chunks[e].append(acted.normalized[j])
                 cand_parts[e].append(Candidates(normalized=acted.candidates.normalized[j:j + 1], states=acted.candidates.states[j:j + 1], targets=acted.candidates.targets[j:j + 1], infer_ms=0.0))
@@ -193,7 +200,7 @@ def collect_round(env, actor: RLActor, *, mode: str, params=None, seed: int, rou
         t += 1
         newly = [e for e in range(n) if not ended[e] and bool(res.done[e])]
         if newly:
-            record(res.next_obs(), newly)
+            record(with_prev(res.next_obs()), newly)
             success[newly] = np.asarray(res.success)[newly]
             ended[newly] = True
     if not ended.all():

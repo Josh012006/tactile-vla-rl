@@ -23,6 +23,14 @@ def looks_like(raw_chunk: np.ndarray, q_plan: np.ndarray) -> dict:
     return {"mean_abs_raw": d_off, "mean_abs_raw_minus_state": d_abs, "looks_like": "offsets" if d_off < d_abs else "absolute"}
 
 
+def with_previous_target(obs: dict, actions: np.ndarray, steps_done: Sequence[int]) -> dict:
+    """`obs` (N environments) + `client/previous_joint_target`, what a force PROXY reads (src/touch/features.py): the joint targets last commanded to each environment (the first 7 values of the
+    last action sent), and the measured joints themselves (a zero residual) for an environment that has not acted yet. `actions`, `steps_done`: indexed like `obs` (all N)."""
+    q = np.asarray(obs[P.JOINT_POSITION], np.float32)[:, :7]
+    acted = np.asarray(steps_done) > 0
+    return {**obs, P.PREVIOUS_TARGET: np.where(acted[:, None], np.asarray(actions, np.float32)[:, :7], q).astype(np.float32)}
+
+
 def run_rollout(env, policy: VLAPolicy, steps: int, replan: int, seed: int = 0,
                 on_step: Optional[Callable[[int, object, List[int]], None]] = None, *, round_id: int = 0, active: Optional[Sequence[bool]] = None,
                 row_seeds: Optional[Callable[[int, int], int]] = None, pad_to: Optional[int] = None,
@@ -30,6 +38,8 @@ def run_rollout(env, policy: VLAPolicy, steps: int, replan: int, seed: int = 0,
     """One round (one episode per environment) driven by `policy` (src/models/interface.py: one batched call for the environments that
     need a new chunk). `env` is a VectorEnvClient. A chunk is executed `replan` steps, then the model is called again from the new
     observation. Stops at `steps` steps or when every episode has ended. auto_reset is off: nothing starts by itself.
+    A policy with `uses_previous_target` (a component with the force proxy) is given `client/previous_joint_target` with every observation (`with_previous_target`); the others see the
+    observation as the server sent it.
     `on_step(t, res, plans_per_env)` is called after the reset (t = 0) and after every step: used to record the video.
 
     The round is `reset(seed=seed, round=round_id)`: the start of every environment is a function of those, of the number of environments and of its index.
@@ -80,7 +90,8 @@ def run_rollout(env, policy: VLAPolicy, steps: int, replan: int, seed: int = 0,
             if pad_to is not None:
                 kwargs["pad_to"] = pad_to
             t_call = time.monotonic()
-            plan = policy.plan(take(res.obs, need), prompt, **kwargs)
+            obs_in = with_previous_target(res.obs, actions, [len(x) for x in track]) if getattr(policy, "uses_previous_target", False) else res.obs
+            plan = policy.plan(take(obs_in, need), prompt, **kwargs)
             wall_ms = 1e3 * (time.monotonic() - t_call)           # includes the conversions around the model call
             valid = getattr(policy, "last_valid", None)
             for k, e in enumerate(need):

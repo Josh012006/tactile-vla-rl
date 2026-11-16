@@ -58,9 +58,9 @@ def test_bad_values_are_refused(cfg):
         parse_model_settings(cfg)
 
 
-def test_the_force_proxy_is_refused_at_parse_time_before_anything_is_built():
-    with pytest.raises(NotImplementedError, match="proxy"):
-        parse_model_settings({"family": "pi05", "action_head": {"use_force": True, "force_mode": "proxy"}})
+def test_the_force_proxy_is_parsed_like_the_measured_force():
+    settings = parse_model_settings({"family": "pi05", "action_head": {"use_force": True, "force_mode": "proxy"}})
+    assert settings.touch_specs["action_head"].dim == 7 and settings.touch_specs["action_head"].needs_previous_target
 
 
 @pytest.mark.parametrize("old", [{"use_lora": True}, {"lora_rank": {"vlm": 16}}])

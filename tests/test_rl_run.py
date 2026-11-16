@@ -62,6 +62,16 @@ def leaves(tree):
     return [np.asarray(x) for x in jax.tree.leaves(tree)]
 
 
+@pytest.mark.parametrize("extra", [{}, {"method": "parl", "keep_top": 2, "local_steps": 2, "local_lr": 1e-2, "rollout_selection": "softmax", "distill_batch_size": 4, "distill_micro_batch_size": 2,
+                                          "distill_lr": 0.05}])
+def test_a_run_whose_critic_sees_the_force_proxy_goes_through_warm_up_rounds_and_evaluations(tmp_path, extra):
+    """The proxy needs the last command in the rollout loop AND in the evaluation's: both run (warm-up with the VLA alone, online rounds, evaluations), with the 7-value vectors in the buffer."""
+    run, cfg = make_run(tmp_path, policy=FakeTrainablePolicy() if extra else None, critic_use_force=True, critic_force_mode="proxy", **extra)
+    summary = run.run()
+    assert summary["stage"] == 2 and not summary["stopped"] and summary["evaluated"] == [0, 1, 2]
+    assert cfg.critic_touch.dim == 7 and run.buffer.touch.shape[1] == 7 and np.all(np.isfinite(run.buffer.touch[:len(run.buffer)]))
+
+
 def test_a_run_goes_through_the_warm_up_the_rounds_and_the_evaluations_in_order(tmp_path):
     log, opener = ListLog(), Opener()
     run, cfg = make_run(tmp_path, log, opener)

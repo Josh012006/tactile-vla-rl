@@ -84,8 +84,9 @@ def test_the_critics_touch_is_the_systems_touch_spec():
         rc.load_rl_config(overrides={"critic_use_tactile": "false"})                                   # a string would be truthy: refused
     with pytest.raises(ValueError, match="no effect"):
         rc.load_rl_config(overrides={"critic_force_mode": "proxy"})
-    with pytest.raises(NotImplementedError):
-        rc.load_rl_config(overrides={"critic_use_force": True, "critic_force_mode": "proxy"})
+    proxy = rc.load_rl_config(overrides={"critic_use_force": True, "critic_force_mode": "proxy"}).critic_touch
+    assert proxy.needs_previous_target and proxy.dim == 7
+    assert rc.load_rl_config(overrides={"critic_use_force": True, "critic_use_tactile": True, "critic_force_mode": "proxy"}).critic_touch.dim == 63
 
 
 def test_best_of_n_cannot_be_given_what_it_does_not_do():

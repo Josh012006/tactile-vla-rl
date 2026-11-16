@@ -222,6 +222,11 @@ class VLAPolicy(abc.ABC):
     info: ModelInfo
     touch: Mapping[str, TouchSpec] = {}        # component -> TouchSpec of the components that use touch (set by the subclass from its YAML)
 
+    @property
+    def uses_previous_target(self) -> bool:
+        """A component of this policy has the force proxy: the rollout loop (src/eval/rollout.py) must add `client/previous_joint_target` to the observation it gives `plan`."""
+        return any(spec.needs_previous_target for spec in self.touch.values())
+
     @abc.abstractmethod
     def raw_chunks(self, rows: List[dict], num_samples: int, row_seeds: Optional[Sequence[int]] = None, pad_to: Optional[int] = None) -> Tuple[np.ndarray, float]:
         """`rows`: one openpi-format observation per environment (`rows_of`: `to_openpi_obs` + the touch vectors). Returns the model's own chunks (N, S, H, D >= 8)

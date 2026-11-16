@@ -142,3 +142,38 @@ def test_on_env_done_is_called_once_per_episode_when_it_ends_with_its_own_summar
         out = rollout.run_rollout(env, Seeded(), steps=20, replan=4, seed=5, on_env_done=lambda e, summ: done.append((e, summ["steps"], summ["success"])))
     assert sorted(e for e, _, _ in done) == [0, 1, 2]
     assert {(e, st, ok) for e, st, ok in done} == {(e["env"], e["steps"], e["success"]) for e in out["envs"]}
+
+
+def test_the_last_commanded_target_is_given_only_to_a_policy_that_asks_for_it(servers):  # noqa: F811
+    """The force proxy (src/touch/features.py) reads `client/previous_joint_target`: zero residual (the joints themselves) at the first plan, then the target of the last step sent.
+    A policy without a proxy component (every SFT evaluation) gets the observation exactly as the server sent it."""
+    from src.touch.features import TouchSpec
+    s = servers(num_envs=1, max_steps=50, seed=0)
+    keys = (P.PREVIOUS_TARGET, P.JOINT_POSITION)
+
+    def model(obs):
+        chunk = np.zeros((6, 8), np.float32)
+        chunk[:, 0] = float(obs[P.JOINT_POSITION][0]) + 0.01
+        return {"actions": chunk}
+
+    def run(touch):
+        seen = []
+
+        class Recording(CallablePolicy):
+            def plan(self, obs, prompt, num_samples=1, **kwargs):
+                seen.append({k: np.array(v) for k, v in obs.items() if k in keys})
+                return super().plan(obs, prompt, num_samples, **kwargs)
+
+        policy = Recording(model, {"output_semantics": "absolute_targets", "action_horizon": 6})
+        policy.touch = touch
+        with VectorEnvClient([s.endpoint]) as env:
+            rollout.run_rollout(env, policy, steps=12, replan=6)
+        return policy, seen
+
+    plain, seen_plain = run({"action_head": TouchSpec(use_tactile=False)})
+    assert not plain.uses_previous_target and len(seen_plain) == 2 and all(P.PREVIOUS_TARGET not in o for o in seen_plain)
+    asking, (first, second) = run({"action_head": TouchSpec(use_force=True, force_mode="proxy")})
+    assert asking.uses_previous_target
+    assert first[P.PREVIOUS_TARGET].shape == (1, 7) and np.array_equal(first[P.PREVIOUS_TARGET][0], np.asarray(first[P.JOINT_POSITION][0], np.float32)[:7])
+    assert not np.array_equal(second[P.PREVIOUS_TARGET], np.asarray(second[P.JOINT_POSITION], np.float32)[:, :7])
+    assert np.isclose(second[P.PREVIOUS_TARGET][0, 0], first[P.JOINT_POSITION][0][0] + 0.01, atol=1e-5)             # the last target of the first chunk: joint 0 at plan time + 0.01

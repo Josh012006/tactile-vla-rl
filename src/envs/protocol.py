@@ -58,6 +58,9 @@ FORCE_THRESHOLD = "extra/force_threshold"
 PEG_SOCKET_OFFSET = "extra/peg_socket_offset"
 GRIPPER_EFFORT = "extra/gripper_effort"     # robots with a motorised finger joint (Robotiq) only
 TACTILE = "extra/tactile"                   # robots with taxels only: (2, 7, 4) N, [0] left finger, [1] right, row 0 = fingertip
+# NOT sent by the server: added by the CLIENT (src/eval/rollout.py, src/algos/rl_rollout.py) for a component whose touch is the force PROXY (src/touch/features.py):
+# (N, 7) the joint targets the arm was last commanded (the first 7 values of the last action sent), the joint positions themselves at the first step of an episode.
+PREVIOUS_TARGET = "client/previous_joint_target"
 
 ObsSpec = Dict[str, Tuple[Tuple[int, ...], str]]    # key -> (shape of ONE environment, numpy dtype name)
 
