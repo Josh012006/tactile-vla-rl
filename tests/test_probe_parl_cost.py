@@ -57,3 +57,20 @@ def test_the_two_parl_experiments_have_a_distillation_and_the_default_one_is_var
     assert load_rl_experiment(PP.DEFAULT_EXPERIMENT)[1].variant == "parl_global_local"
     assert load_rl_experiment("configs/experiment/rl/pi05_parl_global.yaml")[1].distills
     assert not load_rl_experiment("configs/experiment/rl/pi05_best_of_n.yaml")[1].distills
+
+
+def test_the_compiler_is_asked_for_the_memory_of_each_micro_batch_and_the_largest_that_fits_is_used():
+    cfg = load_rl_config(overrides=TINY)
+    gib = 2 ** 30
+    lines = []
+    m = PP.measure_parl(FakeTrainablePolicy(), cfg, None, states=16, refresh_states=4, state_dim=3, plans=3, micros=(4, 2, 3), memory=lambda: {"bytes_in_use": gib, "bytes_limit": 8 * gib}, say=lines.append)
+    gm = m["grad_memory"]
+    assert set(gm["micro"]) == {4, 2} and gm["chosen"] == 4 == m["micro_used"]                                              # 3 does not divide the batch of 4
+    assert all(r["fits"] and r["need_gib"] >= gm["resident_gib"] for r in gm["micro"].values()) and any("micro-batch 4" in line for line in lines)
+
+
+def test_nothing_runs_when_no_micro_batch_fits():
+    cfg = load_rl_config(overrides=TINY)
+    with pytest.raises(SystemExit, match="no micro-batch fits"):
+        PP.measure_parl(FakeTrainablePolicy(), cfg, None, states=16, refresh_states=4, state_dim=3, plans=3, micros=(4, 2), memory=lambda: {"bytes_in_use": 8 * 2 ** 30, "bytes_limit": 8 * 2 ** 30},
+                        say=lambda s: None)

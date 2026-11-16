@@ -10,7 +10,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=01:30:00
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --requeue
 
@@ -22,7 +22,7 @@ nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
 source .venv/bin/activate
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.5
+export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.5}"   # sbatch --export=ALL,XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 to try more of the card
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 python -m scripts.probe_parl_cost --save-dir "${SLURM_TMPDIR:-/tmp}" "$@" &
 child=$!

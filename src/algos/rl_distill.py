@@ -53,7 +53,8 @@ class VLATrainer:
         self.tx, _ = sft.make_optimizer(sft_cfg)                                   # AdamW + clipping of configs/algo/sft.yaml, constant learning rate
         self.opt_state = self.tx.init(self.trainable)
         self.updates = 0
-        self.n_micro = cfg.distill_batch_size // cfg.distill_micro_batch_size
+        self.micro = self.n_micro = 0
+        self.set_micro(cfg.distill_micro_batch_size)
         self.draw_key = jax.random.key(cfg.seed + DRAW_SEED_OFFSET)
         self._prepare = jax.jit(lambda rng, observation, actions: policy.prepare_loss_batch(rng, observation, actions, train=True))
 
@@ -69,17 +70,23 @@ class VLATrainer:
             return jax.tree.map(jnp.add, total, grads)
 
         @functools.partial(jax.jit, donate_argnums=(0, 1))
-        def apply_fn(trainable, opt_state, grads):
-            grads = jax.tree.map(lambda g: g / self.n_micro, grads)
+        def apply_fn(trainable, opt_state, grads, n_micro):
+            grads = jax.tree.map(lambda g: g / n_micro, grads)
             updates, opt_state = self.tx.update(grads, opt_state, trainable)
             return optax.apply_updates(trainable, updates), opt_state, optax.global_norm(grads)
 
         self._grad, self._add, self._apply = grad_fn, add_fn, apply_fn
 
+    def set_micro(self, micro: int) -> None:
+        """Rows per pass (the memory only: the batch, the draws and the update are the same). Any time between steps."""
+        if micro < 1 or self.cfg.distill_batch_size % micro:
+            raise ValueError(f"distill_batch_size ({self.cfg.distill_batch_size}) must be a multiple of the micro-batch ({micro})")
+        self.micro, self.n_micro = int(micro), self.cfg.distill_batch_size // int(micro)
+
     def step(self, observation, actions) -> Dict[str, jnp.ndarray]:
         """One update on a batch of `distill_batch_size` rows (`policy.training_batch_from_normalized`)."""
         observation, draws = self._prepare(jax.random.fold_in(self.draw_key, self.updates), observation, actions)
-        micro, total, losses = self.cfg.distill_micro_batch_size, None, []
+        micro, total, losses = self.micro, None, []
         for i in range(self.n_micro):
             rows = slice(i * micro, (i + 1) * micro)
             cut = lambda x, rows=rows: x[rows]                                                          # noqa: E731
@@ -88,7 +95,7 @@ class VLATrainer:
             del grads
             losses.append(loss)
         del observation, draws
-        self.trainable, self.opt_state, grad_norm = self._apply(self.trainable, self.opt_state, total)
+        self.trainable, self.opt_state, grad_norm = self._apply(self.trainable, self.opt_state, total, self.n_micro)
         total = None
         self.updates += 1
         return {"loss": jnp.mean(jnp.stack(losses)), "grad_norm": grad_norm}

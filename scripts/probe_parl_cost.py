@@ -52,8 +52,32 @@ def stage_states(cfg, plans: int) -> List[int]:
     return [(cfg.warmup_episodes + r * cfg.envs_per_batch) * plans for r in range(1, cfg.rounds + 1)]
 
 
+def grad_memory(distiller, buf, ids, micros: Sequence[int], memory: Callable[[], dict] = device_memory, margin: float = 0.03) -> Dict[str, object]:
+    """What XLA itself says the gradient pass needs at each micro-batch size, WITHOUT running it (`lower().compile().memory_analysis()`: the compiler's buffer plan, exact for the compiled program).
+    A pass needs, on top of what is resident (the VLA, the trainable copy, Adam, the critic: `bytes_in_use` now), its temporaries and its output (the loss and one gradient tree), and the running sum of the
+    micro-batches is a second tree: need = resident + temp + 2 x output. The largest micro-batch whose need is under the allocator's limit (less `margin`) is `chosen` (None if even the smallest does not fit)."""
+    import jax
+    trainer, batch = distiller.trainer, distiller.cfg.distill_batch_size
+    h = distiller.policy.info.action_horizon
+    obs, prompts = buf.observations(ids[:batch])
+    observation, actions = distiller.policy.training_batch_from_normalized(obs, prompts, np.zeros((batch, h, 8), np.float32))
+    observation, draws = trainer._prepare(jax.random.key(0), observation, actions)
+    mem = memory()
+    resident, limit = mem.get("bytes_in_use", 0), mem.get("bytes_limit", 0)
+    rows, chosen = {}, None
+    for micro in sorted({m for m in micros if 0 < m <= batch and batch % m == 0}, reverse=True):
+        cut = lambda x: x[:micro]                                                                                                  # noqa: E731
+        stats = trainer._grad.lower(trainer.trainable, trainer.frozen, jax.tree.map(cut, observation), actions[:micro], jax.tree.map(cut, draws)).compile().memory_analysis()
+        temp, out = int(getattr(stats, "temp_size_in_bytes", 0) or 0), int(getattr(stats, "output_size_in_bytes", 0) or 0)
+        need = resident + temp + 2 * out
+        rows[micro] = {"temp_gib": round(temp / 2 ** 30, 2), "output_gib": round(out / 2 ** 30, 2), "need_gib": round(need / 2 ** 30, 2), "fits": bool(limit and need <= limit * (1 - margin))}
+        if chosen is None and rows[micro]["fits"]:
+            chosen = micro
+    return {"resident_gib": round(resident / 2 ** 30, 2), "limit_gib": round(limit / 2 ** 30, 2), "micro": rows, "chosen": chosen}
+
+
 def measure_parl(policy, cfg, model_cfg: Optional[dict], *, states: int, refresh_states: int, state_dim: int = 8, plans: int = SYNTHETIC_PLANS, seed: int = 0,
-                 save_dir: Optional[Path] = None, clock: Callable[[], float] = time.monotonic, memory: Callable[[], dict] = device_memory, say: Callable[[str], None] = print) -> Dict[str, object]:
+                 save_dir: Optional[Path] = None, micros: Sequence[int] = (), clock: Callable[[], float] = time.monotonic, memory: Callable[[], dict] = device_memory, say: Callable[[str], None] = print) -> Dict[str, object]:
     """Time the stages of PA-RL's Stage II on `policy` with synthetic states. `states`: about how many the annotation and the training work on (the buffer holds the episodes that make them);
     `refresh_states`: how many the timed refresh redraws."""
     import jax
@@ -75,6 +99,17 @@ def measure_parl(policy, cfg, model_cfg: Optional[dict], *, states: int, refresh
     out: Dict[str, object] = {"variant": cfg.variant, "states": int(len(ids)), "memory_before": memory()}
     say(f"[{cfg.variant}] {len(ids)} synthetic states, batch {cfg.distill_batch_size} (micro {cfg.distill_micro_batch_size}), k={cfg.num_candidates} keep_top={cfg.keep_top} local_steps={cfg.local_steps}")
 
+    out["memory_resident"] = memory()
+    if micros:
+        gm = out["grad_memory"] = grad_memory(distiller, buf, ids, micros, memory)
+        say(f"  gradient pass, from the compiler (resident {gm['resident_gib']} GiB of {gm['limit_gib']}; need = resident + temporaries + 2 gradient trees):")
+        for m_, r in gm["micro"].items():
+            say(f"    micro-batch {m_:>2}: temporaries {r['temp_gib']:>6} GiB, gradient tree {r['output_gib']} GiB -> need {r['need_gib']:>6} GiB: " + ("fits" if r["fits"] else "DOES NOT FIT"))
+        if gm["chosen"] is None:
+            raise SystemExit("no micro-batch fits in the memory JAX may use (see above): raise XLA_PYTHON_CLIENT_MEM_FRACTION (the env server needs 9-11 GB of the card) or recompute activations")
+        distiller.trainer.set_micro(gm["chosen"])
+        out["micro_used"] = gm["chosen"]
+        say(f"  -> micro-batch {gm['chosen']} for the timed passes (set `distill_micro_batch_size: {gm['chosen']}` for the run)")
     first = distiller.distill(params, key, rng, buf, cache)                         # compiles the annotation and the training step
     out["distill_first"] = {k: first[k] for k in ("states", "steps", "annotate_s", "train_s", "step_s")}
     out["memory_after_first_distill"] = memory()
@@ -138,6 +173,8 @@ def main(argv=None) -> int:
     ap.add_argument("--experiment", default=DEFAULT_EXPERIMENT, metavar="FILE", help=f"the PA-RL experiment to measure (default {DEFAULT_EXPERIMENT}, variant B: the dearer)")
     ap.add_argument("--start", nargs=2, metavar=("RUN", "STEP"), help="the SFT run (folder name or path) and the checkpoint step the VLA starts from (default: the experiment's `start`)")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a key of configs/algo/rl.yaml")
+    ap.add_argument("--micro-sweep", type=int, nargs="*", default=[16, 8, 4, 2], metavar="M", help="micro-batch sizes whose memory the compiler is asked for before anything runs; the largest that fits is used "
+                    "(default 16 8 4 2; no value: skip and use the experiment's `distill_micro_batch_size`)")
     ap.add_argument("--states", type=int, default=512, help="synthetic states annotated and trained on (default 512: 8 steps of 64)")
     ap.add_argument("--refresh-states", type=int, default=64, help="states whose candidates the timed refresh redraws (default 64)")
     ap.add_argument("--plans", type=int, nargs="+", default=[19, 10], help="plans per episode for the estimate (default 19 = 150 steps / 8, the upper bound, and 10)")
@@ -167,7 +204,7 @@ def main(argv=None) -> int:
     print(f"model loaded; memory: {device_memory()}", flush=True)
     scratch = tempfile.mkdtemp(prefix="probe_parl_", dir=args.save_dir) if args.save_dir else None
     try:
-        measured = measure_parl(policy, cfg, model_cfg, states=args.states, refresh_states=args.refresh_states, save_dir=Path(scratch) if scratch else None)
+        measured = measure_parl(policy, cfg, model_cfg, states=args.states, refresh_states=args.refresh_states, save_dir=Path(scratch) if scratch else None, micros=args.micro_sweep)
     except (ValueError, RuntimeError) as err:
         if "RESOURCE_EXHAUSTED" not in str(err):
             raise
