@@ -59,7 +59,7 @@ def test_the_command_line_wins_over_the_experiment():
     ({"keep_top": 40}, "cannot exceed"),
     ({"total_episodes": 975}, "multiple of envs_per_batch"),
     ({"warmup_episodes": 30}, "multiple of envs_per_batch"),
-    ({"distill_batch_size": 60}, "multiple of distill_micro_batch_size"),
+    ({"distill_batch_size": 60, "distill_micro_batch_size": 16}, "multiple of distill_micro_batch_size"),
     ({"critic_cameras": ["exterior", "exterior"]}, "critic_cameras"),
     ({"critic_cameras": ["tactile"]}, "critic_cameras"),
     ({"critic_cameras": "wrist"}, "is a list"),

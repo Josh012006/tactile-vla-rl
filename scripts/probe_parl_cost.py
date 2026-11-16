@@ -84,7 +84,7 @@ def grad_memory(distiller, buf, ids, micros: Sequence[int], memory: Callable[[],
     return {"resident_gib": round(resident / 2 ** 30, 2), "limit_gib": round(limit / 2 ** 30, 2), "micro": rows, "chosen": chosen}
 
 
-def measure_parl(policy, cfg, model_cfg: Optional[dict], *, states: int, refresh_states: int, state_dim: int = 8, plans: int = SYNTHETIC_PLANS, seed: int = 0,
+def measure_parl(policy, cfg, model_cfg: Optional[dict], *, states: int, refresh_states: int, state_dim: int = 32, plans: int = SYNTHETIC_PLANS, seed: int = 0,
                  save_dir: Optional[Path] = None, micros: Sequence[int] = (), clock: Callable[[], float] = time.monotonic, memory: Callable[[], dict] = device_memory, say: Callable[[str], None] = print) -> Dict[str, object]:
     """Time the stages of PA-RL's Stage II on `policy` with synthetic states. `states`: about how many the annotation and the training work on (the buffer holds the episodes that make them);
     `refresh_states`: how many the timed refresh redraws."""
@@ -95,7 +95,7 @@ def measure_parl(policy, cfg, model_cfg: Optional[dict], *, states: int, refresh
     from src.algos.rl_distill import Distiller
     from src.algos.rl_rollout import RLActor
 
-    horizon = policy.info.action_horizon
+    horizon = policy.info.action_horizon                                              # `state_dim`: the width of the state row the sampler returns with the candidates (pi0.5: 32, the padded state; the run reads it off the first collected batch)
     buf, cache = synthetic_data(cfg, episodes=max(1, math.ceil(states / (plans + 1))), plans=plans, seed=seed, horizon=horizon, state_dim=state_dim)
     ids = buf.candidate_ids()
     if len(ids) < cfg.distill_batch_size:
