@@ -8,6 +8,7 @@ import yaml
 
 from src.algos import rl_config as rc
 from src.algos import tracking
+from src.touch.features import TouchSpec
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENTS = sorted((ROOT / "configs" / "experiment" / "rl").glob("*.yaml"))
@@ -36,17 +37,29 @@ def test_the_wandb_modes_are_the_trackings():
     assert tuple(rc.WANDB_MODES) == tuple(tracking.MODES)
 
 
-def test_the_three_experiments_are_the_three_methods():
+def test_the_experiments_are_the_three_methods_and_best_of_n_with_touch():
     found = {}
     for f in EXPERIMENTS:
         exp, cfg = rc.load_rl_experiment(f)
-        found[cfg.variant] = (exp["name"], cfg)
+        found[exp["name"]] = cfg
         assert exp["model"] == "pi05" and f.stem == exp["name"].replace("peg_insert_", "") and cfg.output_root == "runs/rl/peg_insert" and cfg.seed == 42
-    assert set(found) == {"best_of_n", "parl_global", "parl_global_local"}
-    best, a, b = (found[k][1] for k in ("best_of_n", "parl_global", "parl_global_local"))
+    assert set(found) == {"peg_insert_pi05_best_of_n", "peg_insert_pi05_best_of_n_touch", "peg_insert_pi05_parl_global", "peg_insert_pi05_parl_global_local"}
+    best, a, b = (found[k] for k in ("peg_insert_pi05_best_of_n", "peg_insert_pi05_parl_global", "peg_insert_pi05_parl_global_local"))
+    assert (best.variant, a.variant, b.variant) == ("best_of_n", "parl_global", "parl_global_local")
     assert (best.keep_top, best.local_steps, best.rollout_selection, best.distills) == (1, 0, "argmax", False)
     assert (a.keep_top, a.local_steps, a.distills) == (10, 0, True) and (b.keep_top, b.local_steps, b.distills) == (10, 10, True)
-    assert all(c.num_candidates == 32 for c in (best, a, b))                                                             # k = 32 for the three
+    assert all(c.num_candidates == 32 for c in found.values())                                                           # k = 32 for all
+    assert not any(c.critic_touch.enabled for c in (best, a, b))                                                        # no touch in the three methods
+
+
+def test_best_of_n_with_touch_differs_from_best_of_n_by_the_critics_touch_only():
+    _, plain = rc.load_rl_experiment(ROOT / "configs/experiment/rl/pi05_best_of_n.yaml")
+    _, touch = rc.load_rl_experiment(ROOT / "configs/experiment/rl/pi05_best_of_n_touch.yaml")
+    assert touch.critic_touch == TouchSpec(use_tactile=True, use_force=True, force_mode="measured") and touch.critic_touch.dim == 60
+    assert not plain.critic_touch.enabled
+    ignore = ("critic_use_tactile", "critic_use_force", "critic_force_mode")
+    strip = lambda c: {k: v for k, v in dataclasses.asdict(c).items() if k not in ignore}
+    assert strip(plain) == strip(touch)
 
 
 def test_the_command_line_wins_over_the_experiment():

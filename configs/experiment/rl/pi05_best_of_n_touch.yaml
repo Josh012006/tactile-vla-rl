@@ -1,0 +1,20 @@
+# RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE PegInsert task: Best-of-N WITH TOUCH IN THE CRITIC. Identical to pi05_best_of_n.yaml except for the critic's inputs, so that
+# the pair isolates what touch brings: the VLA stays frozen, the argmax of Q over k = 32 candidates is executed (Alg. 2 of the paper without the distillation, global optimisation only).
+# Touch is NOT in the VLA (the SFT checkpoint is the same for every run); the critic receives the taxels (56 values) and the measured force (wrist force sensor + gripper effort, 4 values),
+# each entry scaled by sign(x) * log1p(|x|), concatenated to the state feature (src/touch/features.py, docs/algos/rl.md). The force is the measured one, not the proxy.
+# Needs the robot `robotiq_2f85_tsf` (the default of configs/task/peg_insert_forge.yaml): the server sends the taxels only for it.
+# The SFT checkpoint to start from is given on the command line (`--start <SFT run> <step>`, jobs/job_rl_best_of_n.sh --experiment <this file>); the run folder is the `--run-name`
+# (default: the experiment's `name`, so give one per starting point).
+name: peg_insert_pi05_best_of_n_touch
+description: "pi0.5 Best-of-N, PegInsert, one online critic, tactile + measured force in the critic"
+model: pi05
+set:
+  output_root: runs/rl/peg_insert
+  seed: 42                         # as the SFT main runs
+  method: best_of_n
+  keep_top: 1
+  local_steps: 0
+  rollout_selection: argmax
+  critic_use_tactile: true         # the 56 taxels
+  critic_use_force: true           # ft_force (3) + gripper_effort (1)
+  critic_force_mode: measured      # not "proxy"

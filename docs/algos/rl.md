@@ -72,6 +72,15 @@ Evaluation is the paper's: the VLA WITH action optimisation at inference (so the
 | evaluation schedule | after the warm-up (round 0), then every `eval_every_rounds` = 5 rounds and after the last: rounds 0, 5, 10, about 8 min each (100 fixed episodes, argmax over the VLA's candidates with the critic, on a FRESH server: the starts of the SFT evaluations). The collection server is stopped during an evaluation (one env server at a time: Isaac Sim, the VLA and the critic share one L40S) and started again after it | decision (every 5 rounds, plus the start and the end) |
 | rollout seeds / starts | the warm-up plays the rounds 0 .. W-1 of the collection server's reset sequence, the online round r the round W+r-1: no start is played twice. The noise of the candidates of plan k of environment e in round r is a function of (seed, r, e, k) only | choice (the paper gives nothing on seeds) |
 
+### Experiment set: Best-of-N, with and without touch, on the three demonstration types
+
+Two experiment files, `configs/experiment/rl/pi05_best_of_n.yaml` (no touch) and `pi05_best_of_n_touch.yaml` (taxels + measured force in the critic, no proxy), differ only by the critic's touch inputs (`tests/test_rl_config.py` checks it). The SFT checkpoint is a parameter of the job (`--start <SFT run> <step>`): three starting points (the teleoperated, noisy and scripted SFT runs) x two experiments = 6 runs. The run folder defaults to the experiment's `name`, so each run gets its own `--run-name`:
+
+    sbatch jobs/job_rl_best_of_n.sh --start <SFT run> <step> --run-name bon_<demos>
+    sbatch jobs/job_rl_best_of_n.sh --experiment configs/experiment/rl/pi05_best_of_n_touch.yaml --start <SFT run> <step> --run-name bon_touch_<demos>
+
+The server (`robotiq_2f85_tsf`, the default task) sends the taxels, the force and the gripper effort in every run, so the same server serves both experiments.
+
 ## 4. Metrics logged at every iteration
 
 Candidate Q standard deviation (mean over states, and the distribution), Q mean / min / max and Q minus the Monte-Carlo discounted return of the visited states (over- and under-estimation, as the paper's Fig. 14), TD loss,
