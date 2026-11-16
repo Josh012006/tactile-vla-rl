@@ -35,24 +35,24 @@ EXPERIMENTS = {"best_of_n": "configs/experiment/rl/pi05_best_of_n.yaml", "parl_g
 HORIZON = 16                       # pi0.5's chunk (docs/algos/rl.md)
 
 
-def synthetic_data(cfg, episodes: int, plans: int, seed: int = 0):
+def synthetic_data(cfg, episodes: int, plans: int, seed: int = 0, horizon: int = HORIZON, state_dim: int = 8):
     """A replay buffer of `episodes` episodes of `plans` plans (random images / joints / chunks, half of them warm-up) and a cache holding random candidates for every state that needs them."""
     from src.algos.rl_buffer import Episode, ReplayBuffer
     from src.algos.rl_candidates import CandidateCache
     from src.models.interface import Candidates
     rng = np.random.default_rng(seed)
     touch_dim = cfg.critic_touch.dim
-    buf = ReplayBuffer(episodes * (plans + 1), HORIZON, cfg.gamma, cfg.step_reward, touch_dim=touch_dim)
+    buf = ReplayBuffer(episodes * (plans + 1), horizon, cfg.gamma, cfg.step_reward, touch_dim=touch_dim)
     for i in range(episodes):
         shape = (plans + 1, 224, 224, 3)
         buf.add_episode(Episode(exterior=rng.integers(0, 255, shape, dtype=np.uint8), wrist=rng.integers(0, 255, shape, dtype=np.uint8),
                                 joints=rng.normal(size=(plans + 1, 7)).astype(np.float32), gripper=rng.random((plans + 1, 1)).astype(np.float32),
-                                actions=rng.normal(size=(plans, HORIZON, 8)).astype(np.float32), success=bool(i % 2), prompt="Insert the peg into the socket.",
+                                actions=rng.normal(size=(plans, horizon, 8)).astype(np.float32), success=bool(i % 2), prompt="Insert the peg into the socket.",
                                 touch=rng.normal(size=(plans + 1, touch_dim)).astype(np.float32) if touch_dim else None), warmup=i < episodes // 2)
-    cache = CandidateCache(cfg.num_candidates, HORIZON, 8, capacity=len(buf))
+    cache = CandidateCache(cfg.num_candidates, horizon, state_dim, capacity=len(buf))
     ids = buf.candidate_ids()
-    cands = rng.normal(size=(len(ids), cfg.num_candidates, HORIZON, 8)).astype(np.float32)
-    cache.put(ids, Candidates(normalized=cands, states=np.zeros((len(ids), 8), np.float32), targets=cands, infer_ms=0.0), version=0)
+    cands = rng.normal(size=(len(ids), cfg.num_candidates, horizon, 8)).astype(np.float32)
+    cache.put(ids, Candidates(normalized=cands, states=np.zeros((len(ids), state_dim), np.float32), targets=cands, infer_ms=0.0), version=0)
     return buf, cache
 
 
