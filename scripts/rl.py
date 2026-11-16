@@ -5,7 +5,7 @@
     python -m scripts.rl --experiment <file> --start <run> <step> --set total_episodes=100 --set warmup_critic_steps=500 --run-name probe       # a short probe, in the experiment's output_root
     python -m scripts.rl --resume runs/rl/peg_insert/<run name>                                                               # after a stop or a failure: continues after the last finished stage
 
-Run it through jobs/job_rl.sh (Isaac Sim, the VLA and the critic share one GPU). The experiment file (configs/experiment/rl/*.yaml) says the method and the name of the run; everything else is configs/algo/rl.yaml.
+Run it through jobs/job_rl_best_of_n.sh (Best-of-N) or jobs/job_rl_parl.sh --variant A|B (PA-RL) (Isaac Sim, the VLA and the critic share one GPU). The experiment file (configs/experiment/rl/*.yaml) says the method and the name of the run; everything else is configs/algo/rl.yaml.
 `--start` (or the experiment's `start: {run, step}`) is the SFT checkpoint the VLA starts from: the model is the SFT run's own (its model YAML, its LoRA, its normalisation statistics, compared byte for byte with the copy
 saved in the checkpoint, as in scripts/eval_sft.py).
 
