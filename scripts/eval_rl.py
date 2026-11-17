@@ -3,6 +3,7 @@
     python -m scripts.eval_rl --run runs/rl/peg_insert/peg_insert_pi05_best_of_n                    # every round whose critic (and VLA) were kept, 100 episodes each
     python -m scripts.eval_rl --run <run> --dry-run                                                  # what would be evaluated and what is already done: no GPU, no model, no server
     python -m scripts.eval_rl --run <run> --rounds 0 10 20                                           # only these rounds (0 = after the warm-up: the SFT checkpoint and the first critic)
+    python -m scripts.eval_rl --run <run> --rounds 0 2 --selection vla --output-dir <run>/eval_rl_vla  # the VLA ALONE of these rounds (no critic): its first candidate, to tell what the distillation did
     python -m scripts.eval_rl --run <run> --plot-only --title "PA-RL B"                              # rebuild curve.json / .png / .pdf from the results on disk: no GPU, no server
 
 Run it through jobs/job_eval_rl.sh (an env server is started for each round: Isaac Sim on the same GPU as the policy).
@@ -12,6 +13,9 @@ the critic is critics/round_<r>.msgpack (every round keeps one); the VLA is vlas
 started from for Best-of-N and for round 0 (the VLA never changed then). The policy is the one of the run's own evaluations (src/algos/rl_rollout.py): the VLA's k candidates at each chunk, the optimisation
 of the method (variant B: its local ascent too) and the critic's ARGMAX over the optimised set, one chunk executed per plan. The model is the run's (its model YAML with its overrides, its LoRA, the SFT run's seed
 for the LoRA initialisation), the critic's network is built from the run's own settings.
+`--selection vla` evaluates the VLA alone instead (the first of its k candidates, no optimisation, no critic: the policy of the warm-up): with a PA-RL run it separates what the distillation did to the VLA
+from what the critic's selection adds. The selection is part of the protocol of the output folder, so such an evaluation needs its own --output-dir (its episodes are the same fixed ones: the paired
+comparisons with the evaluation with the critic stay valid on the first batch of --envs-per-server episodes).
 The normalisation statistics are the run's too: the file its model YAML names, which the SFT copied into every checkpoint (assets/), including the ones this run writes (a PA-RL round's VLA): the two are compared
 byte for byte before anything starts, and a difference is refused (scripts/eval_sft.py check_norm_stats). The RL never computes statistics of its own.
 
@@ -95,10 +99,11 @@ def select_jobs(found: Dict[int, Path], rounds: Optional[List[int]]) -> List[Job
 
 
 # -- protocol -----------------------------------------------------------------------------------------------------------------------------------
-def rl_block(cfg: rl_config.RLConfig) -> dict:
+def rl_block(cfg: rl_config.RLConfig, selection: Optional[str] = None) -> dict:
+    """The RL settings that shape a result. `selection`: what the evaluation executes ('argmax' of the critic, or 'vla' alone), the run's `eval_selection` by default."""
     import dataclasses
     raw = dataclasses.asdict(cfg)
-    return {**{k: raw[k] for k in PROTOCOL_KEYS if k in raw}, "variant": cfg.variant}
+    return {**{k: raw[k] for k in PROTOCOL_KEYS if k in raw}, "variant": cfg.variant, "eval_selection": selection or cfg.eval_selection}
 
 
 def build_protocol(args, run_dir: Path, saved: dict, cfg: rl_config.RLConfig, task: dict) -> dict:
@@ -109,7 +114,7 @@ def build_protocol(args, run_dir: Path, saved: dict, cfg: rl_config.RLConfig, ta
         raise SystemExit(f"--replan {replan}: between 1 and the model's chunk length ({horizon})")
     stats = norm_stats_path(model_cfg)
     return {"recipe": RECIPE, "master_seed": int(args.seed), "replan": replan, "max_steps": int(task["max_steps_per_episode"]), "num_envs": int(args.envs_per_server), "model_batch": None,
-            "model_cfg": model_cfg, "norm_stats_sha": file_sha(stats) if stats else None, "task": task, "run": str(run_dir), "rl": rl_block(cfg)}
+            "model_cfg": model_cfg, "norm_stats_sha": file_sha(stats) if stats else None, "task": task, "run": str(run_dir), "rl": rl_block(cfg, getattr(args, "selection", None))}
 
 
 def check_rl_block(saved: Optional[dict], now: dict) -> None:
@@ -148,6 +153,9 @@ def main(argv=None) -> int:
                     help=f"environments in each server, playing together (default {DEFAULT_ENVS_PER_SERVER}); at least --n-episodes keeps a round in ONE batch. Fixed by the folder's protocol")
     ap.add_argument("--workers", type=int, default=1, help="rounds evaluated at the same time (default 1, as for the SFT): one thread, one env server and one policy each")
     ap.add_argument("--replan", type=int, help="steps executed per chunk before the model is called again (default: the run's)")
+    ap.add_argument("--selection", choices=("argmax", "vla"), default=None,
+                    help="what is executed: 'argmax' = the critic's argmax over the optimised candidates (default: the run's eval_selection); 'vla' = the VLA alone (its first candidate, no critic). "
+                         "Part of the folder's protocol: use another --output-dir")
     ap.add_argument("--task-config", default=DEFAULT_TASK, help=f"env server YAML (default {DEFAULT_TASK}); the run's own `env_set` is applied on top, then --env-set")
     ap.add_argument("--env-set", action="append", default=[], metavar="KEY=VALUE", help="override a key of the task YAML for the servers (not num_envs / server_port)")
     ap.add_argument("--save-videos", action="store_true", help="videos of the first --video-episodes episodes of each round in <output-dir>/videos/<round>/")
@@ -177,8 +185,9 @@ def main(argv=None) -> int:
         print(f"curve: {curve_dir / 'curve.png'}, {curve_dir / 'curve.pdf'}, {curve_dir / 'curve.json'}")
         return 0
 
-    if cfg.eval_selection == "softmax":
-        raise SystemExit("eval_selection is softmax: an evaluation takes the argmax")
+    selection = args.selection or cfg.eval_selection
+    if selection == "softmax":
+        raise SystemExit("eval_selection is softmax: an evaluation takes the argmax (or --selection vla)")
     found = discover_rounds(run_dir, cfg, saved["start"]["checkpoint"])
     jobs = select_jobs(found, args.rounds)
     if not jobs:
@@ -205,7 +214,7 @@ def main(argv=None) -> int:
     done = progress_of(output_dir, jobs, seeds)
     print(f"run {run_dir} ({cfg.variant}), started from the SFT checkpoint {saved['start']['checkpoint']}")
     print(f"model {model_cfg['name']} ({model_cfg['family']}), chunk {model_cfg['action_horizon']}, replan {protocol['replan']}, episodes of at most {protocol['max_steps']} steps; {cfg.num_candidates} candidates per chunk "
-          f"in calls of {cfg.rows_per_sample_call} environments, keep {cfg.keep_top}, {cfg.local_steps} local steps, '{cfg.eval_selection}'")
+          f"in calls of {cfg.rows_per_sample_call} environments, keep {cfg.keep_top}, {cfg.local_steps} local steps, '{selection}'" + (" (the VLA alone: its first candidate, no critic)" if selection == "vla" else ""))
     print(f"{len(seeds)} episodes per round, master seed {args.seed}, {args.envs_per_server} environments per server, {args.workers} worker(s); data in {output_dir}, curve in {curve_dir}")
     differences = task_differences(saved.get("task") or {}, task)
     if differences:
@@ -271,7 +280,7 @@ def main(argv=None) -> int:
     start_step = int(saved["start"]["step"])
 
     def make_policy():
-        return OptimisingPolicy(RLActor(base.fork(0), cfg, optimiser), None, cfg.eval_selection)
+        return OptimisingPolicy(RLActor(base.fork(0), cfg, optimiser), None, selection)
 
     def prepare(policy, job: Job) -> None:
         vla = policy.actor.policy

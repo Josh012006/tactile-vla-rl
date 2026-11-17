@@ -247,6 +247,30 @@ def test_the_policy_of_a_worker_is_the_runs_own_argmax_over_the_optimised_candid
     assert policy.actor.sampler.envs_per_call == run.cfg.rows_per_sample_call
 
 
+def test_the_vla_alone_can_be_evaluated_without_the_critic_in_its_own_output_folder(tmp_path, monkeypatch):
+    code, seen, run, run_dir = run_main(tmp_path, monkeypatch, parl=True, argv=["--selection", "vla", "--output-dir", str(tmp_path / "run" / "eval_rl_vla")])
+    assert code == 0
+    policy = seen["kwargs"]["policy_factory"]()
+    assert policy.mode == "vla"
+    out = run_dir / "eval_rl_vla"
+    protocol = json.loads((out / E.PROTOCOL_FILE).read_text())
+    assert protocol["rl"]["eval_selection"] == "vla" and seen["kwargs"]["output_dir"] == out
+    assert [s for s, _, _ in seen["prepared"]] == [0, 1, 2]                                     # the same rounds, each with its own VLA
+    with pytest.raises(SystemExit, match="eval_selection"):                                      # the folder of the VLA alone does not take the critic's evaluations
+        ER.main(["--run", str(run_dir), "--n-episodes", "10", "--env-set", "max_steps_per_episode=20", "--output-dir", str(out)])
+
+
+def test_the_selection_is_part_of_the_protocol_and_defaults_to_the_runs_own(tmp_path):
+    _, cfg, _, run_dir = finish_run(tmp_path, parl=True)
+    saved = json.loads((run_dir / "config.json").read_text())
+    task = {"max_steps_per_episode": 20, "num_envs": 100}
+    own = ER.build_protocol(args_with(), run_dir, saved, cfg, task)
+    alone = ER.build_protocol(args_with(selection="vla"), run_dir, saved, cfg, task)
+    assert own["rl"]["eval_selection"] == "argmax" and alone["rl"]["eval_selection"] == "vla" and ER.build_protocol(args_with(selection=None), run_dir, saved, cfg, task) == own
+    with pytest.raises(ValueError, match="eval_selection"):
+        ER.check_rl_block(own, alone)
+
+
 def test_a_vla_checkpoint_of_another_round_or_another_start_is_refused(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="says it is round 5, not 1"):
         run_main(tmp_path / "a", monkeypatch, parl=True, meta_of=lambda d, m: {**m, "round": 5} if "vlas" in str(d) else m)

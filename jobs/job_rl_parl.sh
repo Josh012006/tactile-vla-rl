@@ -5,6 +5,7 @@
 #   B  global+local = configs/experiment/rl/pi05_parl_global_local.yaml  (the same + 10 steps of gradient ascent on Q of the kept chunks)
 #   sbatch jobs/job_rl_parl.sh --variant A --start <SFT run> <step>                   # a main run of variant A: output in runs/rl/peg_insert/<experiment name>
 #   sbatch jobs/job_rl_parl.sh --variant B --start <SFT run> <step> --run-name probe --set total_episodes=100 --set warmup_critic_steps=500     # a short probe of variant B (the experiment's output_root)
+#   XLA_PYTHON_CLIENT_MEM_FRACTION=0.6 sbatch jobs/job_rl_parl.sh --variant A --start <SFT run> <step> --run-name probe2 --set total_episodes=100 --set warmup_critic_steps=5000   # a larger JAX share of the card for this run (default 0.5)
 #   sbatch jobs/job_rl_parl.sh --resume runs/rl/peg_insert/<run name>                 # after a stop or a failure: no --variant (the run carries its own); continues after the last finished stage (a stage = the warm-up, or one round with its critic updates AND its distillation / refresh)
 # `--variant` also takes `global` / `global_local` (or `a` / `b`); `--experiment FILE` instead of `--variant` runs another PA-RL experiment (it must be a parl one: Best-of-N has jobs/job_rl_best_of_n.sh). Every other option goes to
 # `python -m scripts.rl` (see its --help). Look first, on the login node, at what would run:  python -m scripts.rl --experiment configs/experiment/rl/pi05_parl_global.yaml --start <run> <step> --dry-run
@@ -71,7 +72,8 @@ nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
 source .venv/bin/activate
 export PYTHONUNBUFFERED=1                       # the log is read while the job runs
 export XLA_PYTHON_CLIENT_PREALLOCATE=false      # the VLA and the critic take what they use: the env server needs the rest of the card
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.5       # and JAX may not grow past half of it (as the evaluation jobs: an env server of 50-100 environments takes 9-11 GB)
+export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.5}   # JAX may not grow past half of the card by default (as the evaluation jobs: an env server of 50-100 environments takes 9-11 GB);
+                                                                                 # a larger fraction for ONE run: XLA_PYTHON_CLIENT_MEM_FRACTION=0.6 sbatch jobs/job_rl_parl.sh ...  (the 16 Nov. 2026 probe: the process sat at the 0.5 limit after the distillation, and the critic updates went 14x slower)
 export WANDB__SERVICE_WAIT=300                  # wandb's helper process can be slow to start on a loaded node
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1  # everything was fetched by scripts.fetch_models: a missing file fails instead of downloading
 nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv,noheader -l 30 > "logs/slurm/gpu_${SLURM_JOB_ID:-local}.csv" 2>/dev/null &

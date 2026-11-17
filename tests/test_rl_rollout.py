@@ -209,3 +209,12 @@ def test_the_evaluation_runs_the_fixed_episodes_with_the_critics_argmax_and_summ
         RR.evaluate(actor, critic.params, FakeEnv([5, 5]), [1, 2, 3], replan=REPLAN, max_steps=MAX_STEPS, master_seed=42)
     with pytest.raises(ValueError, match="argmax"):
         RR.OptimisingPolicy(actor, critic.params, mode="softmax")
+
+
+def test_the_evaluation_of_the_vla_alone_needs_no_critic_and_has_no_optimisation_metrics():
+    actor, cfg, net, critic = actor_of(method="best_of_n", keep_top=1, local_steps=0, rollout_selection="argmax")
+    env = FakeEnv([10, MAX_STEPS + 5, 8, 3, 5])
+    result = RR.evaluate(actor, None, env, [101, 102, 103, 104], replan=REPLAN, max_steps=MAX_STEPS, master_seed=42, label="eval", step=3, mode="vla")
+    assert result["n_episodes"] == 4 and result["n_success"] == 3 and "optimisation" not in result
+    with pytest.raises(ValueError, match="needs the critic"):                       # the critic's argmax without a critic is an error, not a silent fall-back to the VLA
+        RR.evaluate(actor, None, FakeEnv([5, 5, 5, 5]), [1, 2], replan=REPLAN, max_steps=MAX_STEPS, master_seed=42, mode="argmax")
