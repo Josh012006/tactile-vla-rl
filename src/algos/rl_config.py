@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "configs" / "algo" / "rl.yaml"
 METHODS = ("best_of_n", "parl")
 SELECTIONS = ("softmax", "argmax")
+DISTILL_SELECTIONS = SELECTIONS + ("first",)       # + the control of the 16 Nov. 2026 probes: the label is the VLA's own first candidate (no critic), see Distiller.annotate
 CAMERAS = ("exterior", "wrist")
 WANDB_MODES = ("online", "offline", "disabled")        # src/algos/tracking.py MODES, repeated here to stay free of the training imports (a test keeps them equal)
 EXPERIMENT_KEYS = {"name", "description", "model", "set", "model_set", "start"}
@@ -76,8 +77,9 @@ class RLConfig:
                 raise ValueError(message)
 
         need(self.method in METHODS, f"method must be one of {METHODS}, got {self.method!r}")
-        for name in ("rollout_selection", "distill_selection", "eval_selection"):
+        for name in ("rollout_selection", "eval_selection"):
             need(getattr(self, name) in SELECTIONS, f"{name} must be one of {SELECTIONS}, got {getattr(self, name)!r}")
+        need(self.distill_selection in DISTILL_SELECTIONS, f"distill_selection must be one of {DISTILL_SELECTIONS}, got {self.distill_selection!r}")
         need(self.softmax_temperature > 0, "softmax_temperature must be > 0")
         positive = ("num_candidates", "keep_top", "envs_per_batch", "total_episodes", "rows_per_sample_call", "critic_image_size", "critic_batch_size", "utd",
                     "distill_batch_size", "distill_micro_batch_size", "distill_epochs", "eval_episodes", "eval_every_rounds")

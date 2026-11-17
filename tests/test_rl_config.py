@@ -79,6 +79,9 @@ def test_the_command_line_wins_over_the_experiment():
     ({"mixing_ratio": 1.0}, "mixing_ratio"),
     ({"gamma": 0.0}, "gamma and tau"),
     ({"rollout_selection": "greedy"}, "rollout_selection"),
+    ({"rollout_selection": "first"}, "rollout_selection"),                 # `first` is the distillation's control only
+    ({"eval_selection": "first"}, "eval_selection"),
+    ({"distill_selection": "greedy"}, "distill_selection"),
     ({"wandb_mode": "sometimes"}, "wandb_mode"),
     ({"utd": 0}, "utd"),
     ({"n_candidates": 32}, "unknown RL keys"),
@@ -86,6 +89,11 @@ def test_the_command_line_wins_over_the_experiment():
 def test_a_wrong_key_or_value_is_an_error(overrides, message):
     with pytest.raises(ValueError, match=message):
         rc.load_rl_config(overrides=overrides)
+
+
+def test_the_distillation_can_use_the_vlas_own_first_candidate_as_a_control():
+    assert rc.load_rl_config(overrides={"method": "parl", "distill_selection": "first"}).distill_selection == "first"
+    assert rc.load_rl_config().distill_selection == "softmax"
 
 
 def test_the_critics_touch_is_the_systems_touch_spec():

@@ -7,6 +7,8 @@
 
 1. ANNOTATION. Every state whose candidates are cached (`buffer.candidate_ids()`: the states of the plans and the last state of a time-out, warm-up included) gets the action of pi^Opt under the CURRENT
    critic: the VLA's cached candidates, global top-m by Q, local ascent, then the softmax sample (or the argmax) of `distill_selection` (the same `ActionOptimiser` and `pick` as the rollouts).
+   `distill_selection: first` is the CONTROL: the label is the VLA's own first cached candidate, the critic decides nothing (self-distillation); what then happens to the VLA alone tells the damage of the
+   distillation process (Adam, learning rate, input path) from the damage of the critic's labels.
    The labels are fixed for the whole round (the critic does not change during the distillation) and are in the model's NORMALISED space, so they are the training targets as they are
    (`policy.training_batch_from_normalized`: no round trip through the env's space).
 2. TRAINING. The VLA's own flow-matching loss on (observation, label) pairs, with the recipe of the SFT (src/algos/sft.py: openpi's AdamW, the clipping, the micro-batches, the draws of a step made once
@@ -29,7 +31,7 @@ import numpy as np
 import optax
 
 from src.algos import sft
-from src.algos.rl_action_opt import ActionOptimiser, pick
+from src.algos.rl_action_opt import ActionOptimiser, Chosen, pick
 from src.algos.rl_buffer import ReplayBuffer
 from src.algos.rl_candidates import CandidateCache
 from src.algos.rl_config import RLConfig
@@ -126,7 +128,11 @@ class Distiller:
             state = {name: pad_rows(arr, ANNOTATE_BATCH) for name, arr in buffer.critic_state(part).items()}
             cands = pad_rows(cache.get(part), ANNOTATE_BATCH)
             result = self.optimiser(critic_params, state, cands)
-            chosen = pick(result, cfg.distill_selection, jax.random.fold_in(key, i), cfg.softmax_temperature)
+            if cfg.distill_selection == "first":              # the control: the VLA's own first sample, whatever the critic says (its Q is still logged: the gain over a random candidate is then about 0)
+                zeros = jnp.zeros(ANNOTATE_BATCH, jnp.int32)
+                chosen = Chosen(actions=cands[:, 0], q=result.candidate_q[:, 0], index=zeros, source=zeros)
+            else:
+                chosen = pick(result, cfg.distill_selection, jax.random.fold_in(key, i), cfg.softmax_temperature)
             labels[start:start + n] = np.asarray(chosen.actions)[:n]
             first_n = type(result)(*[x[:n] for x in result])
             logs.append((n, self.optimiser.summarise(first_n, type(chosen)(*[x[:n] for x in chosen]), cands[:n])))

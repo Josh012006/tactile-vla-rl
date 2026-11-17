@@ -58,6 +58,21 @@ def test_the_label_of_a_state_is_the_chunk_the_critic_ranks_first_after_its_loca
     assert "label_candidate_q_std_mean" not in metrics and "candidate_q_std_mean" in metrics and metrics["local_q_gain_mean"] >= 0
 
 
+def test_the_control_labels_are_the_vlas_own_first_candidates_whatever_the_critic_says(world):
+    import dataclasses
+    cfg, net, critic, optimiser, buffer, cache = world
+    control = dataclasses.replace(cfg, distill_selection="first")
+    distiller = D.Distiller(FakeTrainablePolicy(), optimiser, control, model_cfg=None)
+    ids = buffer.candidate_ids()
+    labels, metrics = distiller.annotate(critic.params, jax.random.key(0), ids, buffer, cache)
+    assert np.array_equal(labels, cache.get(ids)[:, 0])                                        # exactly the first sample of every state
+    assert metrics["chosen_shift_l1_mean"] == 0 and metrics["chosen_differs_from_first_sample_share"] == 0 and "chosen_q_gain_mean" in metrics
+    other, _ = make(world)
+    assert not np.array_equal(other.annotate(critic.params, jax.random.key(0), ids, buffer, cache)[0], labels)      # the critic's argmax labels are not the first samples
+    out = distiller.distill(critic.params, jax.random.key(1), np.random.default_rng(0), buffer, cache)
+    assert out["label_chosen_shift_l1_mean"] == 0 and out["steps"] == len(ids) // 8 and distiller.updates == out["steps"]
+
+
 def test_a_distillation_moves_the_trainable_parameters_and_not_the_frozen_ones_and_the_policy_runs_the_new_weights(world):
     cfg, net, critic, optimiser, buffer, cache = world
     distiller, policy = make(world)

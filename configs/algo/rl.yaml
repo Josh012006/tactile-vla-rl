@@ -18,7 +18,7 @@ local_steps: 10         # T: gradient-ascent steps a <- a + local_lr * grad_a Q(
 local_lr: 3.0e-4        # alpha (paper B.1), in the model's normalised chunk space, no clipping (decision: the paper gives no bounding)
 # Which action is taken from the optimised set: softmax over Q (Eq. 4.3, temperature `softmax_temperature`) or the argmax.
 rollout_selection: softmax      # action executed while collecting (paper Alg. 2 line 7); best_of_n: argmax
-distill_selection: softmax      # action each buffer state is annotated with for the distillation (paper B.1: argmax when the candidates' Q std is small, softmax otherwise: no threshold, so decision: both paths exist, switch here; the std is logged every round)
+distill_selection: softmax      # action each buffer state is annotated with for the distillation (paper B.1: argmax when the candidates' Q std is small, softmax otherwise: no threshold, so decision: both paths exist, switch here; the std is logged every round). `first` = a CONTROL, not a method: the VLA's own first candidate, no critic
 eval_selection: argmax          # action executed in the evaluation, WITH optimisation at inference (paper; decision)
 softmax_temperature: 1.0
 
