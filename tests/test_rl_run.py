@@ -132,6 +132,17 @@ def test_the_warm_up_data_is_the_vlas_and_the_online_data_is_the_critics_choice(
     assert len(online) == 2 * len(ids) and any(not np.array_equal(run.buffer.action[i], run.cache.normalized[i][0]) for i in online)      # the critic picks other candidates
 
 
+@pytest.mark.parametrize("mode", ["sparse_01", "sparse_pm1"])
+def test_a_run_with_sparse_terminal_rewards_goes_through_warm_up_rounds_and_evaluations(tmp_path, mode):
+    """`reward_mode` sparse_01 / sparse_pm1: the whole loop (collection, critic updates on terminal time-outs, evaluations) runs, the critic stays finite, and the rewards in the buffer are the sparse ones."""
+    run, cfg = make_run(tmp_path, reward_mode=mode)
+    summary = run.run()
+    assert summary["evaluated"] == [0, 1, 2] and not summary["stopped"]
+    assert set(np.unique(run.buffer.reward[:run.buffer.size][run.buffer.has_action[:run.buffer.size]])) <= {-1.0, 0.0, 1.0}
+    assert run.buffer.terminal[:run.buffer.size].sum() == len(run.buffer.episodes)             # one terminal per episode, success or time-out
+    assert all(np.isfinite(x).all() for x in leaves(run.trainer.critic.params))
+
+
 def test_a_run_that_is_cut_resumes_where_it_stopped_and_ends_exactly_as_an_uninterrupted_one(tmp_path):
     stop = threading.Event()
     run_a, _ = make_run(tmp_path / "a", ListLog(on_event=lambda e: stop.set() if e["event"] == "round" and e["step"] == 1 else None), stop=stop)

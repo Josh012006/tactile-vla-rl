@@ -55,6 +55,23 @@ def test_a_time_outs_last_state_needs_candidates_a_successs_does_not():
     assert buf.candidate_ids().tolist() == [0, 1, 3, 4, 5]
 
 
+def test_the_sparse_terminal_modes_reward_only_the_end_and_make_both_ends_terminal():
+    for mode, failure in (("sparse_01", 0.0), ("sparse_pm1", -1.0)):
+        buf = ReplayBuffer(40, H, 0.5, step_reward=-1.0, reward_mode=mode)
+        buf.add_episode(episode(3, True), warmup=False)          # rows 0 1 2 3
+        buf.add_episode(episode(3, False), warmup=False)         # rows 4 5 6 7
+        assert buf.reward[:3].tolist() == [0, 0, 1], mode
+        assert buf.reward[4:7].tolist() == [0, 0, failure], mode
+        assert buf.terminal[:4].tolist() == [False, False, True, False] and buf.terminal[4:8].tolist() == [False, False, True, False], mode       # a time-out is terminal here
+        assert buf.candidate_ids().tolist() == [0, 1, 2, 4, 5, 6, 7], mode                                                                    # the cache layout does not change
+    buf = ReplayBuffer(40, H, 0.5, reward_mode="sparse_01")
+    buf.add_episode(episode(3, True), warmup=False)
+    buf.add_episode(episode(3, False), warmup=True)
+    assert np.allclose(buf.vmu[:3], [0.25, 0.5, 1.0]) and np.allclose(buf.vmu[4:7], [0.0, 0.0, 0.0])          # V^mu = gamma^(plans to the success)
+    with pytest.raises(ValueError, match="reward_mode"):
+        ReplayBuffer(40, H, 0.5, reward_mode="dense")
+
+
 def test_the_buffer_refuses_what_does_not_fit():
     buf = buffer(capacity=5)
     buf.add_episode(episode(3, True), warmup=False)

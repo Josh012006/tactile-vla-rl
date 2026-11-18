@@ -40,6 +40,7 @@ utd: 1                              # critic updates per ENVIRONMENT step (decis
 gamma: 0.99                         # per plan: a plan (one chunk) is one transition (paper B.1; decision)
 tau: 0.005                          # delayed target network: soft update (decision; the paper gives none)
 step_reward: -1.0                   # per plan until success; 0 at success (paper B.1 reward bias -1; decision). A time-out at the horizon is not terminal: the target bootstraps (decision)
+reward_mode: step_cost              # step_cost: `step_reward` per plan, 0 at success, a time-out is not terminal (above) | sparse_01: 0 everywhere, +1 at success, a time-out is terminal with 0 | sparse_pm1: 0 everywhere, +1 at success, a time-out is terminal with -1 (the sparse terminal rewards a reviewer suggested to try: Q in [0, 1] or [-1, 1] instead of about -35)
 cal_ql_alpha: 0.01                  # Cal-QL regulariser weight (paper B.1, CALVIN and real robot; decision: as close to the paper as possible)
 mixing_ratio: 0.5                   # share of each critic batch taken from the warm-up data (paper B.1)
 hl_gauss: false                     # distributional critic, only if the Q values explode (paper B.1)

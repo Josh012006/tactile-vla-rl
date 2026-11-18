@@ -21,6 +21,7 @@ CONFIG_PATH = ROOT / "configs" / "algo" / "rl.yaml"
 METHODS = ("best_of_n", "parl")
 SELECTIONS = ("softmax", "argmax")
 DISTILL_SELECTIONS = SELECTIONS + ("first",)       # + the control of the 16 Nov. 2026 probes: the label is the VLA's own first candidate (no critic), see Distiller.annotate
+REWARD_MODES = ("step_cost", "sparse_01", "sparse_pm1")      # the critic's reward, see ReplayBuffer: -1 per plan until success (0 there) | 0, +1 at success, 0 at a time-out | 0, +1 at success, -1 at a time-out
 CAMERAS = ("exterior", "wrist")
 WANDB_MODES = ("online", "offline", "disabled")        # src/algos/tracking.py MODES, repeated here to stay free of the training imports (a test keeps them equal)
 EXPERIMENT_KEYS = {"name", "description", "model", "set", "model_set", "start"}
@@ -52,6 +53,7 @@ class RLConfig:
     gamma: float = 0.99
     tau: float = 0.005
     step_reward: float = -1.0
+    reward_mode: str = "step_cost"
     cal_ql_alpha: float = 0.01
     mixing_ratio: float = 0.5
     hl_gauss: bool = False
@@ -80,6 +82,7 @@ class RLConfig:
         for name in ("rollout_selection", "eval_selection"):
             need(getattr(self, name) in SELECTIONS, f"{name} must be one of {SELECTIONS}, got {getattr(self, name)!r}")
         need(self.distill_selection in DISTILL_SELECTIONS, f"distill_selection must be one of {DISTILL_SELECTIONS}, got {self.distill_selection!r}")
+        need(self.reward_mode in REWARD_MODES, f"reward_mode must be one of {REWARD_MODES}, got {self.reward_mode!r}")
         need(self.softmax_temperature > 0, "softmax_temperature must be > 0")
         positive = ("num_candidates", "keep_top", "envs_per_batch", "total_episodes", "rows_per_sample_call", "critic_image_size", "critic_batch_size", "utd",
                     "distill_batch_size", "distill_micro_batch_size", "distill_epochs", "eval_episodes", "eval_every_rounds")

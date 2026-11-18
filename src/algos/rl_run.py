@@ -149,7 +149,7 @@ class RLRun:
         self.version = 0                                                  # the VLA whose candidates the cache holds: 0 = the SFT checkpoint, r = after the distillation of round r (Best-of-N: always 0); after the last round the VLA's version, the cache is left as it was
         self.checkpoint_meta = dict(checkpoint_meta or {})
         plans =-(-self.max_steps // self.replan)
-        self.buffer = ReplayBuffer((cfg.warmup_episodes + cfg.total_episodes) * (plans + 1), horizon, cfg.gamma, cfg.step_reward, touch_dim=cfg.critic_touch.dim)
+        self.buffer = ReplayBuffer((cfg.warmup_episodes + cfg.total_episodes) * (plans + 1), horizon, cfg.gamma, cfg.step_reward, touch_dim=cfg.critic_touch.dim, reward_mode=cfg.reward_mode)
         self.cache: Optional[CandidateCache] = None                       # built with the first candidates (their state dimension)
         self.rng = np.random.default_rng(cfg.seed)                        # the critic's batches
         self.stage = -1                                                   # the last finished stage (-1: none)

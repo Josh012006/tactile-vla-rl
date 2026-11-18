@@ -8,9 +8,11 @@
 A ROW is a state. The rows of an episode are contiguous (s_0 .. s_T): the transition of row i (a plan: the chunk executed at s_i) goes to row i + 1, so the next state needs no storage of its own, and the
 state ids are the ids of `CandidateCache` (the VLA's candidates of a state are cached under its row). The last row of an episode has no action.
 
-Reward and ending (docs/algos/rl.md, decision): a plan costs `step_reward` (-1) until the plan that reaches the success, whose reward is 0 and which is TERMINAL (its target is the reward alone). An episode that
+Reward and ending (docs/algos/rl.md, decision; `reward_mode` "step_cost", the default; the two sparse terminal modes are at the end of this paragraph): a plan costs `step_reward` (-1) until the plan that reaches the success, whose reward is 0 and which is TERMINAL (its target is the reward alone). An episode that
 ends without success (the 150-step horizon) is a time-out, NOT terminal: the target of its last plan bootstraps from the last state, so that state needs candidates too (`needs_candidates`).
 V^mu (the reference value of Cal-QL) is the Monte-Carlo return-to-go of the episode's own plans, with the plan-level reward and gamma, of EVERY stored trajectory (warm-up and online).
+The sparse terminal modes (`reward_mode` "sparse_01" / "sparse_pm1", asked for by a reviewer of the 18 Nov. 2026 results, to check that the scale of the reward is not the problem): every plan has reward 0 except the last one of the episode,
++1 at a success and 0 (sparse_01) or -1 (sparse_pm1) at a time-out; BOTH ends are terminal (the target of the last plan is its reward alone; a time-out keeps its last state's candidates in the cache, they are just not used).
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from src.envs import protocol as P
 CAMERA_KEYS = {"exterior": P.EXTERIOR_IMAGE, "wrist": P.WRIST_IMAGE}
 IMAGE_SHAPE = (224, 224, 3)
 ACTION_DIM = P.ACTION_DIM
+SPARSE_FAILURE_REWARD = {"sparse_01": 0.0, "sparse_pm1": -1.0}      # the reward of a time-out in the sparse terminal modes (success: +1; every other plan: 0)
 
 
 @dataclasses.dataclass
@@ -57,10 +60,12 @@ class Episode:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, horizon: int, gamma: float, step_reward: float = -1.0, touch_dim: int = 0):
+    def __init__(self, capacity: int, horizon: int, gamma: float, step_reward: float = -1.0, touch_dim: int = 0, reward_mode: str = "step_cost"):
         if capacity < 2 or horizon < 1 or not 0 < gamma <= 1:
             raise ValueError("capacity >= 2, horizon >= 1 and gamma in (0, 1] are needed")
-        self.capacity, self.horizon, self.gamma, self.step_reward, self.touch_dim = capacity, horizon, gamma, step_reward, touch_dim
+        if reward_mode != "step_cost" and reward_mode not in SPARSE_FAILURE_REWARD:
+            raise ValueError(f"reward_mode must be 'step_cost' or one of {tuple(SPARSE_FAILURE_REWARD)}, got {reward_mode!r}")
+        self.capacity, self.horizon, self.gamma, self.step_reward, self.touch_dim, self.reward_mode = capacity, horizon, gamma, step_reward, touch_dim, reward_mode
         self.exterior = np.zeros((capacity, *IMAGE_SHAPE), np.uint8)          # untouched rows cost no memory until written
         self.wrist = np.zeros((capacity, *IMAGE_SHAPE), np.uint8)
         self.joints = np.zeros((capacity, 7), np.float32)
@@ -97,9 +102,15 @@ class ReplayBuffer:
         if first + t + 1 > self.capacity:
             raise ValueError(f"the buffer is full: {first} rows of {self.capacity}, an episode of {t} plans needs {t + 1}")
         ids = np.arange(first, first + t + 1)
-        rewards = np.full(t, self.step_reward, np.float32)
-        if ep.success:
-            rewards[-1] = 0.0
+        if self.reward_mode == "step_cost":
+            rewards = np.full(t, self.step_reward, np.float32)
+            if ep.success:
+                rewards[-1] = 0.0
+            last_terminal = bool(ep.success)                  # a time-out is bootstrapped from
+        else:                                                 # sparse terminal rewards: nothing until the end, +1 at success, the mode's failure reward at a time-out; BOTH ends are terminal
+            rewards = np.zeros(t, np.float32)
+            rewards[-1] = 1.0 if ep.success else SPARSE_FAILURE_REWARD[self.reward_mode]
+            last_terminal = True
         returns = np.zeros(t, np.float32)                  # Monte-Carlo return-to-go, plan level
         running = 0.0
         for i in range(t - 1, -1, -1):
@@ -113,7 +124,7 @@ class ReplayBuffer:
         self.has_action[ids[:-1]] = True
         self.reward[ids[:-1]] = rewards
         self.terminal[ids[:-1]] = False
-        self.terminal[ids[-2]] = bool(ep.success)
+        self.terminal[ids[-2]] = last_terminal
         self.vmu[ids[:-1]] = returns
         self.needs_candidates[ids[:-1]] = True
         self.needs_candidates[ids[-1]] = not ep.success      # a time-out's last state is bootstrapped from; a success is terminal

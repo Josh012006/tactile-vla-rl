@@ -143,3 +143,11 @@ def test_the_evaluation_rounds_are_the_warm_up_every_five_and_the_last():
     assert rc.load_rl_config(overrides={"eval_every_rounds": 50}).eval_rounds == (0, 10)
     with pytest.raises(ValueError, match="eval_every_rounds"):
         rc.load_rl_config(overrides={"eval_every_rounds": 0})
+
+
+def test_reward_mode_is_one_of_the_three_and_defaults_to_the_paper_s_step_cost():
+    assert rc.load_rl_config().reward_mode == "step_cost"
+    for mode in ("sparse_01", "sparse_pm1"):
+        assert rc.load_rl_config(overrides={"reward_mode": mode}).reward_mode == mode
+    with pytest.raises(ValueError, match="reward_mode"):
+        rc.load_rl_config(overrides={"reward_mode": "dense"})
