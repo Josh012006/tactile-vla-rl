@@ -173,6 +173,21 @@ def test_the_episodes_of_a_stage_come_back_from_their_file_with_their_candidates
             assert np.array_equal(getattr(a.candidates, name), getattr(b.candidates, name))
 
 
+def test_the_episodes_of_a_file_share_one_copy_of_each_array(tmp_path):
+    """The resume of a stage of many episodes was OOM-killed (64 GB, 150 warm-up episodes of the scripted run of 18 Nov. 2026): `z[key]` inside the loop read the whole array again at every episode and each
+    slice kept its own copy alive, so the memory was episodes x the file. All the episodes must be views of ONE array per key."""
+    run, _ = make_run(tmp_path)
+    collected, _ = RUN.collect_round(FakeEnv(PATTERN), run.actor, mode="vla", seed=1, round_id=0, replan=run.replan)
+    RUN.save_episodes(tmp_path / "x.npz", collected)
+    back = RUN.load_episodes(tmp_path / "x.npz")
+    assert len(back) > 1
+    for name in ("exterior", "wrist", "joints", "actions"):
+        assert all(getattr(c.episode, name).base is not None for c in back), name
+        assert len({id(getattr(c.episode, name).base) for c in back}) == 1, name
+    for name in ("normalized", "states", "targets"):
+        assert len({id(getattr(c.candidates, name).base) for c in back}) == 1, name
+
+
 def test_a_run_without_a_warm_up_is_refused(tmp_path):
     with pytest.raises(ValueError, match="warmup_episodes"):
         make_run(tmp_path, warmup_episodes=0)

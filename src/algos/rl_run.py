@@ -110,15 +110,18 @@ def save_episodes(path: Path, collected: List[Collected]) -> None:
 
 def load_episodes(path: Path) -> List[Collected]:
     with np.load(path) as z:
-        plans, n_cand = z["plans"], z["n_candidates"]
-        rows, acts, cands = np.concatenate([[0], np.cumsum(plans + 1)]), np.concatenate([[0], np.cumsum(plans)]), np.concatenate([[0], np.cumsum(n_cand)])
-        out = []
-        for i in range(len(plans)):
-            r, a, c = slice(rows[i], rows[i + 1]), slice(acts[i], acts[i + 1]), slice(cands[i], cands[i + 1])
-            episode = Episode(exterior=z["exterior"][r], wrist=z["wrist"][r], joints=z["joints"][r], gripper=z["gripper"][r], actions=z["actions"][a], success=bool(z["success"][i]),
-                              prompt=str(z["prompts"][i]), touch=z["touch"][r] if "touch" in z else None)
-            out.append(Collected(episode=episode, candidates=Candidates(normalized=z["cand_normalized"][c], states=z["cand_states"][c], targets=z["cand_targets"][c], infer_ms=0.0),
-                                 env=int(z["env"][i]), round_id=int(z["round_id"][i]), steps=int(z["steps"][i])))
+        # Every array is read ONCE: `z[key]` reads (and unpacks) the whole array at each access, and a slice of it keeps that whole array alive, so reading inside the loop below held
+        # one full copy per episode (the 150 warm-up episodes of the scripted run of 18 Nov. 2026 = 150 times the 888 MB file: the resume was OOM-killed at 64 GB). The episodes are views of ONE copy.
+        a = {key: z[key] for key in z.files}
+    plans, n_cand = a["plans"], a["n_candidates"]
+    rows, acts, cands = np.concatenate([[0], np.cumsum(plans + 1)]), np.concatenate([[0], np.cumsum(plans)]), np.concatenate([[0], np.cumsum(n_cand)])
+    out = []
+    for i in range(len(plans)):
+        r, ac, c = slice(rows[i], rows[i + 1]), slice(acts[i], acts[i + 1]), slice(cands[i], cands[i + 1])
+        episode = Episode(exterior=a["exterior"][r], wrist=a["wrist"][r], joints=a["joints"][r], gripper=a["gripper"][r], actions=a["actions"][ac], success=bool(a["success"][i]),
+                          prompt=str(a["prompts"][i]), touch=a["touch"][r] if "touch" in a else None)
+        out.append(Collected(episode=episode, candidates=Candidates(normalized=a["cand_normalized"][c], states=a["cand_states"][c], targets=a["cand_targets"][c], infer_ms=0.0),
+                             env=int(a["env"][i]), round_id=int(a["round_id"][i]), steps=int(a["steps"][i])))
     return out
 
 
