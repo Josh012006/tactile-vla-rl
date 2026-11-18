@@ -45,7 +45,7 @@ from src.models.interface import Candidates
 
 RESUME = "resume"
 STATE_FILE = f"{RESUME}/state.json"
-CRITIC_LOG_EVERY = 500                  # updates between two `critic` lines (metrics.jsonl, the log, and wandb on the axis `critic_update`; the warm-up included)
+CRITIC_LOG_EVERY = 500                  # updates between two `critic` lines of metrics.jsonl (not sent to wandb: the round line carries the mean)
 REFRESH_LOG_EVERY = 0.05                # fraction of the states between two `refresh_progress` lines (the refresh is hours long)
 DISTILL_KEY_OFFSET, DISTILL_RNG_OFFSET = 4, 3       # the labels' softmax draws come from fold_in(key(seed + 4), round); the order of the batches from default_rng(seed + 3)
 OpenEnv = Callable[[int, str], ContextManager]
