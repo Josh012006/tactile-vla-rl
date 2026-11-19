@@ -107,6 +107,46 @@ def test_one_curve_has_no_paired_panel(tmp_path):
     assert json.loads((out / "curve.json").read_text())["paired"] is None and (out / "curve.png").exists()
 
 
+def test_a_label_may_contain_an_equal_sign():
+    assert P.split_label("sparse 0/1, alpha = 0.01=runs/a/*/results/*.json") == ("sparse 0/1, alpha = 0.01", "runs/a/*/results/*.json")
+
+
+def test_relative_curves_start_at_zero_and_count_the_change_on_the_same_episodes(tmp_path):
+    # two runs that do not start at the same level (their critics differ after the warm-up) and the same +10 episodes gained at round 1
+    write(tmp_path / "a/results/0.json", [1, 0, 0, 0, 1, 0, 0, 0, 0, 0])
+    write(tmp_path / "a/results/1.json", [1, 1, 1, 0, 1, 0, 0, 0, 0, 0])
+    write(tmp_path / "b/results/0.json", [1, 1, 1, 1, 1, 0, 0, 0, 0, 0])
+    write(tmp_path / "b/results/1.json", [1, 1, 1, 1, 1, 1, 0, 0, 0, 0])
+    data = P.build([("a", str(tmp_path / "a/results/*.json")), ("b", str(tmp_path / "b/results/*.json"))], relative=True)
+    a, b = (c["rounds"] for c in data["curves"])
+    assert a["0"]["rate"] == 0 and b["0"]["rate"] == 0 and a["0"]["se"] == 0
+    assert a["1"]["rate"] == pytest.approx(0.2) and b["1"]["rate"] == pytest.approx(0.1)
+    assert data["paired"] is None and data["reference"] is None and data["warnings"] == []
+
+
+def test_relative_is_refused_with_a_reference_and_warns_on_other_seeds_or_a_missing_round_0(tmp_path):
+    write(tmp_path / "a/results/1.json", [1, 0, 1, 0])
+    write(tmp_path / "a/results/2.json", [1, 1, 1, 0], seeds=[7, 8, 9, 10])
+    write(tmp_path / "ref.json", [1, 0, 1, 0])
+    spec = [("a", str(tmp_path / "a/results/*.json"))]
+    with pytest.raises(ValueError, match="does not go with"):
+        P.build(spec, ("ref", str(tmp_path / "ref.json")), relative=True)
+    text = " ".join(P.build(spec, relative=True)["warnings"])
+    assert "no round 0" in text and "other episode seeds" in text
+
+
+def test_main_relative_writes_a_signed_table_and_the_figure(tmp_path):
+    rng = np.random.default_rng(2)
+    for r in range(3):
+        write(tmp_path / f"no/results/{r}.json", bits(100, 40 + 3 * r, rng))
+        write(tmp_path / f"yes/results/{r}.json", bits(100, 45 - 2 * r, rng))
+    out = tmp_path / "fig"
+    P.main(["--curve", f"no={tmp_path}/no/results/*.json", "--curve", f"yes={tmp_path}/yes/results/*.json", "--out", str(out), "--relative"])
+    table = (out / "table.md").read_text()
+    assert "| 0 | +0.0 +- 0.0 | +0.0 +- 0.0 |" in table and "| round | no | yes |" in table
+    assert (out / "curve.png").stat().st_size > 0 and json.loads((out / "curve.json").read_text())["relative"] is True
+
+
 def test_bad_spec_is_refused():
     with pytest.raises(ValueError):
         P.split_label("no equals sign")

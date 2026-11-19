@@ -7,13 +7,17 @@ written by `scripts.eval_rl`): no simulation, only JSON and matplotlib.
         --reference "VLA alone (SFT step 1600)=runs/sft/peg_insert/peg_insert_pi05_lora_teleop/eval/results/1600.json" \
         --out runs/rl/peg_insert/bon20_curves --title "Best-of-N, teleop demos, start: SFT step 1600"
 
-`--curve LABEL=PATH_OR_GLOB` (repeatable; quote the glob so that the script expands it): the evaluation results of one run, from as many output folders as the evaluation was cut
+`--curve LABEL=PATH_OR_GLOB` (repeatable; quote the glob so that the script expands it; the label may contain `=`, the path may not: the spec is cut at the LAST `=`): the evaluation results of one run, from as many output folders as the evaluation was cut
 into (several jobs, one `--output-dir` each). The round is the file's name (`7.json` = round 7). A round found in several folders keeps the evaluation with the most episodes (then the
 newest). `--reference LABEL=FILE`: the policy the runs start from (the SFT checkpoint at the same number of episodes), a dashed line with its +-1 SE band.
 
 Error bars are +-1 standard error of a proportion (sqrt(p (1 - p) / n), what the SFT curves show). With exactly two curves a second panel gives their PAIRED difference per round (second minus
 first, same episodes: it is much tighter than the two bars suggest because the difficulty of a start state is shared), +-1 SE over episodes. The SE says how well the episodes pin the value
 down, NOT how much two training runs differ by chance: one run per curve is one draw of the training.
+
+`--relative`: the runs do not start at the same level at round 0 (round 0 is the VLA plus the critic of THAT run after the warm-up, and a critic trained with another reward, another Cal-QL weight
+or another input selects differently), so this plots, per run, the change since its own round 0 on the same episodes (paired SE): every curve starts at 0 and only the trend is compared. It hides
+where the runs start, so give the levels (the plain figure) next to it; it does not go with `--reference`.
 
 Writes <out>/curve.png, curve.pdf, curve.json (every number of the figure) and table.md (what goes on a slide).
 """
@@ -37,7 +41,7 @@ from scripts.compare_eval_paired import load_result, scores  # noqa: E402
 def split_label(spec: str) -> Tuple[str, str]:
     if "=" not in spec:
         raise ValueError(f"expected LABEL=PATH, got {spec!r}")
-    label, path = spec.split("=", 1)
+    label, path = spec.rsplit("=", 1)          # the LABEL may contain "=" (alpha = 0.01), the path may not
     if not label.strip() or not path.strip():
         raise ValueError(f"expected LABEL=PATH, got {spec!r}")
     return label.strip(), path.strip()
@@ -83,8 +87,25 @@ def paired(first: dict, second: dict) -> Optional[dict]:
     return {"episodes": n, "difference": float(d.mean()), "se": float(d.std(ddof=1) / math.sqrt(n)) if n > 1 else 0.0}
 
 
-def build(curves: Sequence[Tuple[str, str]], reference: Optional[Tuple[str, str]] = None) -> dict:
-    out: dict = {"curves": [], "reference": None, "paired": None, "warnings": []}
+def relative_rounds(results: Dict[int, dict]) -> Tuple[Dict[str, dict], List[int]]:
+    """{round: change of the success rate since the run's first round, on the same episodes} (`rate` holds the change, as a fraction, `se` its paired standard error), and the rounds that were
+    evaluated on other episode seeds (no paired change). Every run starts at 0, whatever its critic gave at the end of the warm-up."""
+    first = min(results)
+    rows: Dict[str, dict] = {}
+    other: List[int] = []
+    for rnd, res in sorted(results.items()):
+        p = paired(results[first], res)
+        if p is None:
+            other.append(rnd)
+        else:
+            rows[str(rnd)] = {"episodes": p["episodes"], "rate": p["difference"], "se": p["se"]}
+    return rows, other
+
+
+def build(curves: Sequence[Tuple[str, str]], reference: Optional[Tuple[str, str]] = None, relative: bool = False) -> dict:
+    if relative and reference:
+        raise ValueError("--reference is a level of success rate, it does not go with --relative (changes since round 0)")
+    out: dict = {"curves": [], "reference": None, "paired": None, "relative": relative, "warnings": []}
     results: List[Dict[int, dict]] = []
     for label, pattern in curves:
         found = collect(pattern)
@@ -94,7 +115,17 @@ def build(curves: Sequence[Tuple[str, str]], reference: Optional[Tuple[str, str]
         if len(counts) > 1:
             out["warnings"].append(f"{label}: the rounds were not evaluated on the same number of episodes ({counts})")
         results.append({rnd: res for rnd, (_, res) in found.items()})
-        out["curves"].append({"label": label, "rounds": {str(rnd): summarise(res) for rnd, (_, res) in sorted(found.items())}})
+        if relative:
+            rows, other = relative_rounds(results[-1])
+            if min(results[-1]) != 0:
+                out["warnings"].append(f"{label}: no round 0, the change is counted from round {min(results[-1])}")
+            for rnd in other:
+                out["warnings"].append(f"{label}: round {rnd} was evaluated on other episode seeds than the first round, left out")
+            out["curves"].append({"label": label, "rounds": rows})
+        else:
+            out["curves"].append({"label": label, "rounds": {str(rnd): summarise(res) for rnd, (_, res) in sorted(found.items())}})
+    if relative:
+        return out
     if reference:
         label, path = reference
         ref = load_result(path)
@@ -121,7 +152,8 @@ def table_markdown(data: dict) -> str:
         cells = []
         for c in data["curves"]:
             r = c["rounds"].get(str(rnd))
-            cells.append(f"{100 * r['rate']:.1f} +- {100 * r['se']:.1f}" if r else "")
+            fmt = "+.1f" if data.get("relative") else ".1f"
+            cells.append(f"{100 * r['rate']:{fmt}} +- {100 * r['se']:.1f}" if r else "")
         if data["paired"]:
             p = data["paired"]["rounds"].get(str(rnd))
             cells.append(f"{100 * p['difference']:+.1f} +- {100 * p['se']:.1f}" if p else "")
@@ -159,8 +191,13 @@ def plot(data: dict, out_dir: Path, title: str) -> None:
         ax.axhline(ry, color="#555555", ls="--", lw=1.4, label=f"{ref['label']}: {ry:.1f} %")
         ax.axhspan(ry - re_, ry + re_, color="#555555", alpha=0.12, lw=0)
     lo, hi = min(values), max(values)
-    ax.set_ylim(max(0, 5 * math.floor((lo - 6) / 5)), min(100, 5 * math.ceil((hi + 6) / 5)))
-    ax.set_ylabel("Success rate (%)  ± 1 SE")
+    if data.get("relative"):
+        ax.axhline(0, color="#555555", ls="--", lw=1.4)
+        ax.set_ylim(5 * math.floor((min(lo, 0) - 1) / 5), 5 * math.ceil((max(hi, 0) + 1) / 5))
+        ax.set_ylabel("Change since round 0 (points)  ± 1 SE\n(same episodes)")
+    else:
+        ax.set_ylim(max(0, 5 * math.floor((lo - 6) / 5)), min(100, 5 * math.ceil((hi + 6) / 5)))
+        ax.set_ylabel("Success rate (%)  ± 1 SE")
     ax.set_title(title, fontsize=10)
     ax.grid(True, ls="--", alpha=0.35)
     ax.legend(loc="best", fontsize=9)
@@ -192,10 +229,11 @@ def main(argv=None) -> None:
     ap.add_argument("--reference", metavar="LABEL=FILE", help="the policy the runs start from: one result file, drawn as a dashed line with its band")
     ap.add_argument("--out", required=True, metavar="DIR", help="where curve.png / curve.pdf / curve.json / table.md go")
     ap.add_argument("--title", default="Success rate against collection round")
+    ap.add_argument("--relative", action="store_true", help="plot the change since each run's own round 0 on the same episodes: every curve starts at 0 (no --reference)")
     args = ap.parse_args(argv)
     curves = [split_label(c) for c in args.curve]
     reference = split_label(args.reference) if args.reference else None
-    data = build(curves, reference)
+    data = build(curves, reference, relative=args.relative)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "curve.json").write_text(json.dumps(data, indent=1))
