@@ -9,15 +9,16 @@
 # Before the first run: the learner venv and the models fetched (uv sync --group vla; python -m scripts.fetch_models), the Isaac Lab venv (scripts/setup_isaac_venv.sh), wandb login (--set wandb_mode=offline | disabled to change).
 # Output: runs/rl/peg_insert/<name>/ (config.json, metrics.jsonl, wandb_id.txt, episodes/, resume/, critics/, eval/results/<round>.json and eval/curve.png, logs/server_*.log), logs/slurm/rl_bon_<jobid>.out, logs/slurm/gpu_<jobid>.csv.
 # Disk: about 0.25 GB of episodes per round (images, uncompressed) + the critic's state (about 30 MB) rewritten every round: a few GB in all.
-# Time: NOT MEASURED end to end; estimated from the parts measured on 15 Nov. 2026 (docs/algos/rl.md sections 3 and 5) for the 10 rounds of 50 episodes of the defaults: about 2.5 h (80 000 critic updates 1.0 h, collection 0.9 h, 3 evaluations 0.4 h, saves
-# and server starts), so 6 h leaves room. A SIGTERM is honoured between stages only; a run that hits the limit ends cleanly on the SIGTERM sent 5 minutes before (after the stage in progress) and continues with --resume.
+# Time: for the budget written in the experiment files (600 warm-up episodes + 120 000 critic updates, then 20 rounds of 50 episodes): about 5.9 h, CALCULATED from the parts measured (warm-up: 12 collection batches of about 5 min
+# + 120 000 updates at 0.041 s = about 142 min; 20 rounds of about 9.7 min = about 194 min; 2 in-run evaluations of about 8 min; saves and server starts), so 8 h leaves room (20 rounds with 150 episodes / 30 000 updates took about 4.5 h).
+# A SIGTERM is honoured between stages only; a run that hits the limit ends cleanly on the SIGTERM sent 5 minutes before (after the stage in progress) and continues with --resume.
 #
 #SBATCH --job-name=rl_bon
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=64G
-#SBATCH --time=06:00:00
+#SBATCH --time=08:00:00
 #SBATCH --signal=B:TERM@300
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --no-requeue

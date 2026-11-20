@@ -15,6 +15,10 @@ set:
   keep_top: 1
   local_steps: 0
   rollout_selection: argmax
+  warmup_episodes: 600             # warm-up budget of the study (locked after the warm-up tests of Nov. 2026: 150 / 300 / 600 episodes, 30k / 60k / 120k critic updates; rl.yaml keeps the paper's 50 / 5000)
+  warmup_critic_steps: 120000
+  total_episodes: 1000             # 20 rounds of 50 episodes
+  eval_every_rounds: 20            # in-run evaluations (100 episodes) after the warm-up and after the last round; the 500-episode evaluations are made by scripts/eval_rl.py
   critic_use_tactile: true         # the 56 taxels
   critic_use_force: true           # ft_force (3) + gripper_effort (1)
   critic_force_mode: measured      # not "proxy"
