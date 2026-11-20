@@ -97,14 +97,13 @@ The run starts from an SFT checkpoint (`--start <SFT run> <step>`). A run is a w
 critic; each round ends with critic updates (one per environment step) and, for PA-RL, the distillation of the VLA and a refresh of the candidate cache.
 
 ```bash
-# Best-of-N, 20 rounds of 50 episodes, without touch in the critic (the default experiment)
-sbatch --time=07:00:00 jobs/job_rl_best_of_n.sh --start peg_insert_pi05_lora_teleop 1600 --run-name bon20_teleop_s1600 \
-  --set total_episodes=1000 --set warmup_episodes=150 --set warmup_critic_steps=30000 --set eval_every_rounds=20
+# Best-of-N, without touch in the critic (the default experiment). The warm-up (600 episodes, 120 000 critic updates),
+# the 20 rounds of 50 episodes and an evaluation of the run every 5 rounds are written in the experiment file
+sbatch jobs/job_rl_best_of_n.sh --start peg_insert_pi05_lora_teleop 1600 --run-name bon_teleop_s1600
 
 # the same with the taxels and the measured force in the critic
-sbatch --time=07:00:00 jobs/job_rl_best_of_n.sh --experiment configs/experiment/rl/pi05_best_of_n_touch.yaml \
-  --start peg_insert_pi05_lora_teleop 1600 --run-name bon20_touch_teleop_s1600 \
-  --set total_episodes=1000 --set warmup_episodes=150 --set warmup_critic_steps=30000 --set eval_every_rounds=20
+sbatch jobs/job_rl_best_of_n.sh --experiment configs/experiment/rl/pi05_best_of_n_touch.yaml \
+  --start peg_insert_pi05_lora_teleop 1600 --run-name bon_touch_teleop_s1600
 
 # PA-RL, variant A (global) or B (global + local ascent)
 sbatch jobs/job_rl_parl.sh --variant B --start peg_insert_pi05_lora_teleop 1600 --run-name parl_b_teleop
@@ -114,7 +113,7 @@ python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --st
 sbatch jobs/job_rl_best_of_n.sh --resume runs/rl/peg_insert/<run name>
 ```
 
-Settings that matter most (`configs/algo/rl.yaml`; the defaults are the paper's, the commands above override the budget):
+Settings that matter most (`configs/algo/rl.yaml`; the defaults are the paper's, and the Best-of-N experiment files set the warm-up, the number of rounds and the evaluation schedule):
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -171,7 +170,7 @@ Measured or estimated on an L40S (see `docs/algos/rl.md` section 5 and the heade
 | What | Time |
 |---|---|
 | pi0.5 LoRA SFT, 4001 steps | about 10 h (7 h on an A100) |
-| Best-of-N, warm-up of 150 episodes and 30 000 updates, then 20 rounds of 50 episodes | about 4.2 to 4.5 h (measured); the warm-up is about 36 min, a round about 9.7 min (about 300 s of collection and 6 400 critic updates at 0.041 s) |
+| Best-of-N, warm-up of 600 episodes and 120 000 updates, then 20 rounds of 50 episodes and 5 in-run evaluations | about 6.5 h (calculated: warm-up about 142 min, 20 rounds of about 9.7 min, evaluations about 45 min); a round is about 300 s of collection and 6 400 critic updates at 0.041 s |
 | PA-RL, 10 rounds of 50 episodes | about 7.5 h (estimate) |
 | evaluation of one round of an RL run, 500 episodes | about 45 min |
 

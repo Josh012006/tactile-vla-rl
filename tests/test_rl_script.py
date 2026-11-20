@@ -58,7 +58,7 @@ def test_the_dry_run_prints_the_plan_and_writes_nothing(tmp_path, capsys):
     run = make_sft_run(tmp_path)
     assert S.main(["--experiment", EXPERIMENT, "--start", str(run), "4000", "--dry-run", "--run-name", "never_created"]) == 0
     out = capsys.readouterr().out
-    assert "method best_of_n" in out and "after the rounds [0, 20]" in out and "warm-up: 600 episodes" in out and "20 rounds of 50 episodes" in out
+    assert "method best_of_n" in out and "after the rounds [0, 5, 10, 15, 20]" in out and "warm-up: 600 episodes" in out and "20 rounds of 50 episodes" in out
     assert not (S.ROOT / "runs/rl/peg_insert/never_created").exists()
     with pytest.raises(SystemExit):
         S.main(["--experiment", EXPERIMENT, "--dry-run"])                                                                            # no start
