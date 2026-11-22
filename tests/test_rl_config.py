@@ -52,6 +52,13 @@ def test_the_experiments_are_the_three_methods_and_best_of_n_with_touch():
     assert not any(c.critic_touch.enabled for c in (best, a, b))                                                        # no touch in the three methods
 
 
+def test_every_experiment_has_the_studys_warm_up_and_only_best_of_n_has_20_rounds():
+    for f in EXPERIMENTS:
+        cfg = rc.load_rl_experiment(f)[1]
+        assert (cfg.warmup_episodes, cfg.warmup_critic_steps) == (600, 120000)
+        assert cfg.total_episodes == (1000 if cfg.variant == "best_of_n" else 500)                                      # PA-RL keeps the 10 rounds of rl.yaml (cost, docs/algos/rl.md section 6)
+
+
 def test_best_of_n_with_touch_differs_from_best_of_n_by_the_critics_touch_only():
     _, plain = rc.load_rl_experiment(ROOT / "configs/experiment/rl/pi05_best_of_n.yaml")
     _, touch = rc.load_rl_experiment(ROOT / "configs/experiment/rl/pi05_best_of_n_touch.yaml")

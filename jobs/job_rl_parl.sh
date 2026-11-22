@@ -14,8 +14,8 @@
 # Disk: about 0.25 GB of episodes per round (images, uncompressed) + the critic's state (about 30 MB) rewritten every round + the VLA's trainable parameters of EVERY round (vlas/round_<r>/, about 1.7 GB each: about 17 GB for 10 rounds)
 # and, for the resume, the last stage's cache (up to a few GB) and VLA + Adam state (about 5 GB): about 25 GB in all per run.
 # Memory (probe of 15 Nov. 2026): the distillation runs in micro-batches of 4 (`distill_micro_batch_size`), the peak of the VLA + Adam + critic is 22.3 GiB, JAX is limited to half of the card (below) and the env server has the rest.
-# Time: NOT MEASURED end to end; estimated from the parts measured on 15 Nov. 2026 (docs/algos/rl.md sections 3 and 5) for the 10 rounds of 50 episodes of the defaults: about 7.5 h (5 h if the episodes average 10 plans) plus saves and server
-# starts, the same for A and B. A SIGTERM is honoured between stages only: a PA-RL stage is up to an hour at the end of a run, so a stage cut by the time limit is played again on --resume. A run that hits the limit ends cleanly on the
+# Time: NOT MEASURED end to end; calculated from the parts measured on 15 Nov. 2026 (docs/algos/rl.md sections 5 and 6) for the experiment files' budget (warm-up of 600 episodes and 120 000 critic updates, then 10 rounds of 50 episodes):
+# about 19 h at 19 plans per episode (distillation 6.7 h, refresh 7.9 h, critic 2.3 h, collection 1.8 h, evaluations 0.45 h; less if the episodes are shorter) plus saves and server starts, the same for A and B; the 24 h below leave room. A SIGTERM is honoured between stages only: a PA-RL stage is up to an hour at the end of a run, so a stage cut by the time limit is played again on --resume. A run that hits the limit ends cleanly on the
 # SIGTERM sent 5 minutes before (after the stage in progress) and continues with --resume.
 #
 #SBATCH --job-name=rl_parl
@@ -23,7 +23,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --signal=B:TERM@300
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --no-requeue

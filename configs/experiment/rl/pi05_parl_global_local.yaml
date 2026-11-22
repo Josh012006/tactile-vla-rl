@@ -1,6 +1,6 @@
 # RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE PegInsert task: PA-RL variant B (global + local optimisation: T = 10 gradient-ascent steps on Q, then distillation).
 # Touch is NOT in the VLA (the SFT checkpoint is the same for every run); the critic's touch inputs (`critic_use_tactile`, `critic_use_force`) are off here, and a tactile variant is this file with them on.
-# Everything not written here is configs/algo/rl.yaml (the paper's values); the model is configs/model/pi05.yaml. The SFT checkpoint to start from (`start: {run, step}`) is
+# Everything not written here is configs/algo/rl.yaml (the paper's values), except the warm-up budget, written below; the model is configs/model/pi05.yaml. The SFT checkpoint to start from (`start: {run, step}`) is
 # given on the command line (`--start <SFT run> <step>`, jobs/job_rl_*.sh), so that one experiment file serves every starting point (docs/algos/rl.md).
 name: peg_insert_pi05_parl_global_local
 description: "pi0.5 PA-RL variant B (global + local), PegInsert, one online critic, no touch"
@@ -10,3 +10,5 @@ set:
   seed: 42                         # as the SFT main runs
   method: parl
   local_steps: 10
+  warmup_episodes: 600             # warm-up budget of the study, the same as Best-of-N (rl.yaml keeps the paper's 50 / 5000). The rounds stay those of rl.yaml: 10 of 50 episodes
+  warmup_critic_steps: 120000
