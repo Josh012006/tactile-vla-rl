@@ -3,6 +3,7 @@
 # Isaac Sim (one env server at a time), the VLA, its optimiser and the critic share ONE L40S (46 GB). The two versions are chosen by --variant:
 #   A  global      = configs/experiment/rl/pi05_parl_global.yaml        (top-m of the k = 32 candidates by Q, then distillation)
 #   B  global+local = configs/experiment/rl/pi05_parl_global_local.yaml  (the same + 10 steps of gradient ascent on Q of the kept chunks)
+#   with touch in the critic: --experiment configs/experiment/rl/pi05_parl_global_touch.yaml (A) or pi05_parl_global_local_touch.yaml (B) instead of --variant
 #   sbatch jobs/job_rl_parl.sh --variant A --start <SFT run> <step>                   # a main run of variant A: output in runs/rl/peg_insert/<experiment name>
 #   sbatch jobs/job_rl_parl.sh --variant B --start <SFT run> <step> --run-name probe --set total_episodes=100 --set warmup_critic_steps=500     # a short probe of variant B (the experiment's output_root)
 #   XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 sbatch jobs/job_rl_parl.sh --variant A --start <SFT run> <step> --run-name probe2 --set total_episodes=100 --set warmup_critic_steps=5000   # another JAX share of the card for this run (default 0.6)
@@ -14,16 +15,17 @@
 # Disk: about 0.25 GB of episodes per round (images, uncompressed) + the critic's state (about 30 MB) rewritten every round + the VLA's trainable parameters of EVERY round (vlas/round_<r>/, about 1.7 GB each: about 17 GB for 10 rounds)
 # and, for the resume, the last stage's cache (up to a few GB) and VLA + Adam state (about 5 GB): about 25 GB in all per run.
 # Memory (probe of 15 Nov. 2026): the distillation runs in micro-batches of 4 (`distill_micro_batch_size`), the peak of the VLA + Adam + critic is 22.3 GiB, JAX is limited to half of the card (below) and the env server has the rest.
-# Time: NOT MEASURED end to end; calculated from the parts measured on 15 Nov. 2026 (docs/algos/rl.md sections 5 and 6) for the experiment files' budget (warm-up of 600 episodes and 120 000 critic updates, then 10 rounds of 50 episodes):
-# about 19 h at 19 plans per episode (distillation 6.7 h, refresh 7.9 h, critic 2.3 h, collection 1.8 h, evaluations 0.45 h; less if the episodes are shorter) plus saves and server starts, the same for A and B; the 24 h below leave room. A SIGTERM is honoured between stages only: a PA-RL stage is up to an hour at the end of a run, so a stage cut by the time limit is played again on --resume. A run that hits the limit ends cleanly on the
-# SIGTERM sent 5 minutes before (after the stage in progress) and continues with --resume.
+# Time: NOT MEASURED end to end; calculated from the parts measured on 15-23 Nov. 2026 (docs/algos/rl.md sections 5 and 6) for the experiment files' budget (warm-up of 300 episodes and 30 000 critic updates, then 20 rounds of 50 episodes):
+# about 25 h at about 11 buffer rows per episode, as measured in the probes (distillation 9.1 h: 216 000 rows at 9.6 s per 64; refresh 11.2 h: 200 000 rows at 0.2 s; critic 1.6 h; collection 2.0 h; evaluations 0.9 h; saves and server starts), the same for A and B,
+# so the 36 h below leave room for one stage cut by the limit. A SIGTERM is honoured between stages only: a PA-RL stage is about 1.5 h at the end of a run, so a stage cut by the time limit is played again on --resume. A run that hits the limit ends cleanly on the
+# SIGTERM sent 5 minutes before (after the stage in progress) and continues with --resume. If the partition refuses 36 h, ask for less (--time=24:00:00 on the command line) and resume once.
 #
 #SBATCH --job-name=rl_parl
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=36:00:00
 #SBATCH --signal=B:TERM@300
 #SBATCH --output=logs/slurm/%x_%j.out
 #SBATCH --no-requeue

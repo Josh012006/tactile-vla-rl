@@ -43,22 +43,36 @@ def test_the_experiments_are_the_three_methods_and_best_of_n_with_touch():
         exp, cfg = rc.load_rl_experiment(f)
         found[exp["name"]] = cfg
         assert exp["model"] == "pi05" and f.stem == exp["name"].replace("peg_insert_", "") and cfg.output_root == "runs/rl/peg_insert" and cfg.seed == 42
-    assert set(found) == {"peg_insert_pi05_best_of_n", "peg_insert_pi05_best_of_n_touch", "peg_insert_pi05_parl_global", "peg_insert_pi05_parl_global_local"}
+    assert set(found) == {"peg_insert_pi05_best_of_n", "peg_insert_pi05_best_of_n_touch", "peg_insert_pi05_parl_global", "peg_insert_pi05_parl_global_local",
+                          "peg_insert_pi05_parl_global_touch", "peg_insert_pi05_parl_global_local_touch"}
     best, a, b = (found[k] for k in ("peg_insert_pi05_best_of_n", "peg_insert_pi05_parl_global", "peg_insert_pi05_parl_global_local"))
     assert (best.variant, a.variant, b.variant) == ("best_of_n", "parl_global", "parl_global_local")
     assert (best.keep_top, best.local_steps, best.rollout_selection, best.distills) == (1, 0, "argmax", False)
     assert (a.keep_top, a.local_steps, a.distills) == (10, 0, True) and (b.keep_top, b.local_steps, b.distills) == (10, 10, True)
     assert all(c.num_candidates == 32 for c in found.values())                                                           # k = 32 for all
     assert not any(c.critic_touch.enabled for c in (best, a, b))                                                        # no touch in the three methods
+    assert b.local_lr == 3.0e-2                                                                                          # probes of 23 Nov. 2026
 
 
-def test_every_experiment_has_the_studys_warm_up_and_only_best_of_n_has_20_rounds():
+def test_every_experiment_has_its_methods_warm_up_and_the_same_20_rounds():
     for f in EXPERIMENTS:
         cfg = rc.load_rl_experiment(f)[1]
-        assert (cfg.warmup_episodes, cfg.warmup_critic_steps) == (600, 120000)
-        assert cfg.total_episodes == (1000 if cfg.variant == "best_of_n" else 500)                                      # PA-RL keeps the 10 rounds of rl.yaml (cost, docs/algos/rl.md section 6)
-        if cfg.variant != "best_of_n":
-            assert (cfg.distill_selection, cfg.distill_lr) == ("argmax", 2.5e-8)                                        # the probes of 22-23 Nov. 2026 (docs/algos/rl.md)
+        if cfg.variant == "best_of_n":
+            assert (cfg.warmup_episodes, cfg.warmup_critic_steps) == (600, 120000)                                       # locked by the warm-up tests of Nov. 2026
+        else:
+            assert (cfg.warmup_episodes, cfg.warmup_critic_steps) == (300, 30000)                                        # PA-RL: decision of 23 Nov. 2026 (docs/algos/rl.md)
+            assert (cfg.distill_selection, cfg.distill_lr) == ("argmax", 2.5e-8)                                         # the probes of 22-23 Nov. 2026
+        assert cfg.total_episodes == 1000 and cfg.rounds == 20                                                           # the same online budget for every method
+
+
+def test_parl_with_touch_differs_from_parl_by_the_critics_touch_only():
+    ignore = ("critic_use_tactile", "critic_use_force", "critic_force_mode")
+    strip = lambda c: {k: v for k, v in dataclasses.asdict(c).items() if k not in ignore}
+    for name in ("pi05_parl_global", "pi05_parl_global_local"):
+        _, plain = rc.load_rl_experiment(ROOT / f"configs/experiment/rl/{name}.yaml")
+        _, touch = rc.load_rl_experiment(ROOT / f"configs/experiment/rl/{name}_touch.yaml")
+        assert touch.critic_touch == TouchSpec(use_tactile=True, use_force=True, force_mode="measured") and not plain.critic_touch.enabled
+        assert strip(plain) == strip(touch)
 
 
 def test_best_of_n_with_touch_differs_from_best_of_n_by_the_critics_touch_only():

@@ -65,7 +65,7 @@ def test_parl_needs_a_variant_unless_it_resumes_and_refuses_what_does_not_fit():
     assert run(PARL)[0] == 1
 
 
-@pytest.mark.parametrize("script, name, hours", [(BON, "rl_bon", "08:00:00"), (PARL, "rl_parl", "24:00:00")])
+@pytest.mark.parametrize("script, name, hours", [(BON, "rl_bon", "08:00:00"), (PARL, "rl_parl", "36:00:00")])
 def test_the_scripts_parse_and_ask_for_one_l40s_and_the_sigterm_before_the_limit(script, name, hours):
     assert subprocess.run(["bash", "-n", str(ROOT / script)]).returncode == 0
     text = (ROOT / script).read_text()
