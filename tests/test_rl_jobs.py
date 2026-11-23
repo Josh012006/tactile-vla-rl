@@ -76,9 +76,9 @@ def test_the_scripts_parse_and_ask_for_one_l40s_and_the_sigterm_before_the_limit
 
 def test_the_parl_job_keeps_the_jax_memory_fraction_the_environment_gives_it_and_defaults_to_half():
     text = (ROOT / PARL).read_text()
-    assert "export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.5}" in text
+    assert "export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.6}" in text
     script = "\n".join(line for line in text.splitlines() if line.startswith("export XLA_PYTHON_CLIENT_MEM_FRACTION"))
-    for given, expected in ((None, "0.5"), ("0.6", "0.6")):
+    for given, expected in ((None, "0.6"), ("0.65", "0.65")):
         env = {k: v for k, v in os.environ.items() if k != "XLA_PYTHON_CLIENT_MEM_FRACTION"}
         if given:
             env["XLA_PYTHON_CLIENT_MEM_FRACTION"] = given
