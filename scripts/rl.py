@@ -4,6 +4,7 @@
     python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --start <run> <step> --dry-run                # what would run: no GPU, no model, no server
     python -m scripts.rl --experiment <file> --start <run> <step> --set total_episodes=100 --set warmup_critic_steps=500 --run-name probe       # a short probe, in the experiment's output_root
     python -m scripts.rl --resume runs/rl/peg_insert/<run name>                                                               # after a stop or a failure: continues after the last finished stage
+    python -m scripts.rl --resume runs/rl/peg_insert/<run name> --extend-to 1000                                              # a run that is done (or stopped) goes on to 1000 online episodes: more rounds of the same run
 
 Run it through jobs/job_rl_best_of_n.sh (Best-of-N) or jobs/job_rl_parl.sh --variant A|B (PA-RL) (Isaac Sim, the VLA and the critic share one GPU). The experiment file (configs/experiment/rl/*.yaml) says the method and the name of the run; everything else is configs/algo/rl.yaml.
 `--start` (or the experiment's `start: {run, step}`) is the SFT checkpoint the VLA starts from: the model is the SFT run's own (its model YAML, its LoRA, its normalisation statistics, compared byte for byte with the copy
@@ -22,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import dataclasses
+import datetime
 import json
 import signal
 import sys
@@ -80,6 +83,25 @@ def resume_config(saved: dict, sets: Dict[str, object]) -> rl_config.RLConfig:
     return rl_config.config_from_dict(saved["rl"], sets)
 
 
+def extend_config(saved: dict, new_total: int, last_stage: Optional[int]) -> dict:
+    """The config.json of a run continued past its `total_episodes` (`--resume RUN --extend-to N`): the same run with more rounds, not another run. Nothing but `total_episodes` changes; the extension is written in
+    `extensions` (what it was, what it became, after which finished stage) so the run's history stays readable. `N` equal to the run's total is a no-op (the same command can be sent again after a stop)."""
+    old = int(saved["rl"]["total_episodes"])
+    if new_total < old:
+        raise SystemExit(f"--extend-to {new_total}: the run already has {old} episodes; a run can be continued further, not cut")
+    out = copy.deepcopy(saved)
+    if new_total == old:
+        return out
+    try:
+        rl_config.config_from_dict({**out["rl"], "total_episodes": new_total})              # the checks of the config (a multiple of envs_per_batch, ...)
+    except ValueError as error:
+        raise SystemExit(f"--extend-to {new_total}: {error}")
+    out["rl"]["total_episodes"] = new_total
+    out.setdefault("extensions", []).append({"total_episodes_from": old, "total_episodes_to": new_total, "after_stage": last_stage,
+                                              "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
+    return out
+
+
 # -- the env servers -------------------------------------------------------------------------------------------------------------------------------
 def make_opener(task_config: Path, env_set, logs_dir: Path, max_steps: int, ready_timeout: float, stop: threading.Event):
     """open_env(num_envs, label): a context manager that starts an env server of `num_envs` environments (own port and process group), waits for it, gives the client, and stops the server."""
@@ -132,6 +154,8 @@ def main(argv=None) -> int:
     ap.add_argument("--start", nargs=2, metavar=("RUN", "STEP"), help="the SFT run (folder name or path) and the checkpoint step the VLA starts from (default: the experiment's `start`)")
     ap.add_argument("--set", action="append", metavar="KEY=VALUE", help="override a key of configs/algo/rl.yaml (the command line wins over the experiment)")
     ap.add_argument("--resume", metavar="RUN", help="continue the run RUN (a path, or a folder name under its output_root) after its last finished stage")
+    ap.add_argument("--extend-to", type=int, metavar="TOTAL_EPISODES", help="with --resume: continue the run past its `total_episodes` (a multiple of envs_per_batch, more than the run's): the same run with more rounds, "
+                    "as if it had been planned so (PA-RL first draws again the candidates the old last round did not). Send it only when the run is not running. Saved in config.json (`extensions`)")
     ap.add_argument("--run-name", help="folder name of the run (default: the experiment's `name`)")
     ap.add_argument("--task-config", default=DEFAULT_TASK, help=f"env server YAML (default {DEFAULT_TASK})")
     ap.add_argument("--env-set", action="append", default=[], metavar="KEY=VALUE", help="override a key of the task YAML for the servers (not num_envs / server_port)")
@@ -140,6 +164,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if bool(args.resume) == bool(args.experiment):
         ap.error("give --experiment (a new run) or --resume (a run that stopped), not both and not neither")
+    if args.extend_to is not None and not args.resume:
+        ap.error("--extend-to continues a run: give it with --resume")
     sets = parse_assignments(args.set)
     task_config = Path(args.task_config) if Path(args.task_config).is_absolute() else ROOT / args.task_config
     if not task_config.is_file():
@@ -152,11 +178,23 @@ def main(argv=None) -> int:
         if run_dir is None:
             raise SystemExit(f"no RL run {args.resume!r} (looked for config.json at that path and under runs/rl/)")
         saved = json.loads((run_dir / "config.json").read_text())
+        extension = None
+        if args.extend_to is not None:
+            state_file = run_dir / "resume" / "state.json"
+            last_stage = int(json.loads(state_file.read_text())["stage"]) if state_file.exists() else None
+            extended = extend_config(saved, args.extend_to, last_stage)
+            extension = extended if extended != saved else None
+            saved = extended
         cfg = resume_config(saved, sets)
         model_cfg, task, config = saved["model_cfg"], saved["task"], saved
         start = {**saved["start"], "run_config": json.loads((Path(saved["start"]["run"]) / "config.json").read_text())}
         resuming = True
+        if extension:
+            note = extension["extensions"][-1]
+            print(f"EXTENDED: total_episodes {note['total_episodes_from']} -> {note['total_episodes_to']} after stage {note['after_stage']} (the run keeps everything else); "
+                  + ("PA-RL draws again the candidates of every state first (the old last round did not): hours of model calls" if cfg.distills else "the VLA stays frozen: nothing else to prepare"))
     else:
+        extension = None
         exp, cfg = rl_config.load_rl_experiment(args.experiment, sets)
         start = resolve_start(exp, tuple(args.start) if args.start else None)
         model_cfg = check_start(exp, start)
@@ -191,6 +229,8 @@ def main(argv=None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     if not resuming:
         (run_dir / "config.json").write_text(json.dumps(config, indent=2, default=str))
+    elif extension:
+        (run_dir / "config.json").write_text(json.dumps(extension, indent=2, default=str))
     print(f"loading the model ({model_cfg['name']}) and the SFT checkpoint {start['checkpoint']}", flush=True)
     policy = load_model(model_cfg, seed=run_seed(start["run_config"]))
     meta = sft_mod.load_checkpoint(policy, Path(start["checkpoint"]))

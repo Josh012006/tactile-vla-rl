@@ -4,6 +4,7 @@
 #   sbatch jobs/job_rl_best_of_n.sh --start <SFT run> <step> --run-name probe --set total_episodes=100 --set warmup_critic_steps=500     # a short probe (the experiment's output_root)
 #   sbatch jobs/job_rl_best_of_n.sh --experiment configs/experiment/rl/pi05_best_of_n_touch.yaml --start <SFT run> <step> --run-name <name>      # the same with tactile + measured force in the critic
 #   sbatch jobs/job_rl_best_of_n.sh --resume runs/rl/peg_insert/<run name>            # after a stop or a failure: continues after the last finished stage (a stage = the warm-up, or one round with its critic updates)
+#   sbatch jobs/job_rl_best_of_n.sh --resume runs/rl/peg_insert/<run name> --extend-to 1000   # a run that is done (or stopped) goes on to 1000 online episodes, as the same run (the VLA stays frozen: nothing to prepare)
 # Every other option goes to `python -m scripts.rl` (see its --help); `--experiment FILE` replaces the default experiment (it must be a best_of_n one: PA-RL has jobs/job_rl_parl.sh). Look first, on the login node, at what would run:
 #   python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --start <run> <step> --dry-run
 # Before the first run: the learner venv and the models fetched (uv sync --group vla; python -m scripts.fetch_models), the Isaac Lab venv (scripts/setup_isaac_venv.sh), wandb login (--set wandb_mode=offline | disabled to change).

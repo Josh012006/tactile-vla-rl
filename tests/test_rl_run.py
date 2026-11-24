@@ -295,3 +295,48 @@ def test_a_parl_resume_after_the_warm_up_alone_starts_the_distillation_from_the_
     reference, _ = make_parl(tmp_path / "b")
     reference.run()
     same_state(parl_state(run_b), parl_state(reference))
+
+
+def test_a_parl_run_that_is_done_continues_past_its_last_round_as_if_it_had_been_planned_with_more(tmp_path):
+    """`--resume --extend-to`: the old last round did not redraw the cache (nothing read it); the continuation draws it again first, then plays on exactly as a longer run."""
+    first, _ = make_parl(tmp_path / "a")
+    assert first.run()["stage"] == 2
+    log, opener = ListLog(), Opener()
+    longer, cfg = make_parl(tmp_path / "a", log, opener, total_episodes=12)                  # a new process with the extended settings: 3 rounds
+    assert cfg.rounds == 3 and longer.buffer.capacity > first.buffer.capacity
+    summary = longer.run()
+    assert summary["stage"] == 3 and not summary["stopped"] and summary["evaluated"] == [0, 1, 2, 3]
+    assert [(e["step"], e.get("continued_past_the_old_last_round", False)) for e in log.of("refresh")] == [(2, True)]          # the refresh the old last round skipped, once, before round 3
+    assert [label for _, label in opener.opened] == ["collect", "eval_3"]                      # round 3 and its evaluation only: nothing is played again
+    reference, _ = make_parl(tmp_path / "b", total_episodes=12)
+    reference.run()
+    same_state(parl_state(longer), parl_state(reference))
+    assert longer.distiller.updates == reference.distiller.updates and longer.version == reference.version == 3
+    assert json.loads(longer.result_path(3).read_text())["eval_sha"] == json.loads(reference.result_path(3).read_text())["eval_sha"]
+
+
+def test_the_refresh_of_an_extension_is_not_repeated_when_the_continuation_is_cut_and_resumed(tmp_path):
+    first, _ = make_parl(tmp_path / "a")
+    first.run()
+    stop = threading.Event()
+    log = ListLog(on_event=lambda e: stop.set() if e["event"] == "refresh" else None)
+    cut, _ = make_parl(tmp_path / "a", log, stop=stop, total_episodes=12)
+    assert cut.run()["stage"] == 2                                                              # cut right after the refresh, before round 3
+    log_again = ListLog()
+    again, _ = make_parl(tmp_path / "a", log_again, total_episodes=12)
+    assert again.run()["stage"] == 3 and log_again.of("refresh") == []                          # the cache file written after the refresh holds version 2: nothing to draw again
+    reference, _ = make_parl(tmp_path / "b", total_episodes=12)
+    reference.run()
+    same_state(parl_state(again), parl_state(reference))
+
+
+def test_a_best_of_n_run_that_is_done_continues_past_its_last_round_with_nothing_to_redraw(tmp_path):
+    first, _ = make_run(tmp_path / "a")
+    first.run()
+    log = ListLog()
+    longer, _ = make_run(tmp_path / "a", log, total_episodes=12)
+    assert longer.run()["stage"] == 3 and log.of("refresh") == []
+    reference, _ = make_run(tmp_path / "b", total_episodes=12)
+    reference.run()
+    assert all(np.array_equal(x, y) for x, y in zip(leaves(longer.trainer.critic.params), leaves(reference.trainer.critic.params)))
+    assert longer.trainer.updates == reference.trainer.updates and np.array_equal(longer.buffer.action[:len(longer.buffer)], reference.buffer.action[:len(reference.buffer)])

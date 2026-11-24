@@ -71,3 +71,46 @@ def test_the_dry_run_of_a_parl_experiment_says_it_distils_and_keeps_a_vla_checkp
     assert S.main(["--experiment", "configs/experiment/rl/pi05_parl_global_local.yaml", "--start", str(run), "4000", "--dry-run", "--run-name", "never_created"]) == 0
     out = capsys.readouterr().out
     assert "method parl_global_local" in out and "distillation after every round" in out and "a VLA checkpoint" in out
+
+
+def saved_config(total=500):
+    cfg = rl_config.load_rl_config(overrides={**EXP["set"], "total_episodes": total})
+    return {"rl": __import__("dataclasses").asdict(cfg), "name": "run"}
+
+
+def test_extending_a_run_changes_only_its_total_and_writes_down_what_was_done(tmp_path):
+    saved = saved_config(500)
+    out = S.extend_config(saved, 1000, last_stage=10)
+    assert saved["rl"]["total_episodes"] == 500                                                                            # the input is not touched
+    assert out["rl"]["total_episodes"] == 1000 and {k: v for k, v in out["rl"].items() if k != "total_episodes"} == {k: v for k, v in saved["rl"].items() if k != "total_episodes"}
+    assert S.resume_config(out, {}).rounds == 20
+    (note,) = out["extensions"]
+    assert note["total_episodes_from"] == 500 and note["total_episodes_to"] == 1000 and note["after_stage"] == 10 and note["at"].endswith("+00:00")
+    again = S.extend_config(out, 1000, last_stage=10)                                                                       # the same command sent again after a stop: nothing more
+    assert again == out
+    twice = S.extend_config(out, 1500, last_stage=20)
+    assert [e["total_episodes_to"] for e in twice["extensions"]] == [1000, 1500]
+
+
+def test_an_extension_cannot_cut_a_run_or_break_the_batches(tmp_path):
+    saved = saved_config(500)
+    with pytest.raises(SystemExit, match="can be continued further, not cut"):
+        S.extend_config(saved, 400, None)
+    with pytest.raises(SystemExit, match="multiple of envs_per_batch"):
+        S.extend_config(saved, 520, None)
+
+
+def test_extend_to_needs_a_resume_and_the_dry_run_extends_nothing(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        S.main(["--experiment", EXPERIMENT, "--extend-to", "1000", "--dry-run"])
+    sft = make_sft_run(tmp_path)
+    run = tmp_path / "rl_run"
+    run.mkdir()
+    saved = {**saved_config(500), "model_cfg": {"name": "pi05", "family": "pi05", "action_horizon": 16}, "task": {"max_steps_per_episode": 150}, "start": {"run": str(sft), "step": 4000, "checkpoint": str(sft / "checkpoints" / "4000")}}
+    (run / "config.json").write_text(json.dumps(saved))
+    (run / "resume").mkdir()
+    (run / "resume" / "state.json").write_text(json.dumps({"stage": 10}))
+    assert S.main(["--resume", str(run), "--extend-to", "1000", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "EXTENDED: total_episodes 500 -> 1000 after stage 10" in out and "20 rounds of 50 episodes" in out and "the VLA stays frozen" in out
+    assert json.loads((run / "config.json").read_text())["rl"]["total_episodes"] == 500                                       # a dry run writes nothing

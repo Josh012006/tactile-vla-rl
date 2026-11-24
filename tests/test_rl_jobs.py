@@ -27,6 +27,7 @@ def test_best_of_n_runs_its_experiment_with_the_options_given():
 
 def test_a_resume_carries_no_experiment_and_another_best_of_n_experiment_replaces_the_default(tmp_path):
     assert run(BON, "--resume", "runs/rl/peg_insert/x")[1] == "python -m scripts.rl --resume runs/rl/peg_insert/x"
+    assert run(BON, "--resume", "runs/rl/peg_insert/x", "--extend-to", "1000")[1] == "python -m scripts.rl --resume runs/rl/peg_insert/x --extend-to 1000"
     other = tmp_path / "bon.yaml"
     other.write_text("name: x\nset:\n  method: best_of_n\n")
     assert run(BON, "--experiment", str(other), "--start", "r", "1")[1] == f"python -m scripts.rl --experiment {other} --start r 1"
@@ -56,6 +57,7 @@ def test_parl_needs_a_variant_unless_it_resumes_and_refuses_what_does_not_fit():
     code, _, err = run(PARL, "--start", "r", "1")
     assert code == 1 and "--variant A" in err
     assert run(PARL, "--resume", "runs/rl/peg_insert/x")[1] == "python -m scripts.rl --resume runs/rl/peg_insert/x"
+    assert run(PARL, "--resume", "runs/rl/peg_insert/x", "--extend-to", "1000")[1] == "python -m scripts.rl --resume runs/rl/peg_insert/x --extend-to 1000"
     assert "unknown --variant" in run(PARL, "--variant", "C", "--start", "r", "1")[2]
     assert "choose one" in run(PARL, "--variant", "A", "--experiment", f"{EXP}pi05_parl_global.yaml")[2]
     assert "for a new run" in run(PARL, "--variant", "A", "--resume", "x")[2]

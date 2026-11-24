@@ -222,6 +222,10 @@ class RLRun:
         if r == cfg.rounds:
             self.version = r                      # the VLA is the one of round r; the cache is not redrawn (below)
             return                                # nothing reads the cache after the last round (the evaluations draw their own candidates): the dearest refresh of the run, for nothing
+        self._refresh_all(r)
+
+    def _refresh_all(self, r: int, **extra) -> None:
+        """The candidates of EVERY stored state drawn again by the VLA of round `r` (the cache then holds only version `r`)."""
         ids = self.buffer.candidate_ids()
         next_log = [REFRESH_LOG_EVERY]
 
@@ -230,11 +234,22 @@ class RLRun:
                 self.log.write(event="refresh_progress", round=r, done=done, total=total)
                 next_log[0] = (done / total // REFRESH_LOG_EVERY + 1) * REFRESH_LOG_EVERY
 
-        info = refresh(self.cache, self.actor.sampler, self.buffer.observations, ids, r, cfg.seed, progress=progress)
+        info = refresh(self.cache, self.actor.sampler, self.buffer.observations, ids, r, self.cfg.seed, progress=progress)
         if not np.all(self.cache.versions_of(ids) == r):
             raise RuntimeError(f"the refresh of round {r} left candidates of another version in the cache")
         self.version = r
-        self.log.write(event="refresh", step=r, version=r, **info)
+        self.log.write(event="refresh", step=r, version=r, **info, **extra)
+
+    def _redraw_the_candidates_the_last_round_skipped(self) -> None:
+        """A run continued past its old last round (`scripts.rl --resume ... --extend-to`): PA-RL does not redraw the cache after the LAST round (nothing read it), so it still holds the candidates of older VLAs and the
+        next round's critic updates would read them. They are drawn again by the VLA of that round, as they would have been in a run planned with more rounds (a refresh is hours: the cache file is written at once, so a cut
+        after it does not repeat it)."""
+        if self.distiller is None or self.stage < 1 or self.stage >= self.cfg.rounds:
+            return
+        if np.all(self.cache.versions_of(self.buffer.candidate_ids()) == self.stage):
+            return
+        self._refresh_all(self.stage, continued_past_the_old_last_round=True)
+        save_cache(self.run_dir / cache_file(self.stage), self.cache)
 
     # -- the end of a stage and the resume ---------------------------------------------------------------------------------------------------------
     def _save_vla_checkpoint(self, stage: int) -> None:
@@ -330,6 +345,8 @@ class RLRun:
                        critic_params=rc.num_parameters(self.trainer.critic.params), buffer_capacity=self.buffer.capacity, replan=self.replan, max_steps=self.max_steps)
         stopped = False
         try:
+            if resumed:
+                self._redraw_the_candidates_the_last_round_skipped()
             for r in range(cfg.rounds + 1):
                 if r > self.stage:
                     if self.stop.is_set():
