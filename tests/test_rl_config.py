@@ -61,7 +61,9 @@ def test_every_experiment_has_its_methods_warm_up_and_the_same_20_rounds():
             assert (cfg.warmup_episodes, cfg.warmup_critic_steps) == (600, 120000)                                       # locked by the warm-up tests of Nov. 2026
         else:
             assert (cfg.warmup_episodes, cfg.warmup_critic_steps) == (300, 30000)                                        # PA-RL: decision of 23 Nov. 2026 (docs/algos/rl.md)
-            assert (cfg.distill_selection, cfg.distill_lr) == ("argmax", 2.5e-8)                                         # the probes of 22-23 Nov. 2026
+            assert (cfg.distill_selection, cfg.distill_lr) == ("argmax", 8e-8)                                           # decision of 25 Nov. 2026 (probes of 22-25 Nov.)
+            if cfg.local_steps > 0:
+                assert cfg.local_lr == 3e-2                                                                              # decision of 25 Nov. 2026
         assert cfg.total_episodes == 1000 and cfg.rounds == 20                                                           # the same online budget for every method
 
 

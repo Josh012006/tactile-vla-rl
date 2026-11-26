@@ -15,8 +15,8 @@ set:
   warmup_critic_steps: 30000       # and the warm-up data is distilled and refreshed in every round, so a smaller one is cheaper
   total_episodes: 1000             # 20 rounds of 50 episodes, as Best-of-N (the same online budget); about 25 h calculated, jobs/job_rl_parl.sh asks for 36 h
   distill_selection: argmax         # label = the best candidate by Q (paper B.1); probes of 22-23 Nov. 2026 at warm-up 300/30k: argmax = softmax for the VLA alone, but critic + VLA held (53.2 at round 3) where softmax fell (47.2, paired +6.0, p = 0.005)
-  distill_lr: 2.5e-8               # the only distillation lr that did not degrade the VLA in those probes (2.5e-7 and above, 8e-8, and 4 epochs at 2.5e-8, all degraded); calibrated on variant A, kept for B (decision of 23 Nov. 2026: it is the one that does well with the critic in the loop). The VLA still drifts with the cumulated lr x steps (5 rounds at 600/120k: 45.4 -> 41.4)
-  local_lr: 3.0e-2                 # step of the gradient ascent on Q (probes of 23 Nov. 2026, warm-up 300/30k, 3 rounds): critic + VLA at round 3 was 51.8 / 56.0 / 68.8 for 3e-4 / 3e-3 / 3e-2, the VLA alone stayed at 45; 1e-1 and 3e-1 were still being tested
+  distill_lr: 8.0e-8               # decision of 25 Nov. 2026 (2.5e-8 before). Variant B probes of 6 rounds (warm-up 300/30k, argmax), local_lr 3e-2: VLA alone at round 6 is 48.2 with 8e-8 against 44.4 with 2.5e-8, critic + VLA 68.8 against 65.4 (one run each, not established). 8e-8 is 3.2x the dose per step: variant A at 2.5e-8 lost the VLA alone over 20 rounds (teleop 48.2 -> 39.8 at round 10 -> 26.6 at round 20), hence 10 rounds first (docs/algos/rl.md)
+  local_lr: 3.0e-2                 # decision of 25 Nov. 2026: critic + VLA at round 3 was 51.8 / 56.0 / 68.8 for 3e-4 / 3e-3 / 3e-2 and stays 57 to 69 up to round 6; 1e-1 with distill 2.5e-8 collapsed (73.8 at round 2 -> 7.4 at round 6), 2e-1 and 3e-1 were worse
   critic_use_tactile: true         # the 56 taxels
   critic_use_force: true           # ft_force (3) + gripper_effort (1)
   critic_force_mode: measured      # not "proxy"
