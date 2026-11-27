@@ -312,8 +312,10 @@ def test_the_environments_of_a_round_are_independent(env, reports_dir):
 
 
 # ------------------------------------------------------------------------------------------------------------ 3. the rounds
-def test_long_run_is_stable(server):
+def test_long_run_is_stable(server, isaac_config):
+    import yaml
     from src.envs.collect import Collector
+    max_steps = int(yaml.safe_load(open(isaac_config))["max_steps_per_episode"])               # 150 for PegInsert, 300 GearMesh, 450 NutThread
     with server.client() as env:
         rng = np.random.default_rng(0)
         hold = {"v": None}
@@ -323,9 +325,9 @@ def test_long_run_is_stable(server):
                 hold["v"] = env.hold_actions()
             return hold["v"] + rng.normal(0, 0.01, hold["v"].shape).astype(np.float32)
 
-        data = Collector(env, policy, mode="steps", store_next_obs=False, seed=0).collect(330)      # seed given: starts at round 0
-        assert len(data.episodes) >= N * 2                                      # max_steps 150: every env finished twice
-        assert all(ep.length == 150 and ep.truncated for ep in data.episodes if not ep.terminated)
+        data = Collector(env, policy, mode="steps", store_next_obs=False, seed=0).collect(int(2.2 * max_steps))      # seed given: starts at round 0
+        assert len(data.episodes) >= N * 2                                      # every env finished twice
+        assert all(ep.length == max_steps and ep.truncated for ep in data.episodes if not ep.terminated)
         assert data.round.max() == 2
         for k, v in data.obs.items():
             assert np.isfinite(v.astype(np.float64)).all(), k

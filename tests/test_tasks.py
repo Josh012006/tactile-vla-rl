@@ -268,3 +268,72 @@ def test_a_step_sends_the_orientation_held_turned_by_the_yaw_so_far_and_the_demo
     assert session.info()["yaw_deg"] == pytest.approx(15.0, abs=0.05) and session.idle_steps == 1          # a turn is not an idle step; only the first, motionless one is
     session.start(101)
     assert session.yaw == 0.0                                                                               # a new episode starts from the held orientation again
+
+
+# -- scripts/demos/yaw_check.py: the yaw test of the teleop client, without a PC ------------------------------------------------------------
+def test_the_swing_twist_split_reads_the_yaw_and_the_tilt_of_a_rotation():
+    from scripts.demos import yaw_check as Y
+    q0 = np.array([0.0, 1.0, 0.0, 0.0])                                                                     # the hand pointing down
+    assert Y.rotation_since(q0, q0) == pytest.approx((0.0, 0.0), abs=1e-6)
+    yaw, tilt = Y.rotation_since(q0, Y.quat_mul(Y.yaw_quat(np.deg2rad(30.0)), q0))
+    assert (yaw, tilt) == pytest.approx((30.0, 0.0), abs=1e-6)
+    yaw, tilt = Y.rotation_since(q0, Y.quat_mul(Y.yaw_quat(np.deg2rad(-20.0)), q0))
+    assert yaw == pytest.approx(-20.0, abs=1e-6)
+    tilted = Y.quat_mul(np.array([np.cos(np.deg2rad(5.0)), np.sin(np.deg2rad(5.0)), 0.0, 0.0]), q0)           # 10 degrees about x
+    assert Y.rotation_since(q0, tilted) == pytest.approx((0.0, 10.0), abs=1e-6)
+    assert Y.schedule(9.0, 3.0) == [3.0, 6.0, 9.0, 6.0, 3.0, 0.0] and Y.schedule(-6.0, 3.0) == [-3.0, -6.0, -3.0, 0.0]
+
+
+class FakeYawEnv:
+    """A hand whose wrist follows the commanded yaw exactly (the action is the next joint target), holding an object 20 mm from its axis."""
+    prompt = "p"
+
+    def __init__(self, *_a, **_k):
+        self.yaw = 0.0
+        self.q0 = np.array([0.0, 1.0, 0.0, 0.0])
+
+    def _obs(self):
+        off = 0.02 * np.array([np.cos(self.yaw), np.sin(self.yaw), 0.0]) + [0.0, 0.0, 0.01]
+        img = np.zeros((224, 224, 3), np.uint8)
+        return {"observation/exterior_image_1_left": img, "observation/wrist_image_left": img, "extra/peg_socket_offset": off.astype(np.float32), "extra/ft_force": np.zeros(3, np.float32)}
+
+    def reset(self, seed):
+        return self._obs()
+
+    def observation(self):
+        return self._obs()
+
+    def status(self):
+        return SimpleNamespace(done=False, success=False)
+
+    def debug(self, kind, **kw):
+        from scripts.demos import yaw_check as Y
+        if kind == "robot_info":
+            return {"name": "fake", "task": "nut_thread"}
+        if kind == "fingertip_pose":
+            return {"quat": Y.quat_mul(Y.yaw_quat(self.yaw), self.q0), "pos": np.zeros(3)}
+        assert kind == "ik_joint_target"
+        target = np.asarray(kw["target_quat"], dtype=np.float64).reshape(4)
+        goal = np.deg2rad(Y.rotation_since(self.q0, target)[0])                                              # the wrist joint turns by the yaw
+        q = np.zeros(7)
+        q[6] = self.yaw
+        goal_q = q.copy()
+        goal_q[6] = goal
+        return {"q_now": q.reshape(1, 7), "q_target": goal_q.reshape(1, 7)}
+
+    def step(self, action):
+        self.yaw = float(action[6])
+
+
+def test_the_yaw_check_follows_the_command_and_reports_the_object_drift(tmp_path, monkeypatch, capsys):
+    from scripts.demos import yaw_check as Y
+    monkeypatch.setattr(Y, "SingleEnv", FakeYawEnv)
+    pytest.importorskip("imageio")
+    assert Y.main(["--out", str(tmp_path), "--rate-deg", "3", "--total-deg", "15", "--settle-steps", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "the hand follows, with the right sign" in out and "vertical axis kept" in out and "task nut_thread" in out
+    summary = json.loads((tmp_path / "yaw_check.json").read_text())
+    assert summary["top"]["yaw"] == pytest.approx(15.0, abs=0.1) and summary["end"]["yaw"] == pytest.approx(0.0, abs=0.1)
+    assert summary["top"]["object_mm"] > 1.0                                                                   # the object 20 mm off axis moves when the hand turns
+    assert summary["clipped_steps"] > 0                                                                       # 3 degrees = 0.0524 rad is above the 0.05 rad clip of a joint target: the check says so
+    assert (tmp_path / "yaw_check.mp4").is_file() and (tmp_path / "yaw_top.png").is_file()

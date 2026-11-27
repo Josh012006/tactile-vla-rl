@@ -4,10 +4,12 @@
 #   sbatch jobs/job_demos.sh collect    --out demos/isaaclab/ForgePegInsert_Robotiq_noisy --num-episodes 50 --noise-fraction 0.35 --action-noise-sigma 0.06
 #   sbatch jobs/job_demos.sh replay     --demos-dir demos/isaaclab/ForgePegInsert_Robotiq_teleop --save-videos --video-first 20
 #   sbatch jobs/job_demos.sh robot_check --out reports/robot_check_tsf
+#   sbatch jobs/job_demos.sh yaw_check   --out logs/yaw_check_nut_thread        # turns the hand as the teleop client's Q / E do and measures it (scripts/demos/yaw_check.py)
 # The first word is the tool (scripts/demos/<tool>.py: collect = collect_waypoint_demos); everything after it goes to the tool as is, see its --help.
 # The server is started with what the tool needs (single_env.py checks it): num_envs=1 for all of them, and
 #   collect, replay : success_hold_steps=5, gripper_can_open=false   (the peg stays in the closed gripper; an episode ends 5 'inserted' steps in a row)
 #   robot_check     : gripper_can_open=true                          (it opens and closes the gripper)
+#   yaw_check       : gripper_can_open=false
 # Extra server settings: DEMO_SERVER_SETS="--set robot=robotiq_2f85 --set reset_passes=3" sbatch --export=ALL jobs/job_demos.sh ...
 # The task YAML is configs/task/peg_insert_forge.yaml (ENV_CONFIG=... to change it): its robot is robotiq_2f85_tsf, so the demos carry the taxels. Another task:
 #   ENV_CONFIG=configs/task/gear_mesh_forge.yaml sbatch --export=ALL jobs/job_demos.sh replay --demos-dir demos/isaaclab/ForgeGearMesh_Robotiq_teleop --save-videos
@@ -31,13 +33,14 @@
 set -u
 cd "${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}" || exit 1
 mkdir -p logs/slurm reports
-[ $# -ge 1 ] || { echo "usage: sbatch jobs/job_demos.sh <collect|replay|robot_check> [tool arguments]" >&2; exit 1; }
+[ $# -ge 1 ] || { echo "usage: sbatch jobs/job_demos.sh <collect|replay|robot_check|yaw_check> [tool arguments]" >&2; exit 1; }
 TOOL="$1"; shift
 case "$TOOL" in
     collect)     MODULE=collect_waypoint_demos; SETS=(--set num_envs=1 --set success_hold_steps=5 --set gripper_can_open=false) ;;
     replay)      MODULE=replay_demos;           SETS=(--set num_envs=1 --set success_hold_steps=5 --set gripper_can_open=false) ;;
     robot_check) MODULE=robot_check;            SETS=(--set num_envs=1 --set gripper_can_open=true) ;;
-    *) echo "unknown tool '$TOOL' (collect | replay | robot_check)" >&2; exit 1 ;;
+    yaw_check)   MODULE=yaw_check;              SETS=(--set num_envs=1 --set gripper_can_open=false) ;;
+    *) echo "unknown tool '$TOOL' (collect | replay | robot_check | yaw_check)" >&2; exit 1 ;;
 esac
 PORT="${DEMO_PORT:-8102}"
 nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader
