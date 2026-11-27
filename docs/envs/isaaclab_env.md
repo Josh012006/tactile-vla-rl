@@ -58,6 +58,20 @@ environment), deterministic GPU PhysX solver (`enhanced_determinism: true`).
 `action[:, 7]` is ignored, the gripper stays at the grasp width of the reset), because the zero-shot pi05_droid_jointpos tends to open and drop the
 peg.
 
+**The three FORGE tasks.** The server runs the task of its YAML (`task_name`); nothing else in the code is specific to one of them. The scripts take the YAML as a parameter
+(`ENV_CONFIG=<yaml> bash jobs/env_server.sh`, `--task-config`), an SFT run records its task (`task:` of its experiment file) and the evaluation and the RL read it back.
+
+| Task | YAML | `task_name` | Prompt | `max_steps_per_episode` (FORGE's 10 / 20 / 30 s at 15 Hz) | Success height (z below, with xy < 2.5 mm) |
+|---|---|---|---|---|---|
+| PegInsert | `configs/task/peg_insert_forge.yaml` | `Isaac-Forge-PegInsert-Direct-v0` | "Insert the peg into the socket." | 150 | `fixed.height * success_threshold` |
+| GearMesh | `configs/task/gear_mesh_forge.yaml` | `Isaac-Forge-GearMesh-Direct-v0` | "Mesh the gear with the other gears." | 300 | `fixed.height * success_threshold` |
+| NutThread | `configs/task/nut_thread_forge.yaml` | `Isaac-Forge-NutThread-Direct-v0` | "Screw the nut onto the bolt." | 450 | `fixed.thread_pitch * success_threshold` (`src/envs/task_geometry.py`) |
+
+Everything else in the two new YAMLs is PegInsert's and **was not measured for them**: the Robotiq grip (`finger_effort`, `fingerpad_length`, chosen so that the *peg* is neither crushed nor lost),
+the PD gains, `reset_passes`, the camera. The observation key `peg_socket_offset` is kept for the three tasks (held object minus target pose), so that the demonstrations, the policy and
+the clients keep one format. The server tells its task in `spec["robot"]["task"]` (the teleop client reads it). Prompt, grip and the reset of the held object are to be checked on the
+cluster with the new YAMLs (`pytest tests/test_isaac_fidelity.py --isaac --isaac-config configs/task/<task>_forge.yaml -s`, and a few resets seen from the teleop client).
+
 ### Where the code is
 
 ```
@@ -405,4 +419,6 @@ The Isaac tests accept `--isaac-config` and `--isaac-set KEY=VALUE` to change th
 - Another GPU, driver or version of Isaac Sim / Isaac Lab.
 - The effect of the start residual (N1) on a success rate or on the comparison of two policies.
 - The cause of the server crash with `physx_friction_correlation_distance=5e-5`.
+- GearMesh and NutThread in this environment: the YAMLs exist, nothing was run (no Isaac Sim where they were written). The Isaac task ids, the grip on the gear / the nut, the length of the episodes,
+  the success test (`task_geometry`), the reset passes, whether `success_hold_steps: 5` is reachable for the nut.
 - The loss / crushing of the peg over hundreds of seeds for the settings of the sweep (the criterion that had fixed `finger_effort = 6`).

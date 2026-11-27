@@ -1,0 +1,94 @@
+# FORGE GearMesh on Isaac Lab -- the TASK side only (what the env server needs), the same layout as configs/task/peg_insert_forge.yaml. Models, algorithms and touch use
+# have their own files under configs/{model,algo,touch}: the server always sends everything the robot can sense (tactile, force, gripper effort) and the consumer decides.
+#
+# Read by:  python -m src.envs.isaaclab.server --config configs/task/gear_mesh_forge.yaml [--set KEY=VALUE ...]
+#           ENV_CONFIG=configs/task/gear_mesh_forge.yaml bash jobs/env_server.sh       (the jobs of jobs/ take the same variable)
+#
+# The task: the medium gear (held in the gripper at reset) has to be put on the gear base with its shafts and the two other gears. FORGE calls the episode a success when the gear is centred on its shaft (xy < 2.5 mm) and down to the base (z below fixed_asset.height * success_threshold), like the peg in its hole.
+#
+# EVERYTHING BELOW THE FIRST THREE FIELDS IS CARRIED OVER FROM PegInsert and NOT MEASURED FOR THIS TASK: the robot's grip (finger_effort 6.0 and fingerpad_length 0.0056 were chosen
+# so that the PEG is neither crushed nor lost and is held high enough, see src/envs/isaaclab/robots.py), the PD gains, reset_passes, the episode length (300 steps = FORGE's
+# own 20 s at 15 Hz, against 150 = 10 s for PegInsert). Check them on the cluster before collecting demos with it:
+#   pytest tests/test_isaac_fidelity.py --isaac --isaac-config configs/task/gear_mesh_forge.yaml -s
+# and look at the first frames / a few resets (the held object must be in the hand, not crushed, not dropped) with the teleop client.
+
+name: gear_mesh_forge
+task_name: "Isaac-Forge-GearMesh-Direct-v0"
+language_instruction: "Mesh the gear with the other gears."     # the prompt of the demos and of the policy: one wording per task, kept for the whole pipeline (the demos store it)
+
+# -- Parallelism ---------------------------------------------------------------------------------------------------------
+# Independent environments simulated by ONE server process, in one scene (see src/envs/protocol.py). More servers = more
+# processes (several GPUs): list their endpoints in the client, nothing else changes. Measure time and memory as a function of N:
+#   pytest tests/test_isaac_cost.py --isaac -s        (writes reports/env_cost_*.json)
+num_envs: 8
+# false (required by the sensors, see src/envs/isaaclab/forge_backend.py): the N environments are cloned as USD prims. FORGE's own default
+# is true (clones only in Fabric), under which every camera / contact sensor sees a single environment.
+clone_in_fabric: false
+
+# -- Rounds --------------------------------------------------------------------------------------------------------------
+# FORGE's reset acts on ALL environments and steps the physics, so the environments of a server start their episodes together
+# (a round, with the real reset) and each runs its own episode; one that ended waits, held in place, until the others have ended,
+# then the next round starts (src/envs/episode_manager.py). The start state of every environment is a function of
+# (seed, round, num_envs) up to a small dependence on the previous episode (see reset_passes); the same sequence of resets and
+# steps from a fresh server is bit-identical, so a run is replayed exactly by running the same sequence again.
+env_seed: 0               # default seed of the sequence of rounds (a client reset(seed=...) overrides it)
+auto_reset: true          # the next round starts by itself when the last episode of the round ends (false: the client resets)
+
+# -- Robot ---------------------------------------------------------------------------------------------------------------
+#   franka            FORGE's own Franka + Franka Hand
+#   robotiq_2f85      Franka arm + Robotiq 2F-85 (NVIDIA RoboLab USD), no taxels
+#   robotiq_2f85_tsf  same + 7x4 tactile zones on each finger (56 taxels): sends extra/tactile (2, 7, 4) in N
+# The Robotiq USD is built from third_party/robotiq/ on the first start (see src/envs/isaaclab/robot_assets.py).
+robot: "robotiq_2f85_tsf"
+# Optional, Robotiq only (None = NVIDIA's values; the profile carries finger_effort 6.0 and fingerpad_length 0.0056):
+# finger_stiffness: 5.7e3
+# finger_damping: 50.0
+# finger_effort: 8.0
+# fingerpad_length: 0.0056
+# robot_usd: "third_party/robotiq/_build/my_robot.usda"
+# tactile_exclude_zone_joints: true      # fallback if PhysX refuses the number of links of the articulation
+# reset_grip_open_width: 0.0065          # not used (see the EXPO-FT notes); kept for experiments
+
+# -- Cameras (the main VRAM driver after the physics: 2 TiledCameras per environment) ----------------------------------------
+camera_size: 224          # px, square. The VLA input is 224 x 224: lowering it changes what the model sees.
+
+# -- Episodes ------------------------------------------------------------------------------------------------------------
+# Server-side (src/envs/episode_tracker.py), per environment. Isaac Lab's own timeout is disabled.
+max_steps_per_episode: 300
+control_hz: 15            # informational: the real rate is decimation 8 at 120 Hz physics = 15 Hz
+# An episode is a SUCCESS (and ends) once FORGE reports "inserted" (xy < 2.5 mm, z below its threshold) for this many steps in
+# a row. 1 = the first time. Must be >= 1 (the legacy 0 of the old client is not supported).
+success_hold_steps: 1
+
+# -- Action / observation conventions ------------------------------------------------------------------------------------
+# false: action[:, 7] is ignored and the gripper stays at FORGE's reset grasp width for the whole episode (the zero-shot
+# pi05_droid_jointpos otherwise tends to open and drop the peg early).
+gripper_can_open: false
+# gripper_position sent to the policy: normalized = 1 - width / 0.04 m (0 open, 1 closed, ~0.9 holding the peg) | closed | raw
+gripper_obs: normalized
+
+# -- Dynamics and reproducibility (both need a server restart) -------------------------------------------------------------------
+# PD gains of the arm joints: 400 / 60 (FORGE zeroes them; 80 / 40 follows only ~12 % of a target change per control step).
+arm_stiffness: 400
+arm_damping: 60
+disable_sleep: false
+# PhysX deterministic GPU solver: identical results for an identical sequence of resets and steps. Must be the same for ALL
+# the data of an experiment.
+enhanced_determinism: true
+# The reset (reseed + reset) is done this many times. Measured (L40S, Robotiq, 4 envs, tests/test_isaac_fidelity.py): the reset
+# is clean until the gripper closes on the peg; there float-level differences are amplified: after another episode 6 to 8
+# environments of 24 start somewhere else, by a median of 0.01 - 0.06 mm on the peg and, rarely, by 1 - 11 mm (joints up to
+# 1.4e-2 rad); none with the Franka. expo-ft measured 1.5 -> 0.2 mm on one seed with 2 passes instead of 1; a third pass gave
+# nothing more. Every pass costs one real reset.
+# NOT FIXED, on purpose (tests/test_isaac_finger_sweep.py, 4 envs x 6 starts): the count stays at 6-8 environments of 24 for
+# finger_damping 20 / 100 / 500, finger_stiffness 2000, physx_friction_correlation_distance 0.0005,
+# physx_friction_offset_threshold 0.002; finger_effort 3 gives 7/24 and worst 1.2 mm but halves the tactile force and loses pegs;
+# physx_solver_type 0 (PGS) breaks the grasp (peg dropped in 18 of 24). The cause is state inside PhysX's contact solver that none
+# of these parameters reaches; what is left (the mimic joints / collision shapes of the Robotiq asset) was judged not worth
+# redoing the demos and SFT for. What holds: the same sequence of resets and steps from a fresh server is bit-identical, so
+# compare conditions on the same sequence of rounds. physx_<field> sets any field of Isaac Lab's PhysxCfg (server restart).
+reset_passes: 2
+
+# -- Server --------------------------------------------------------------------------------------------------------------
+server_host: "0.0.0.0"
+server_port: 8102

@@ -1,4 +1,4 @@
-"""Teleoperation client for the FORGE PegInsert simulation -- STEP 3/3: you drive the arm and record demos.
+"""Teleoperation client for the FORGE simulations (PegInsert, GearMesh, NutThread) -- STEP 3/3: you drive the arm and record demos.
 
 Runs on YOUR PC (Windows / WSL is fine), not on the cluster. The simulation keeps running in the env server (src/envs/isaaclab/server.py) on an
 L40S node (jobs/env_server.sh); this script connects to it through an SSH tunnel and shows what the policy sees:
@@ -13,8 +13,10 @@ L40S node (jobs/env_server.sh); this script connects to it through an SSH tunnel
     under       the offset peg -> hole (ground truth, simulation only), the command you sent, the contact force,
                 the state of the inputs and the time of every round trip to the server
 
-You move the PEG (it is rigidly held: the fingertip follows) with the mouse and the keyboard. The orientation of
-the hand is held fixed and the gripper stays closed, exactly as in the scripted demos. Each control step the
+You move the held object (the peg, the gear or the nut; "peg" below means that object: it is rigidly held, the fingertip follows) with the mouse and
+the keyboard. The task is the server's (its YAML, configs/task/*_forge.yaml): the client reads its name and its prompt from the server and sends nothing
+task-specific. The orientation of the hand is held fixed, exactly as in the scripted demos, unless you turn it about the vertical with Q / E (NutThread:
+the nut has to be screwed on; the other tasks never need it), and the gripper stays closed. Each control step the
 server turns your move into 7 joint targets (FORGE's own IK), applies them and answers with the new observation:
 one round trip per step (debug op "teleop_step" of src/envs/backend.py).
 
@@ -36,7 +38,8 @@ RECORDING. Every step is kept in memory: the observation the move was computed f
 (7 absolute joint targets + gripper 1.0), exactly like collect_waypoint_demos.py. An episode ends 5 steps in a row
 after FORGE says "inserted" (same rule as the scripted demos), or at the step limit. When it succeeded, press Enter:
 the whole episode is sent to the env server, which writes it ON THE CLUSTER, in --out-dir (relative to the project
-root there, default demos/isaaclab/ForgePegInsert_Robotiq_teleop, in the `demos` link to scratch):
+root there, default demos/isaaclab/Forge<Task>_Robotiq_teleop with <Task> from the server's task (ForgePegInsert, ForgeGearMesh, ForgeNutThread), in the
+`demos` link to scratch):
 
     ep_0000_seed100.npz   exterior_image, wrist_image, joint_position, gripper_position, ft_force,
                           peg_socket_offset, actions, prompt, seed  (same keys as the scripted demos), plus
@@ -70,6 +73,9 @@ Controls (Tab first: the mouse must be captured, otherwise nothing moves):
     arrow keys   the same directions: Up / Down / Left / Right = towards the top / bottom / left / right of the wrist
                  image. --key-xy-mm per step, repeated while the key is down; they add up with the mouse.
     W / S        peg up / down
+    Q / E        turn the hand about the vertical, --yaw-rate-deg per step while the key is down (Q = counter-clockwise seen from above, E = clockwise).
+                 The wrist-image directions of the mouse and the arrows turn with the hand. Needed for NutThread, harmless elsewhere (never pressed = fixed
+                 orientation, as before).
     Shift        fine mode   (x 0.25: for the last millimetres)
     Ctrl         fast mode   (x 2.5)
     Space        one step with no move (let the arm settle)
@@ -276,10 +282,13 @@ class Inputs:
     right: bool = False
     forward: bool = False    # Up arrow: away from the camera
     back: bool = False       # Down arrow: towards the camera
+    yaw_left: bool = False   # Q: turn the hand counter-clockwise about the vertical (seen from above)
+    yaw_right: bool = False  # E: clockwise
 
     def any(self):
         return bool(self.dx or self.dy or self.up or self.down or self.wait
-                    or self.left or self.right or self.forward or self.back)
+                    or self.left or self.right or self.forward or self.back
+                    or self.yaw_left or self.yaw_right)
 
 
 def screen_axes(flip_x=False, flip_y=False, rotate_deg=0.0):
@@ -307,6 +316,26 @@ def quat_to_matrix(q):
     return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
                      [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
                      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def quat_mul(a, b):
+    """Hamilton product a * b of two quaternions (w, x, y, z): b first, then a, both in the same fixed frame."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return np.array([aw * bw - ax * bx - ay * by - az * bz, aw * bx + ax * bw + ay * bz - az * by,
+                     aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw])
+
+
+def yaw_quat(angle):
+    """Rotation of `angle` radians about the vertical (env z), counter-clockwise seen from above, as a quaternion (w, x, y, z)."""
+    return np.array([np.cos(angle / 2.0), 0.0, 0.0, np.sin(angle / 2.0)])
+
+
+def default_out_dir(task):
+    """Where the demos of a task go on the cluster: Forge<Task>_Robotiq_teleop (peg_insert -> ForgePegInsert, gear_mesh -> ForgeGearMesh, nut_thread -> ForgeNutThread).
+    A server that does not say its task (older than this client) is the PegInsert one."""
+    camel = "".join(part.capitalize() for part in str(task or "peg_insert").split("_"))
+    return f"demos/isaaclab/Forge{camel}_Robotiq_teleop"
 
 
 def wrist_axes(hand_quat, flip_x=False, flip_y=False, rotate_deg=0.0, wrist_rot=WRIST_ROT):
@@ -346,6 +375,12 @@ def build_delta(inp, axes, xy_gain_mm, z_rate_mm, max_xy_mm, max_z_mm, key_xy_mm
     return np.array([xy[0], xy[1], z]) * 1e-3
 
 
+def build_yaw(inp, yaw_rate_deg):
+    """The rotation (rad) about the vertical of one control step, from Q (+) / E (-); both down = none. Fine / fast scale it as they scale the moves."""
+    scale = 0.25 if inp.fine else (2.5 if inp.fast else 1.0)
+    return float(np.deg2rad(yaw_rate_deg * scale * (int(inp.yaw_left) - int(inp.yaw_right))))
+
+
 # ---- One teleoperated episode ---------------------------------------------------------------------
 class Session:
     """State of the current episode. No pygame in here (so it can be tested without a screen)."""
@@ -355,6 +390,7 @@ class Session:
         self.seed = None
         self.obs = None
         self.quat0 = None
+        self.yaw = 0.0                 # rad turned about the vertical since the start of the episode (Q / E)
         self.prompt = ""
 
     def start(self, seed):
@@ -366,6 +402,7 @@ class Session:
             rot = robot.get("wrist_rot_ros_in_fingertip") if isinstance(robot, dict) else None
             self.wrist_rot = tuple(rot) if rot else WRIST_ROT
             self.robot_name = robot.get("name", "?") if isinstance(robot, dict) else "?"
+        self.yaw = 0.0
         self.axes = view_axes(self.args, self.quat0, self.wrist_rot)   # mouse right / up in the env frame
         self.step_count = 0
         self.success_run = 0
@@ -384,16 +421,22 @@ class Session:
         self.t_last = None
         self.saved = False
 
-    def step(self, delta):
+    def step(self, delta, dyaw=0.0):
+        """One control step: move the held object by `delta` (m, env frame) and turn the hand by `dyaw` (rad, about the vertical)."""
         if self.t_first is None:
             self.t_first = time.perf_counter()
         # the observation the action is computed from (the one on screen), like the scripted demos
         for key, name in self.recorded.items():
             self.frames[name].append(np.asarray(self.obs[key]))
-        r = self.env.teleop_step(delta, self.quat0, self.args.cmd_gain, self.args.max_joint_step)
+        if dyaw:
+            self.yaw += float(dyaw)
+        target_quat = quat_mul(yaw_quat(self.yaw), self.quat0) if self.yaw else self.quat0       # the orientation held, turned by the yaw so far
+        r = self.env.teleop_step(delta, target_quat, self.args.cmd_gain, self.args.max_joint_step)
         self.t_last = time.perf_counter()
         self.actions.append(np.asarray(r["action"], dtype=np.float32))
-        self.idle_steps += int(not np.any(delta))
+        if dyaw and self.args.view == "wrist":                      # the wrist camera turned with the hand: so do the directions of the mouse
+            self.axes = view_axes(self.args, target_quat, self.wrist_rot)
+        self.idle_steps += int(not (np.any(delta) or dyaw))
         self.max_force = max(self.max_force, float(np.linalg.norm(np.asarray(self.obs["extra/ft_force"], dtype=np.float64))))
         self.last_delta, self.last_clipped = np.asarray(delta, dtype=np.float64), bool(r["clipped"])
         self.clipped_steps += int(self.last_clipped)
@@ -418,7 +461,8 @@ class Session:
         return {"seed": int(self.seed), "success": bool(self.success), "teleop": True, "steps": len(self.actions),
                 "idle_steps": int(self.idle_steps), "clipped_steps": int(self.clipped_steps),
                 "wall_seconds": round(float(self.t_last - self.t_first), 1) if self.t_first else 0.0,
-                "final_offset_mm": [round(float(v), 2) for v in final], "max_force_N": round(self.max_force, 2)}
+                "final_offset_mm": [round(float(v), 2) for v in final], "max_force_N": round(self.max_force, 2),
+                "yaw_deg": round(float(np.rad2deg(self.yaw)), 1)}
 
     def save(self):
         """Send the finished episode to the server, which writes it on the cluster. True when it worked."""
@@ -590,9 +634,10 @@ def main():
     p.add_argument("--seed", type=int, default=100,
                    help="Reset seed of the first episode; the next episode (R, or after a save) uses seed + 1, ... "
                         "Use another value for each session: the same seed gives the same start state.")
-    p.add_argument("--out-dir", default="demos/isaaclab/ForgePegInsert_Robotiq_teleop",
+    p.add_argument("--out-dir", default=None,
                    help="Folder ON THE CLUSTER where the server writes the demos, relative to the project root there "
-                        "(the folder that holds src/; `demos` is the link to scratch). Must stay inside the project. '' = record nothing.")
+                        "(the folder that holds src/; `demos` is the link to scratch). Must stay inside the project. '' = record nothing. "
+                        "Default: demos/isaaclab/Forge<Task>_Robotiq_teleop, <Task> being the server's task (ForgePegInsert, ForgeGearMesh, ForgeNutThread).")
     p.add_argument("--soft-limit-steps", type=int, default=90,
                    help="The step counter turns orange beyond this many steps (the policy has 150; shorter demos "
                         "are closer to the scripted ones). Display only.")
@@ -618,6 +663,8 @@ def main():
     # size of the moves
     p.add_argument("--xy-gain-mm", type=float, default=0.1, help="Peg move (mm) per mouse pixel, in the horizontal plane.")
     p.add_argument("--z-rate-mm", type=float, default=4.0, help="Peg move (mm) per step while W / S is down.")
+    p.add_argument("--yaw-rate-deg", type=float, default=3.0,
+                   help="Rotation of the hand about the vertical (degrees) per step while Q / E is down (Shift x0.25, Ctrl x2.5). NutThread needs it; 0 disables the keys.")
     p.add_argument("--key-xy-mm", type=float, default=2.0,
                    help="Peg move (mm) per step while an arrow key is down (Shift x0.25, Ctrl x2.5).")
     p.add_argument("--max-xy-mm", type=float, default=10.0, help="Largest horizontal move per step (mm).")
@@ -637,23 +684,27 @@ def main():
     import pygame
     pygame.init()
     # keys whose short taps (between two slow steps) must not be missed: remembered until the next step
-    LATCHED_KEYS = (pygame.K_w, pygame.K_s, pygame.K_SPACE, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN)
+    LATCHED_KEYS = (pygame.K_w, pygame.K_s, pygame.K_q, pygame.K_e, pygame.K_SPACE, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN)
     size = 224 * args.scale
     hud_height = 284
     panel_w = 0 if args.no_tactile else max(224, args.tactile_width)      # taxel panel column, right of the cameras
     panel_h = panel_w // 2
     screen = pygame.display.set_mode((max(2 * size + panel_w, 1000), size + hud_height))
-    pygame.display.set_caption("FORGE PegInsert -- teleop client (step 3)")
+    pygame.display.set_caption("FORGE teleop client (step 3)")
     font = pygame.font.SysFont("consolas,dejavusansmono,couriernew", 18)
     big_font = pygame.font.SysFont("consolas,dejavusansmono,couriernew", 28, bold=True)
     clock = pygame.time.Clock()
 
     env = RemoteEnv(args.host, args.port)
     env.check_server()
+    task_name = env.spec["robot"].get("task")
+    if args.out_dir is None:
+        args.out_dir = default_out_dir(task_name)
+    pygame.display.set_caption(f"FORGE {task_name or 'PegInsert'} -- teleop client (step 3)")
     prompt = env.prompt
     args.max_steps = args.max_steps or int(env.spec["max_steps"])
     geom = env.debug("task_geometry")
-    print(f"connected to {env.uri}   task: {prompt!r}")
+    print(f"connected to {env.uri}   task: {task_name or '(not told by the server: PegInsert assumed)'}   prompt: {prompt!r}")
     print(f"hole depth {geom['hole_depth'] * 1000:.0f} mm   success: xy < {geom['success_xy'] * 1000:.1f} mm, "
           f"z < {geom['success_z'] * 1000:.1f} mm")
     env.measure_rtt()
@@ -737,7 +788,9 @@ def main():
                      left=bool(keys[pygame.K_LEFT] or pygame.K_LEFT in latched),
                      right=bool(keys[pygame.K_RIGHT] or pygame.K_RIGHT in latched),
                      forward=bool(keys[pygame.K_UP] or pygame.K_UP in latched),
-                     back=bool(keys[pygame.K_DOWN] or pygame.K_DOWN in latched))
+                     back=bool(keys[pygame.K_DOWN] or pygame.K_DOWN in latched),
+                     yaw_left=bool(args.yaw_rate_deg and (keys[pygame.K_q] or pygame.K_q in latched)),
+                     yaw_right=bool(args.yaw_rate_deg and (keys[pygame.K_e] or pygame.K_e in latched)))
         stepping = False
         if not session.over:
             if args.hold or auto:
@@ -749,7 +802,7 @@ def main():
                 inp = Inputs()
             delta = build_delta(inp, session.axes, args.xy_gain_mm, args.z_rate_mm, args.max_xy_mm, args.max_z_mm,
                                 args.key_xy_mm)
-            session.step(delta)
+            session.step(delta, build_yaw(inp, args.yaw_rate_deg))
             shown = inp
             acc[:] = 0
             latched.clear()
@@ -800,7 +853,7 @@ def main():
         d = session.last_delta * 1000.0 + 0.0            # "+ 0.0": no "-0.00" for a negative zero
         force = session.force_n()
         y = draw_text(screen, font, 10, y,
-                      f"last move (mm)  x {d[0]:+6.2f}  y {d[1]:+6.2f}  z {d[2]:+6.2f}"
+                      f"last move (mm)  x {d[0]:+6.2f}  y {d[1]:+6.2f}  z {d[2]:+6.2f}   hand yaw {np.rad2deg(session.yaw):+6.1f} deg"
                       f"{'   JOINT CLIP' if session.last_clipped else ''}"
                       f"      contact force {force:5.2f} N", WARN if force > 2.0 else TEXT)
         total = env.mean_ms("teleop_step")
@@ -812,7 +865,7 @@ def main():
                       f"empty call {env.mean_ms('rtt'):.0f}   -> {1000.0 / total if total == total else float('nan'):.1f} steps/s max",
                       DIM)
         mode = "FINE" if shown.fine else ("FAST" if shown.fast else "normal")
-        down_keys = [name for name, key in (("W", pygame.K_w), ("S", pygame.K_s), ("Space", pygame.K_SPACE),
+        down_keys = [name for name, key in (("W", pygame.K_w), ("S", pygame.K_s), ("Q", pygame.K_q), ("E", pygame.K_e), ("Space", pygame.K_SPACE),
                                             ("Left", pygame.K_LEFT), ("Right", pygame.K_RIGHT), ("Up", pygame.K_UP),
                                             ("Down", pygame.K_DOWN), ("Shift", pygame.K_LSHIFT),
                                             ("Ctrl", pygame.K_LCTRL)) if keys[key]]
@@ -825,7 +878,7 @@ def main():
                       f"arrows {args.key_xy_mm:g} mm/step   "
                       f"W/S {args.z_rate_mm:g} mm/step", DIM)
         y = draw_text(screen, font, 10, y,
-                      "Tab capture  mouse/arrows = xy (wrist)  W/S up/down  Shift fine  Ctrl fast  Space wait", DIM)
+                      "Tab capture  mouse/arrows = xy (wrist)  W/S up/down  Q/E turn hand  Shift fine  Ctrl fast  Space wait", DIM)
         draw_text(screen, font, 10, y,
                   "C auto steps  Enter save (after SUCCESS)  Z same seed again  R next seed  Esc quit", DIM)
         pygame.display.flip()

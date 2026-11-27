@@ -28,6 +28,7 @@ import isaaclab_tasks  # noqa: F401  (registers Isaac-Forge-*-Direct-v0)
 from isaaclab_tasks.utils import parse_env_cfg
 
 from .. import protocol as P
+from ..task_geometry import task_geometry
 from ..backend import ManagerBackend
 from ..episode_manager import VectorEnvManager
 from .forge_env import CAMERA_SIZE, GRIPPER_OPEN_WIDTH, ForgeEnvJointPosPi05
@@ -193,7 +194,7 @@ class ForgeSim:
         if kind == "joint_names":
             return list(env._robot.data.joint_names)
         if kind == "robot_info":
-            return {**robot_info(self.profile), "gripper_can_open": bool(env._gripper_can_open),
+            return {**robot_info(self.profile), "gripper_can_open": bool(env._gripper_can_open), "task": env.cfg_task.name,
                     "joint_names": list(env._robot.data.joint_names), "gripper_adapter": env.gripper_info()}
         if kind == "finger_width":                # (N,) finger opening (m per finger, FORGE's convention), whatever `gripper_obs` is
             return env.gripper_width().detach().cpu().numpy().astype(np.float32)
@@ -204,8 +205,7 @@ class ForgeSim:
             return self._ik_joint_target(request["delta_pos"], request["target_quat"])
         if kind == "task_geometry":
             task = env.cfg_task
-            hole_depth = float(task.fixed_asset_cfg.height)
-            return {"hole_depth": hole_depth, "success_xy": 0.0025, "success_z": hole_depth * float(task.success_threshold)}
+            return task_geometry(task.name, task.fixed_asset_cfg, task.success_threshold)
         if kind == "fingertip_pose":              # FORGE's own computation from the simulated rigid-body pose
             return {"pos": env.fingertip_midpoint_pos.cpu().numpy(), "quat": env.fingertip_midpoint_quat.cpu().numpy()}
         if kind == "vram":
@@ -394,7 +394,7 @@ def build_backend(cfg: dict, device: str = "cuda:0"):
         auto_reset=bool(cfg.get("auto_reset", True)), seed=int(cfg.get("env_seed", 0)))
     obs_spec = P.build_obs_spec(env._camera_size, gripper_effort=env._is_robotiq, tactile=bool(env._tactile_sensors),
                                 tactile_shape=(2, TACTILE_ROWS, TACTILE_COLS))
-    robot = {**robot_info(profile), "gripper_can_open": bool(env._gripper_can_open),
+    robot = {**robot_info(profile), "gripper_can_open": bool(env._gripper_can_open), "task": env.cfg_task.name,      # peg_insert | gear_mesh | nut_thread
              "joint_names": list(env._robot.data.joint_names)}
     backend = ManagerBackend(manager, obs_spec, prompt=cfg.get("language_instruction", ""),
                              control_hz=float(cfg.get("control_hz", 1.0 / env.step_dt)), robot=robot, debug_fn=sim.debug,

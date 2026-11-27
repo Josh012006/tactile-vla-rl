@@ -1,6 +1,6 @@
-"""Task progress of a FORGE peg-insertion rollout, from the env's own observation keys. numpy only.
+"""Task progress of a FORGE rollout (PegInsert, GearMesh or NutThread), from the env's own observation keys. numpy only.
 
-`extra/peg_socket_offset` (held peg base minus its target pose in the socket, metres, env frame: xy = norm(offset[:2]) is FORGE's `xy_dist`,
+`extra/peg_socket_offset` (held object (peg, gear, nut) base minus its target pose, metres, env frame: xy = norm(offset[:2]) is FORGE's `xy_dist`,
 z its `z_disp`; FORGE's insertion test needs xy < 2.5 mm and z below a height threshold) and `extra/ft_force` (N). Nothing is added to the
 env protocol.
 """

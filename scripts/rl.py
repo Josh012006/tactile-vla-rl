@@ -33,7 +33,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from scripts.eval_sft import DEFAULT_TASK, check_norm_stats, discover_checkpoints, find_run_dir, git_commit, run_seed, task_settings
+from scripts.eval_sft import DEFAULT_TASK, check_norm_stats, discover_checkpoints, find_run_dir, git_commit, resolve_task_config, run_roots, run_seed, task_settings
 from scripts.sft import enable_compilation_cache, parse_assignments
 from src.algos import rl_config
 from src.models.interface import ROOT
@@ -157,7 +157,7 @@ def main(argv=None) -> int:
     ap.add_argument("--extend-to", type=int, metavar="TOTAL_EPISODES", help="with --resume: continue the run past its `total_episodes` (a multiple of envs_per_batch, more than the run's): the same run with more rounds, "
                     "as if it had been planned so (PA-RL first draws again the candidates the old last round did not). Send it only when the run is not running. Saved in config.json (`extensions`)")
     ap.add_argument("--run-name", help="folder name of the run (default: the experiment's `name`)")
-    ap.add_argument("--task-config", default=DEFAULT_TASK, help=f"env server YAML (default {DEFAULT_TASK})")
+    ap.add_argument("--task-config", default=None, help=f"env server YAML (default: the task of the SFT run the VLA starts from, {DEFAULT_TASK} when it recorded none; on --resume, the run's own)")
     ap.add_argument("--env-set", action="append", default=[], metavar="KEY=VALUE", help="override a key of the task YAML for the servers (not num_envs / server_port)")
     ap.add_argument("--dry-run", action="store_true", help="print what would run; load nothing")
     ap.add_argument("--ready-timeout", type=float, default=1800.0, help="seconds an env server may take to start (default 1800)")
@@ -167,13 +167,10 @@ def main(argv=None) -> int:
     if args.extend_to is not None and not args.resume:
         ap.error("--extend-to continues a run: give it with --resume")
     sets = parse_assignments(args.set)
-    task_config = Path(args.task_config) if Path(args.task_config).is_absolute() else ROOT / args.task_config
-    if not task_config.is_file():
-        raise SystemExit(f"no task YAML {task_config}")
 
     if args.resume:
         base = rl_config.load_rl_config()
-        candidates = [Path(args.resume), ROOT / args.resume, ROOT / base.output_root / args.resume, ROOT / "runs/rl/peg_insert" / args.resume, ROOT / "runs/rl/probing" / args.resume]
+        candidates = [Path(args.resume), ROOT / args.resume, ROOT / base.output_root / args.resume, *(folder / args.resume for folder in run_roots("rl", ROOT))]
         run_dir = next((c.resolve() for c in candidates if (c / "config.json").exists()), None)
         if run_dir is None:
             raise SystemExit(f"no RL run {args.resume!r} (looked for config.json at that path and under runs/rl/)")
@@ -188,6 +185,7 @@ def main(argv=None) -> int:
         cfg = resume_config(saved, sets)
         model_cfg, task, config = saved["model_cfg"], saved["task"], saved
         start = {**saved["start"], "run_config": json.loads((Path(saved["start"]["run"]) / "config.json").read_text())}
+        task_config = resolve_task_config(args.task_config, saved.get("task_config"), start["run_config"].get("task"))
         resuming = True
         if extension:
             note = extension["extensions"][-1]
@@ -198,10 +196,12 @@ def main(argv=None) -> int:
         exp, cfg = rl_config.load_rl_experiment(args.experiment, sets)
         start = resolve_start(exp, tuple(args.start) if args.start else None)
         model_cfg = check_start(exp, start)
+        task_config = resolve_task_config(args.task_config, start["run_config"].get("task"))
         task = task_settings(task_config, args.env_set, cfg.envs_per_batch)
         name = args.run_name or exp["name"]
         run_dir = ROOT / cfg.output_root / name
-        config = {**run_config(exp, cfg, start, model_cfg, task, name), "env_set": list(args.env_set)}
+        config = {**run_config(exp, cfg, start, model_cfg, task, name), "env_set": list(args.env_set),
+                  "task_config": str(task_config.relative_to(ROOT) if task_config.is_relative_to(ROOT) else task_config)}
         resuming = False
         if run_dir.exists() and not args.dry_run:
             raise SystemExit(f"{run_dir} exists: choose another --run-name, or continue it with --resume")

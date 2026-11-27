@@ -21,7 +21,7 @@
 # failure) is submitted again, up to --max-tries times, then the checkpoint is left alone (read logs/slurm/). When every run is finished and evaluated it stops.
 #
 # WHICH RUNS
-#   --run NAME...        run folder names (under runs/sft/peg_insert, runs/sft/probing | runs/rl/peg_insert, runs/rl/probing) or paths; several allowed
+#   --run NAME...        run folder names (under runs/sft/<task>/ | runs/rl/<task>/: peg_insert, gear_mesh, nut_thread, probing, ...) or paths; several allowed
 #   --glob PATTERN...    shell patterns on those folder names, EXPANDED AGAIN at every look: a run started later is picked up (quote them)
 # WHICH CHECKPOINTS (steps for sft, rounds for rl)
 #   --steps N...         only these (alias: --rounds)
@@ -106,9 +106,9 @@ for s in "${STEPS[@]:-}"; do [ -z "$s" ] || [[ "$s" =~ ^[0-9]+$ ]] || { echo "--
 { [ "$K" -ge 1 ] && [ "$INTERVAL" -ge 1 ] && [ "$MAX_TRIES" -ge 1 ] && [ "$MAX_JOBS" -ge 1 ]; } || { echo "--envs-per-server, --interval, --max-tries and --max-jobs must be at least 1" >&2; exit 1; }
 
 if [ "$MODE" = sft ]; then
-    ROOTS=(runs/sft/peg_insert runs/sft/probing); JOB=jobs/job_eval_sft.sh; UNIT=step; FLAG=--steps; SUBDIR="${SUBDIR:-eval}"; N_EP="${N_EP:-100}"
+    KIND=sft; JOB=jobs/job_eval_sft.sh; UNIT=step; FLAG=--steps; SUBDIR="${SUBDIR:-eval}"; N_EP="${N_EP:-100}"
 else
-    ROOTS=(runs/rl/peg_insert runs/rl/probing); JOB=jobs/job_eval_rl.sh; UNIT=round; FLAG=--rounds; SUBDIR="${SUBDIR:-eval_rl}"
+    KIND=rl; JOB=jobs/job_eval_rl.sh; UNIT=round; FLAG=--rounds; SUBDIR="${SUBDIR:-eval_rl}"
 fi
 [ -f "$JOB" ] || { echo "no $JOB in $ROOT" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is needed (it reads the JSON files)" >&2; exit 1; }
@@ -119,9 +119,12 @@ log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG"; }
 trap 'log "stopped (signal)"; exit 0' INT TERM
 
 # -- the runs to follow -----------------------------------------------------------------------------------------------------------------
+roots() { # the folders that hold runs of this kind: runs/<kind>/<task>/ for every task that has some (looked up at every call: a new task's first run is seen)
+    (cd "$ROOT" && ls -d "runs/$KIND"/*/ 2>/dev/null | sed 's:/$::')
+}
 resolve_run() { # a name or a path -> the absolute folder holding config.json
     local c r
-    for c in "$1" "$ROOT/$1" $(for r in "${ROOTS[@]}"; do echo "$ROOT/$r/$1"; done); do
+    for c in "$1" "$ROOT/$1" $(for r in $(roots); do echo "$ROOT/$r/$1"; done); do
         [ -f "$c/config.json" ] && { (cd "$c" && pwd); return 0; }
     done
     return 1
@@ -131,11 +134,11 @@ list_runs() { # one absolute folder per line, no duplicates; "WARNING ..." lines
     {
         for n in "${RUNS[@]:-}"; do
             [ -z "$n" ] && continue
-            resolve_run "$n" || echo "WARNING no run '$n' (no config.json at that path nor under ${ROOTS[*]})"
+            resolve_run "$n" || echo "WARNING no run '$n' (no config.json at that path nor under runs/$KIND/*/)"
         done
         for g in "${GLOBS[@]:-}"; do
             [ -z "$g" ] && continue
-            for r in "${ROOTS[@]}"; do
+            for r in $(roots); do
                 for d in "$ROOT/$r"/$g; do [ -f "$d/config.json" ] && echo "$d"; done
             done
         done
