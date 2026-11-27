@@ -55,8 +55,8 @@ def test_the_memory_verdict_adds_the_env_server_to_the_peak():
 
 def test_the_two_parl_experiments_have_a_distillation_and_the_default_one_is_variant_b():
     assert load_rl_experiment(PP.DEFAULT_EXPERIMENT)[1].variant == "parl_global_local"
-    assert load_rl_experiment("configs/experiment/rl/pi05_parl_global.yaml")[1].distills
-    assert not load_rl_experiment("configs/experiment/rl/pi05_best_of_n.yaml")[1].distills
+    assert load_rl_experiment("configs/experiment/rl/peg_insert/pi05_parl_global.yaml")[1].distills
+    assert not load_rl_experiment("configs/experiment/rl/peg_insert/pi05_best_of_n.yaml")[1].distills
 
 
 def test_the_compiler_is_asked_for_the_memory_of_each_micro_batch_and_the_largest_that_fits_is_used():

@@ -1,8 +1,8 @@
-"""The configuration of the RL fine-tuning (Best-of-N and PA-RL): configs/algo/rl.yaml and the experiment files of configs/experiment/rl/. Pure Python (no JAX): it can be read, checked and
+"""The configuration of the RL fine-tuning (Best-of-N and PA-RL): configs/algo/rl.yaml and the experiment files of configs/experiment/rl/<task>/. Pure Python (no JAX): it can be read, checked and
 tested anywhere. Design, sources and reasons of every value: docs/algos/rl.md.
 
     cfg = load_rl_config(overrides={"num_candidates": 16})                          # configs/algo/rl.yaml with `--set` style overrides
-    exp, cfg = load_rl_experiment("configs/experiment/rl/pi05_best_of_n.yaml")      # an experiment: its `set` block on top of the YAML (and the command line's on top of that)
+    exp, cfg = load_rl_experiment("configs/experiment/rl/peg_insert/pi05_best_of_n.yaml")      # an experiment: its `set` block on top of the YAML (and the command line's on top of that)
 
 An unknown key, a wrong type or a combination the method cannot do (Best-of-N with a local step, a total that is not a whole number of batches) is an error, never ignored.
 """
@@ -24,7 +24,7 @@ DISTILL_SELECTIONS = SELECTIONS + ("first",)       # + the control of the 16 Nov
 REWARD_MODES = ("step_cost", "sparse_01", "sparse_pm1")      # the critic's reward, see ReplayBuffer: -1 per plan until success (0 there) | 0, +1 at success, 0 at a time-out | 0, +1 at success, -1 at a time-out
 CAMERAS = ("exterior", "wrist")
 WANDB_MODES = ("online", "offline", "disabled")        # src/algos/tracking.py MODES, repeated here to stay free of the training imports (a test keeps them equal)
-EXPERIMENT_KEYS = {"name", "description", "model", "set", "model_set", "start"}
+EXPERIMENT_KEYS = {"name", "description", "model", "task", "set", "model_set", "start"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -157,7 +157,7 @@ def load_rl_config(path: Optional[Path] = None, overrides: Optional[Mapping[str,
 
 
 def load_experiment(path) -> dict:
-    """An experiment file (configs/experiment/rl/*.yaml): `name` (the run's folder), `model`, `description`, `set` (keys of configs/algo/rl.yaml), `model_set` (keys of the model YAML) and,
+    """An experiment file (configs/experiment/rl/<task>/*.yaml): `name` (the run's folder), `model`, `task` (the env YAML of the run, configs/task/*.yaml), `description`, `set` (keys of configs/algo/rl.yaml), `model_set` (keys of the model YAML) and,
     once the run is launched from one, `start` ({run, step}: the SFT checkpoint the VLA starts from). Unknown keys and wrong types are refused."""
     path = Path(path)
     if not path.exists() and not path.is_absolute():
@@ -173,6 +173,8 @@ def load_experiment(path) -> dict:
     for key in ("name", "model"):
         if not isinstance(raw.get(key), str) or not raw[key]:
             raise ValueError(f"{path}: `{key}` is required (a string)")
+    if "task" in raw and not (isinstance(raw["task"], str) and raw["task"]):
+        raise ValueError(f"{path}: `task` is the path of a task YAML (configs/task/*.yaml)")
     for key in ("set", "model_set"):
         if not isinstance(raw.get(key) or {}, dict):
             raise ValueError(f"{path}: `{key}` is a mapping")

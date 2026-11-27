@@ -1,0 +1,20 @@
+# NOT MEASURED for NutThread: every number below (warm-up budget, number of rounds, candidates, learning rates) is PegInsert's, written to be revised once the NutThread SFT runs exist and have been evaluated.
+# Starts from an SFT checkpoint trained on NutThread (configs/experiment/sft/nut_thread/): scripts/rl.py refuses a checkpoint of another task.
+# RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE NutThread task: PA-RL variant A (global optimisation: top-m of k = 32 by Q, then distillation, no gradient ascent).
+# Touch is NOT in the VLA (the SFT checkpoint is the same for every run); the critic's touch inputs (`critic_use_tactile`, `critic_use_force`) are off here, and a tactile variant is this file with them on.
+# Everything not written here is configs/algo/rl.yaml (the paper's values), except the budget and the distillation settings, written below; the model is configs/model/pi05.yaml. The SFT checkpoint to start from (`start: {run, step}`) is
+# given on the command line (`--start <SFT run> <step>`, jobs/job_rl_*.sh), so that one experiment file serves every starting point (docs/algos/rl.md).
+name: nut_thread_pi05_parl_global
+description: "pi0.5 PA-RL variant A (global), NutThread, one online critic, no touch"
+model: pi05
+task: configs/task/nut_thread_forge.yaml         # the env YAML of the run (the SFT run it starts from must have been trained on the same task: scripts/rl.py refuses otherwise)
+set:
+  output_root: runs/rl/nut_thread
+  seed: 42                         # as the SFT main runs
+  method: parl
+  local_steps: 0
+  warmup_episodes: 300             # PA-RL's warm-up (decision of 23 Nov. 2026: 300 / 30 000, not Best-of-N's 600 / 120 000): the run of 5 rounds at 600 / 120 000 did no better at round 0 (critic + VLA 51.4 against 51.8 at 300 / 30 000)
+  warmup_critic_steps: 30000       # and the warm-up data is distilled and refreshed in every round, so a smaller one is cheaper
+  total_episodes: 1000             # 20 rounds of 50 episodes, as Best-of-N (the same online budget); about 25 h calculated, jobs/job_rl_parl.sh asks for 36 h
+  distill_selection: argmax         # label = the best candidate by Q (paper B.1); probes of 22-23 Nov. 2026 at warm-up 300/30k: argmax = softmax for the VLA alone, but critic + VLA held (53.2 at round 3) where softmax fell (47.2, paired +6.0, p = 0.005)
+  distill_lr: 8.0e-8               # decision of 25 Nov. 2026 (2.5e-8 before). Variant B probes of 6 rounds (warm-up 300/30k, argmax), local_lr 3e-2: VLA alone at round 6 is 48.2 with 8e-8 against 44.4 with 2.5e-8, critic + VLA 68.8 against 65.4 (one run each, not established). 8e-8 is 3.2x the dose per step: variant A at 2.5e-8 lost the VLA alone over 20 rounds (teleop 48.2 -> 39.8 at round 10 -> 26.6 at round 20), hence 10 rounds first (docs/algos/rl.md)

@@ -5,7 +5,7 @@
 
 The RL loop does one critic update per environment step (UTD = 1: about 150 000 per run of 1000 episodes of 150 steps, plus the warm-up) and each one ranks (and, in variant B, optimises) the
 k = 32 candidates of the next states of its batch of 256 transitions, so what it costs decides how long a run is (docs/algos/rl.md: target under 10 h for the whole run). This measures it on the
-real network at the real sizes, on SYNTHETIC data (random images and candidates: the cost does not depend on the values), for each variant of configs/experiment/rl/ (best_of_n, parl_global,
+real network at the real sizes, on SYNTHETIC data (random images and candidates: the cost does not depend on the values), for each variant of configs/experiment/rl/peg_insert/ (best_of_n, parl_global,
 parl_global_local; the experiment's `set` and your `--set` give the RLConfig):
   - `host_batch_ms`: `make_batch` (sampling the transitions, gathering 2 x 256 states of 2 x 224 x 224 x 3 bytes and the candidates of s and s' from the numpy buffer), `update_ms`: the jitted update
     from the host arrays (transfer included) up to the end of the device work, `total_ms` = their sum, median / min / max over `--steps` updates after `--warmup-steps` which compile;
@@ -30,8 +30,8 @@ from scripts.sft import enable_compilation_cache, parse_assignments
 from src.eval.sweep import gpu_name
 from src.models.interface import ROOT
 
-EXPERIMENTS = {"best_of_n": "configs/experiment/rl/pi05_best_of_n.yaml", "parl_global": "configs/experiment/rl/pi05_parl_global.yaml",
-               "parl_global_local": "configs/experiment/rl/pi05_parl_global_local.yaml"}
+EXPERIMENTS = {"best_of_n": "configs/experiment/rl/peg_insert/pi05_best_of_n.yaml", "parl_global": "configs/experiment/rl/peg_insert/pi05_parl_global.yaml",
+               "parl_global_local": "configs/experiment/rl/peg_insert/pi05_parl_global_local.yaml"}
 HORIZON = 16                       # pi0.5's chunk (docs/algos/rl.md)
 
 

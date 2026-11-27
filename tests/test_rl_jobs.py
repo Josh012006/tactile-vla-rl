@@ -10,7 +10,7 @@ from src.models.interface import ROOT
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 BON, PARL = "jobs/job_rl_best_of_n.sh", "jobs/job_rl_parl.sh"
-EXP = "configs/experiment/rl/"
+EXP = "configs/experiment/rl/peg_insert/"
 
 
 def run(script, *args):

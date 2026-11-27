@@ -1,6 +1,6 @@
 #!/bin/bash
 # SFT with LoRA (the model YAML's: openpi's own LoRA) of pi0.5 or pi0-FAST on the FORGE demonstrations, on an L40S (46 GB).
-#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/pi05_lora_scripted.yaml      # a main run: configs/experiment/sft/, output in runs/sft/peg_insert
+#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/peg_insert/pi05_lora_scripted.yaml      # a main run: configs/experiment/sft/<task>/, output in runs/sft/peg_insert
 #   sbatch jobs/job_sft_lora.sh --model pi0_fast                            # a probe: the demonstrations of configs/algo/sft.yaml, output in runs/sft/probing
 #   sbatch jobs/job_sft_lora.sh --model pi05 --demos demos/isaaclab/ForgePegInsert_Robotiq_noisy --run-name pi05_noisy
 #   sbatch jobs/job_sft_lora.sh --model pi05 --set steps=1500 --set micro_batch_size=8 --model-set vlm.lora_rank=8
@@ -27,7 +27,7 @@
 #SBATCH --mail-user=josue.mongan@mila.quebec
 
 set -u
-[ $# -eq 0 ] && { echo "usage: sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/<name>.yaml | --model <pi05 | pi0_fast> | --resume <run> [scripts.sft options]" >&2; exit 1; }
+[ $# -eq 0 ] && { echo "usage: sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/<task>/<name>.yaml | --model <pi05 | pi0_fast> | --resume <run> [scripts.sft options]" >&2; exit 1; }
 cd "${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}" || exit 1
 mkdir -p logs/slurm runs/sft/peg_insert runs/sft/probing
 nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader

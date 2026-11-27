@@ -240,25 +240,26 @@ def test_the_compilation_cache_is_openpis_unless_the_environment_names_another(m
     assert seen["jax_compilation_cache_dir"].endswith("/.cache/jax")
 
 
-# -- experiment files (configs/experiment/sft/) ---------------------------------------------------------------------------------------------
+# -- experiment files (configs/experiment/sft/<task>/) ---------------------------------------------------------------------------------------------
 def experiment_files():
     from pathlib import Path
-    return sorted((Path(__file__).resolve().parents[1] / "configs" / "experiment" / "sft").glob("*.yaml"))
+    return sorted((Path(__file__).resolve().parents[1] / "configs" / "experiment" / "sft").glob("*/*.yaml"))
 
 
 def test_the_sft_experiments_are_the_three_pi05_runs_and_the_three_pi0_fast_runs():
     from scripts import sft as cli
     from src.models.interface import ROOT, apply_overrides, load_model_cfg, norm_stats_source
     from src.models.settings import parse_model_settings
-    files = [f for f in experiment_files() if not f.stem.startswith(("gear_mesh_", "nut_thread_"))]       # PegInsert's: the other tasks' are in tests/test_tasks.py
+    files = [f for f in experiment_files() if f.parent.name == "peg_insert"]                               # PegInsert's: the other tasks' are in tests/test_tasks.py
     assert [f.stem for f in files] == sorted(["pi05_lora_scripted", "pi05_lora_noisy", "pi05_lora_teleop", "pi0_fast_lora_scripted", "pi0_fast_lora_noisy", "pi0_fast_lora_teleop"])
     names = set()
     for f in files:
         exp = cli.load_experiment(f)
         model, rest = f.stem.split("_lora_")
         demos_type = rest.split("_")[0]                                                                    # scripted | noisy | teleop
-        assert exp["model"] == model and exp["full"] is False
-        assert exp["name"] == f"peg_insert_{f.stem}" and exp["name"] not in names                          # clear, and one folder per run
+        assert exp["model"] == model and exp["full"] is False and exp["task"] == "configs/task/peg_insert_forge.yaml"
+        same_recipe = f.stem == "pi05_lora_noisy"                                                         # the only run whose statistics did not change: it keeps its name, the others got `_demostats`
+        assert exp["name"] == f"peg_insert_{f.stem}" + ("" if same_recipe else "_demostats") and exp["name"] not in names   # clear, and one folder per run
         names.add(exp["name"])
         assert exp["demos"] == [f"demos/isaaclab/ForgePegInsert_Robotiq_{demos_type}"]
         assert exp["set"] == {"output_root": "runs/sft/peg_insert", "num_demos": 50, "seed": 42}          # said in the file: expo-ft's 50 demonstrations and openpi's default seed
@@ -269,10 +270,8 @@ def test_the_sft_experiments_are_the_three_pi05_runs_and_the_three_pi0_fast_runs
         settings = parse_model_settings(apply_overrides(cfg, cli.model_overrides(cfg, exp["full"], exp["model_set"])))
         assert settings.any_lora and not settings.active_touch                                           # LoRA, and no touch in any component
         stats = norm_stats_source(apply_overrides(cfg, cli.model_overrides(cfg, exp["full"], exp["model_set"])))
-        if model == "pi05":                                                                              # the noisy set's statistics for the three, as in expo-ft
-            assert stats == (ROOT / "assets" / "forge_demo_norm", "forge_demos_robotiq_noisy")
-        else:
-            assert stats is None                                                                         # pi0-FAST: the checkpoint's own (DROID), for the three (docs/algos/sft.md)
+        # the statistics of the demonstrations the run is trained on (Albert's rule, docs/algos/sft.md, section 2b): 16-step chunks for pi0.5, 10-step ones for pi0-FAST
+        assert stats == (ROOT / "assets" / "forge_demo_norm", f"forge_demos_robotiq_{demos_type}" + ("" if model == "pi05" else "_h10"))
 
 
 def test_a_checkpoint_carries_the_normalisation_statistics_it_was_trained_with(tmp_path):
@@ -302,13 +301,13 @@ def test_a_missing_statistics_file_stops_the_dry_run_before_anything_is_loaded(f
 
 def test_an_experiment_gives_the_run_folder_and_the_command_line_wins(folder, capsys):
     from scripts import sft as cli
-    file = next(f for f in experiment_files() if f.stem == "pi05_lora_scripted")
-    (folder.parent / "stats" / "forge_demos_robotiq_noisy").mkdir(parents=True)                         # the experiment's statistics file is not in the test's tree: a stand-in
-    (folder.parent / "stats" / "forge_demos_robotiq_noisy" / "norm_stats.json").write_text("{}")
+    file = next(f for f in experiment_files() if f.parent.name == "peg_insert" and f.stem == "pi05_lora_scripted")
+    (folder.parent / "stats" / "forge_demos_robotiq_scripted").mkdir(parents=True)                         # the experiment's statistics file is not in the test's tree: a stand-in
+    (folder.parent / "stats" / "forge_demos_robotiq_scripted" / "norm_stats.json").write_text("{}")
     stats = ["--model-set", f"norm_stats.dir={folder.parent / 'stats'}"]                                # the command line wins over the file here too
     assert cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", *stats, "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"]) == 0
     out = capsys.readouterr().out
-    assert "runs/sft/peg_insert/peg_insert_pi05_lora_scripted" in out and "EXISTS" not in out and "forge_demos_robotiq_noisy/norm_stats.json" in out
+    assert "runs/sft/peg_insert/peg_insert_pi05_lora_scripted_demostats" in out and "EXISTS" not in out and "forge_demos_robotiq_scripted/norm_stats.json" in out
     cli.main(["--experiment", str(file), "--demos", str(folder), "--dry-run", *stats, "--run-name", "other", "--set", "output_root=runs/sft/probing",
               "--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"])
     assert "runs/sft/probing/other" in capsys.readouterr().out                                          # --run-name and --set win over the file
@@ -328,7 +327,7 @@ def test_a_wrong_experiment_is_refused(tmp_path):
             cli.load_experiment(bad)
     with pytest.raises(SystemExit, match="no experiment file"):
         cli.load_experiment(tmp_path / "missing.yaml")
-    file = experiment_files()[0]
+    file = next(f for f in experiment_files() if f.parent.name == "peg_insert" and f.stem.startswith("pi05"))
     with pytest.raises(SystemExit, match="not of pi0_fast"):
         cli.main(["--experiment", str(file), "--model", "pi0_fast", "--dry-run"])
     with pytest.raises(SystemExit, match="no --experiment next to it"):

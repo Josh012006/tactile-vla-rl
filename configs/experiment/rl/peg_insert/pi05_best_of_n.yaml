@@ -5,6 +5,7 @@
 name: peg_insert_pi05_best_of_n
 description: "pi0.5 Best-of-N, PegInsert, one online critic, no touch"
 model: pi05
+task: configs/task/peg_insert_forge.yaml         # the env YAML of the run (the SFT run it starts from must have been trained on the same task: scripts/rl.py refuses otherwise)
 set:
   output_root: runs/rl/peg_insert
   seed: 42                         # as the SFT main runs

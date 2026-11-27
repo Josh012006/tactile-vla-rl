@@ -8,8 +8,8 @@ checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/alg
 
 | What | Command |
 |---|---|
-| a main run (LoRA, on an L40S) | `sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/pi05_lora_scripted.yaml`: see "Main runs and probes" below |
-| look at the data and the run folder, load no model (login node, no GPU) | `python -m scripts.sft --experiment configs/experiment/sft/pi05_lora_scripted.yaml --dry-run` |
+| a main run (LoRA, on an L40S) | `sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/peg_insert/pi05_lora_scripted.yaml`: see "Main runs and probes" below |
+| look at the data and the run folder, load no model (login node, no GPU) | `python -m scripts.sft --experiment configs/experiment/sft/peg_insert/pi05_lora_scripted.yaml --dry-run` |
 | a probe: LoRA on an L40S, demonstrations of the YAML | `sbatch jobs/job_sft_lora.sh --model pi0_fast` (goes to `runs/sft/probing`) |
 | a probe, other demonstrations | `sbatch jobs/job_sft_lora.sh --model pi05 --demos demos/isaaclab/ForgePegInsert_Robotiq_noisy --run-name pi05_noisy` |
 | full fine-tuning on an A100 80 GB | `sbatch jobs/job_sft_full.sh --model pi05` |
@@ -22,36 +22,35 @@ checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/alg
 
 ### Main runs and probes
 
-- **Main runs** are the experiment files of `configs/experiment/sft/`: one file = one run (`name`, `model`, `full`, `task`, `demos`, `set`, `model_set`, `description`; any other key is refused). They go to
+- **Main runs** are the experiment files of `configs/experiment/sft/<task>/` (`peg_insert/`, `gear_mesh/`, `nut_thread/`: the folder is the task, and each file says it too in `task`): one file = one run (`name`, `model`, `full`, `task`, `demos`, `set`, `model_set`, `description`; any other key is refused). They go to
   **`runs/sft/peg_insert/<name>/`** (`output_root` in their `set`; `runs/sft/gear_mesh/`, `runs/sft/nut_thread/` for the other tasks). `task` is the task YAML of the demonstrations (`configs/task/<task>_forge.yaml`;
-  none = PegInsert, as every file above): it is written in the run's `config.json`, so that `scripts/eval_sft.py`, `scripts/eval_rl.py` and `scripts/rl.py` use the same env YAML without `--task-config`, and the
+  none = PegInsert; the PegInsert files say it too): it is written in the run's `config.json`, so that `scripts/eval_sft.py`, `scripts/eval_rl.py` and `scripts/rl.py` use the same env YAML without `--task-config`, and the
   script refuses demonstrations whose prompt is not the YAML's `language_instruction` (the evaluation prompts the policy with the latter). The SFT itself never starts the simulator. What is given on the command line is added to the file and wins (`--set steps=100`, `--run-name`).
 - **Probes** (a run to measure or look at something, not a main run) have no experiment file: their default `output_root` is **`runs/sft/probing`**.
 - The six SFTs of PegInsert, all LoRA, without touch (the SFT of expo-ft: cameras, joints, gripper, prompt; the taxels in the demonstrations are not read by the model): the three pi0.5 runs and the three
-  pi0-FAST runs, one per demonstration type. Normalisation statistics (section 2b): pi0.5 the noisy demonstrations', pi0-FAST the checkpoint's own (DROID), the same for the three runs of a model.
+  pi0-FAST runs, one per demonstration type. Normalisation statistics (section 2b): each run uses the statistics of the demonstrations it is trained on (pi0.5: 16-step chunks, pi0-FAST: 10-step chunks).
 
-| experiment file | run folder under `runs/sft/peg_insert/` | model | demonstrations | normalisation statistics |
+| experiment file (`configs/experiment/sft/peg_insert/`) | run folder under `runs/sft/peg_insert/` | model | demonstrations | normalisation statistics |
 |---|---|---|---|---|
-| `pi05_lora_scripted.yaml` | `peg_insert_pi05_lora_scripted` | pi0.5 | `ForgePegInsert_Robotiq_scripted` | noisy demonstrations, 16 steps |
-| `pi05_lora_noisy.yaml` | `peg_insert_pi05_lora_noisy` | pi0.5 | `ForgePegInsert_Robotiq_noisy` | noisy demonstrations, 16 steps |
-| `pi05_lora_teleop.yaml` | `peg_insert_pi05_lora_teleop` | pi0.5 | `ForgePegInsert_Robotiq_teleop` | noisy demonstrations, 16 steps |
-| `pi0_fast_lora_scripted.yaml` | `peg_insert_pi0_fast_lora_scripted` | pi0-FAST | `ForgePegInsert_Robotiq_scripted` | the checkpoint's (DROID) |
-| `pi0_fast_lora_noisy.yaml` | `peg_insert_pi0_fast_lora_noisy` | pi0-FAST | `ForgePegInsert_Robotiq_noisy` | the checkpoint's (DROID) |
-| `pi0_fast_lora_teleop.yaml` | `peg_insert_pi0_fast_lora_teleop` | pi0-FAST | `ForgePegInsert_Robotiq_teleop` | the checkpoint's (DROID) |
+| `pi05_lora_scripted.yaml` | `peg_insert_pi05_lora_scripted_demostats` | pi0.5 | `ForgePegInsert_Robotiq_scripted` | scripted demonstrations, 16 steps (`forge_demos_robotiq_scripted`) |
+| `pi05_lora_noisy.yaml` | `peg_insert_pi05_lora_noisy` | pi0.5 | `ForgePegInsert_Robotiq_noisy` | noisy demonstrations, 16 steps (`forge_demos_robotiq_noisy`) |
+| `pi05_lora_teleop.yaml` | `peg_insert_pi05_lora_teleop_demostats` | pi0.5 | `ForgePegInsert_Robotiq_teleop` | teleoperated demonstrations, 16 steps (`forge_demos_robotiq_teleop`) |
+| `pi0_fast_lora_scripted.yaml` | `peg_insert_pi0_fast_lora_scripted_demostats` | pi0-FAST | `ForgePegInsert_Robotiq_scripted` | scripted demonstrations, 10 steps (`forge_demos_robotiq_scripted_h10`) |
+| `pi0_fast_lora_noisy.yaml` | `peg_insert_pi0_fast_lora_noisy_demostats` | pi0-FAST | `ForgePegInsert_Robotiq_noisy` | noisy demonstrations, 10 steps (`forge_demos_robotiq_noisy_h10`) |
+| `pi0_fast_lora_teleop.yaml` | `peg_insert_pi0_fast_lora_teleop_demostats` | pi0-FAST | `ForgePegInsert_Robotiq_teleop` | teleop demonstrations, 10 steps (`forge_demos_robotiq_teleop_h10`) |
 
 GearMesh and NutThread: one experiment per model, on the teleoperated demonstrations (the only ones that can exist for now, `docs/demos.md`); the training length, the number of demonstrations and the learning
 rate are PegInsert's, not tuned for them.
 
 | experiment file | run folder under `runs/sft/<task>/` | model | demonstrations | normalisation statistics |
 |---|---|---|---|---|
-| `gear_mesh_pi05_lora_teleop.yaml` | `gear_mesh_pi05_lora_teleop` | pi0.5 | `ForgeGearMesh_Robotiq_teleop` | asset `forge_demos_robotiq_gear_mesh_teleop`, to compute first (`docs/demos.md`) |
-| `gear_mesh_pi0_fast_lora_teleop.yaml` | `gear_mesh_pi0_fast_lora_teleop` | pi0-FAST | `ForgeGearMesh_Robotiq_teleop` | the checkpoint's (DROID) |
-| `nut_thread_pi05_lora_teleop.yaml` | `nut_thread_pi05_lora_teleop` | pi0.5 | `ForgeNutThread_Robotiq_teleop` | asset `forge_demos_robotiq_nut_thread_teleop`, to compute first |
-| `nut_thread_pi0_fast_lora_teleop.yaml` | `nut_thread_pi0_fast_lora_teleop` | pi0-FAST | `ForgeNutThread_Robotiq_teleop` | the checkpoint's (DROID) |
+| `gear_mesh/pi05_lora_teleop.yaml` | `gear_mesh_pi05_lora_teleop` | pi0.5 | `ForgeGearMesh_Robotiq_teleop` | asset `forge_demos_robotiq_gear_mesh_teleop`, to compute first (`docs/demos.md`) |
+| `gear_mesh/pi0_fast_lora_teleop.yaml` | `gear_mesh_pi0_fast_lora_teleop` | pi0-FAST | `ForgeGearMesh_Robotiq_teleop` | asset `forge_demos_robotiq_gear_mesh_teleop_h10`, to compute first |
+| `nut_thread/pi05_lora_teleop.yaml` | `nut_thread_pi05_lora_teleop` | pi0.5 | `ForgeNutThread_Robotiq_teleop` | asset `forge_demos_robotiq_nut_thread_teleop`, to compute first |
+| `nut_thread/pi0_fast_lora_teleop.yaml` | `nut_thread_pi0_fast_lora_teleop` | pi0-FAST | `ForgeNutThread_Robotiq_teleop` | asset `forge_demos_robotiq_nut_thread_teleop_h10`, to compute first |
 
-PegInsert's pi0.5 statistics are those of the noisy demonstrations (section 2b); the new tasks have no noisy ones yet, so their pi0.5 files use the statistics of their own teleoperated demonstrations. That is a
-choice to be revisited when the noisy demonstrations exist (the same file for every demonstration type of a task). Whether the checkpoint's statistics also suit pi0-FAST on these tasks is not measured
-(`scripts/fast_roundtrip.py --demos-dir <folder>` shows it on the first demonstrations).
+Every statistics file is computed on the demonstrations of the run, so the files of these two tasks exist only once their teleoperated demonstrations do (`docs/demos.md`). The runs of PegInsert before this rule
+(pi0.5 with the noisy set's statistics for the three types, pi0-FAST with the checkpoint's) keep their names, without the `_demostats` suffix, and stay as references; they are not comparable one to one with the new ones.
 
 `--set KEY=VALUE` overrides a key of `configs/algo/sft.yaml`; `--model-set KEY=VALUE` a key of the model YAML (`<component>.<key>`, the
 probe's `--set`); `--full` is `use_lora: false` in every component the model has. Before the first job, on the login node:
@@ -80,11 +79,13 @@ be trained on together; episodes with and without taxels are not mixed.
 Which statistics the SFT normalises with is the `norm_stats` block of the model YAML (`dir`, `asset_id`: `<dir>/<asset_id>/norm_stats.json`, `src/models/interface.py`
 `norm_stats_source`, read by `src/models/loading.py` `load_norm_stats`). Without the block: the checkpoint's own (DROID's `assets/droid`).
 
-- **pi0.5: the statistics of the noisy demonstrations, for the three demonstration types** (`assets/forge_demo_norm/forge_demos_robotiq_noisy`), as in the SFT of
-  expo-ft (`configs/task/isaaclab/peg_insert_forge_sft_robotiq_*.yaml` there): the same file for the three runs, so that the demonstrations are the only difference
-  between them; the noisy set was the one that covered the other two best. The three pi0.5 experiment files carry the block (`model_set: norm_stats.*`). The file is
-  the one expo-ft wrote (`scripts/demos/compute_demo_norm_stats.py`, identical in both repositories); copy it, do not recompute it.
-- **pi0-FAST: the checkpoint's own statistics (DROID), by decision.** Its openpi pipeline normalises OFFSETS from the chunk-start state too (`RLDSDroidDataConfig`, JOINT_POSITION: `DeltaActions` before
+- **The rule (Albert Zhan, 2026-11-27): a model trained on a set of demonstrations normalises with the statistics of that set.** One statistics file per demonstration set and per chunk length, computed by
+  `scripts/demos/compute_demo_norm_stats.py` on the 50 episodes the run trains on: pi0.5 `forge_demos_robotiq_{scripted,noisy,teleop}` (16 steps), pi0-FAST `forge_demos_robotiq_{scripted,noisy,teleop}_h10` (10 steps),
+  and `forge_demos_robotiq_<task>_teleop[_h10]` for GearMesh and NutThread. Every experiment file carries its own `model_set: norm_stats.*` block; the checkpoints carry the file (`checkpoints/<step>/assets/`) and an
+  evaluation or an RL run byte-checks it. Commands: `docs/demos.md`, row "normalisation statistics". The noisy set's file is the one expo-ft wrote (`forge_demos_robotiq_noisy`, copied, identical in both repositories).
+  What was done before (history, kept below): pi0.5 used the noisy set's file for the three demonstration types (as in expo-ft, so that the demonstrations were the only difference between the runs);
+  pi0-FAST used the checkpoint's own.
+- **pi0-FAST, the earlier decision (2026-11-14), the checkpoint's own statistics (DROID), replaced by the rule above; the measurement stays as the reference of the first runs.** Its openpi pipeline normalises OFFSETS from the chunk-start state too (`RLDSDroidDataConfig`, JOINT_POSITION: `DeltaActions` before
   `Normalize`, `AbsoluteActions` after the inverse), so statistics computed on the demonstrations have the same kind as pi0.5's and only the chunk length differs (10 steps:
   `compute_demo_norm_stats --horizon 10 --droid-stats <the polaris checkpoint's norm_stats.json>`, asset `forge_demos_robotiq_noisy_h10`). Measured on the 150 demonstrations with
   `scripts/fast_tokens.py` (CPU, 2026-11-12; `--norm-stats-dir` / `--norm-stats-asset-id` give the other statistics):
@@ -322,7 +323,7 @@ Not done: restoring on several devices, and a resume after the demonstrations ch
 from src.models import load_model
 from src.algos.sft import load_checkpoint
 policy = load_model("pi05")                       # the SAME model YAML and overrides as the run (the rank is part of the structure; --full too; the `norm_stats` block too:
-                                                  # a pi0.5 run of configs/experiment/sft/ needs `model_set` of its experiment file, or the checkpoint's meta.json `model_cfg`)
+                                                  # a pi0.5 run of configs/experiment/sft/<task>/ needs `model_set` of its experiment file, or the checkpoint's meta.json `model_cfg`)
 meta = load_checkpoint(policy, "runs/sft/peg_insert/<run>/checkpoints/1200")
 ```
 

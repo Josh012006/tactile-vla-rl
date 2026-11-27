@@ -1,0 +1,23 @@
+# NOT MEASURED for GearMesh: every number below (warm-up budget, number of rounds, candidates, learning rates) is PegInsert's, written to be revised once the GearMesh SFT runs exist and have been evaluated.
+# Starts from an SFT checkpoint trained on GearMesh (configs/experiment/sft/gear_mesh/): scripts/rl.py refuses a checkpoint of another task.
+# RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE GearMesh task: Best-of-N: the VLA stays frozen, the argmax of Q over k = 32 candidates is executed (Alg. 2 of the paper without the distillation, global optimisation only).
+# Touch is NOT in the VLA (the SFT checkpoint is the same for every run); the critic's touch inputs (`critic_use_tactile`, `critic_use_force`) are off here; the same experiment with touch is pi05_best_of_n_touch.yaml.
+# Everything not written here is configs/algo/rl.yaml (the paper's values), except the warm-up budget and the number of rounds, written below; the model is configs/model/pi05.yaml. The SFT checkpoint to start from (`start: {run, step}`) is
+# given on the command line (`--start <SFT run> <step>`, jobs/job_rl_*.sh), so that one experiment file serves every starting point (docs/algos/rl.md).
+name: gear_mesh_pi05_best_of_n
+description: "pi0.5 Best-of-N, GearMesh, one online critic, no touch"
+model: pi05
+task: configs/task/gear_mesh_forge.yaml         # the env YAML of the run (the SFT run it starts from must have been trained on the same task: scripts/rl.py refuses otherwise)
+set:
+  output_root: runs/rl/gear_mesh
+  seed: 42                         # as the SFT main runs
+  method: best_of_n
+  keep_top: 1
+  local_steps: 0
+  rollout_selection: argmax
+  warmup_episodes: 600             # warm-up budget of the study (locked after the warm-up tests of Nov. 2026: 150 / 300 / 600 episodes, 30k / 60k / 120k critic updates; rl.yaml keeps the paper's 50 / 5000)
+  warmup_critic_steps: 120000
+  total_episodes: 1000             # 20 rounds of 50 episodes
+  eval_every_rounds: 5             # in-run evaluations (100 episodes): after the warm-up, every 5 rounds and after the last one (rounds 0, 5, 10, 15, 20); the 500-episode evaluations are made by scripts/eval_rl.py
+  critic_use_tactile: false        # no touch in the critic (the default, written here so that the file says it)
+  critic_use_force: false

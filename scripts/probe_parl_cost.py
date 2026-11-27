@@ -1,7 +1,7 @@
 """What does a PA-RL run cost, stage by stage? (no simulator: the real pi0.5 of an SFT checkpoint, synthetic states, a few minutes on a GPU)
 
     python -m scripts.probe_parl_cost --start peg_insert_pi05_lora_teleop 4000                                   # variant B (global + local), the dearer of the two
-    python -m scripts.probe_parl_cost --experiment configs/experiment/rl/pi05_parl_global.yaml --start <run> <step>   # variant A
+    python -m scripts.probe_parl_cost --experiment configs/experiment/rl/peg_insert/pi05_parl_global.yaml --start <run> <step>   # variant A
     python -m scripts.probe_parl_cost --start <run> <step> --states 256 --refresh-states 32 --save-dir $SLURM_TMPDIR
 
 Run it through jobs/job_probe_parl_cost.sh (same XLA settings as a run: the VLA and the critic share half of the card with the env server).
@@ -38,7 +38,7 @@ from scripts.sft import enable_compilation_cache, parse_assignments
 from src.eval.sweep import gpu_name
 from src.models.interface import ROOT
 
-DEFAULT_EXPERIMENT = "configs/experiment/rl/pi05_parl_global_local.yaml"
+DEFAULT_EXPERIMENT = "configs/experiment/rl/peg_insert/pi05_parl_global_local.yaml"
 SYNTHETIC_PLANS = 19               # plans per synthetic episode (150 steps, a chunk every 8)
 # What the earlier measurements say of the rest of a run (docs/algos/rl.md section 5, the critic probe of 15 Nov. 2026): used by the estimate, change them on the command line.
 COLLECT_ROUND_S = 280.0            # a round of 50 episodes: about 182 s of model + 97 s of simulator

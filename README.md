@@ -83,13 +83,13 @@ The three demonstration sets (`scripted`, `noisy`, `teleop`, 50 episodes each) a
 ### 2. SFT and its evaluation
 
 ```bash
-python -m scripts.sft --experiment configs/experiment/sft/pi05_lora_teleop.yaml --dry-run      # login node, no GPU
-sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/pi05_lora_teleop.yaml          # a main run: runs/sft/peg_insert/<name>/
-sbatch jobs/job_sft_lora.sh --resume runs/sft/peg_insert/peg_insert_pi05_lora_teleop           # after a stop or a failure
-sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/peg_insert_pi05_lora_teleop --n-episodes 100   # success rate of step 0 and every checkpoint
+python -m scripts.sft --experiment configs/experiment/sft/peg_insert/pi05_lora_teleop.yaml --dry-run      # login node, no GPU
+sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/peg_insert/pi05_lora_teleop.yaml          # a main run: runs/sft/peg_insert/<name>/
+sbatch jobs/job_sft_lora.sh --resume runs/sft/peg_insert/peg_insert_pi05_lora_teleop_demostats           # after a stop or a failure
+sbatch jobs/job_eval_sft.sh --run runs/sft/peg_insert/peg_insert_pi05_lora_teleop_demostats --n-episodes 100   # success rate of step 0 and every checkpoint
 ```
 
-Six experiment files (pi0.5 and pi0-FAST x three demonstration types) are in `configs/experiment/sft/`. Full fine-tuning: `jobs/job_sft_full.sh`.
+Experiment files are one per task, model and demonstration type: `configs/experiment/sft/<task>/` (PegInsert: pi0.5 and pi0-FAST x three demonstration types; GearMesh, NutThread: teleoperated) and `configs/experiment/rl/<task>/` (six methods each; each file says its `task`). Full fine-tuning: `jobs/job_sft_full.sh`.
 
 ### 3. Online RL
 
@@ -102,14 +102,14 @@ critic; each round ends with critic updates (one per environment step) and, for 
 sbatch jobs/job_rl_best_of_n.sh --start peg_insert_pi05_lora_teleop 1600 --run-name bon_teleop_s1600
 
 # the same with the taxels and the measured force in the critic
-sbatch jobs/job_rl_best_of_n.sh --experiment configs/experiment/rl/pi05_best_of_n_touch.yaml \
+sbatch jobs/job_rl_best_of_n.sh --experiment configs/experiment/rl/peg_insert/pi05_best_of_n_touch.yaml \
   --start peg_insert_pi05_lora_teleop 1600 --run-name bon_touch_teleop_s1600
 
 # PA-RL, variant A (global) or B (global + local ascent)
 sbatch jobs/job_rl_parl.sh --variant B --start peg_insert_pi05_lora_teleop 1600 --run-name parl_b_teleop
 
 # what a run would do (no GPU, no model, no simulator), and how to continue a run that stopped
-python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --start peg_insert_pi05_lora_teleop 1600 --dry-run
+python -m scripts.rl --experiment configs/experiment/rl/peg_insert/pi05_best_of_n.yaml --start peg_insert_pi05_lora_teleop 1600 --dry-run
 sbatch jobs/job_rl_best_of_n.sh --resume runs/rl/peg_insert/<run name>
 ```
 

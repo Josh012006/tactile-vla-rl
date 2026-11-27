@@ -1,16 +1,16 @@
 #!/bin/bash
 # Online RL fine-tuning of pi0.5 on the FORGE PegInsert task, PA-RL (scripts/rl.py): after every round the VLA is distilled on the critic's best actions of every stored state, then the candidate cache is drawn again with the new VLA (not after the last round).
 # Isaac Sim (one env server at a time), the VLA, its optimiser and the critic share ONE L40S (46 GB). The two versions are chosen by --variant:
-#   A  global      = configs/experiment/rl/pi05_parl_global.yaml        (top-m of the k = 32 candidates by Q, then distillation)
-#   B  global+local = configs/experiment/rl/pi05_parl_global_local.yaml  (the same + 10 steps of gradient ascent on Q of the kept chunks)
-#   with touch in the critic: --experiment configs/experiment/rl/pi05_parl_global_touch.yaml (A) or pi05_parl_global_local_touch.yaml (B) instead of --variant
+#   A  global      = configs/experiment/rl/peg_insert/pi05_parl_global.yaml        (top-m of the k = 32 candidates by Q, then distillation)
+#   B  global+local = configs/experiment/rl/peg_insert/pi05_parl_global_local.yaml  (the same + 10 steps of gradient ascent on Q of the kept chunks)
+#   with touch in the critic: --experiment configs/experiment/rl/peg_insert/pi05_parl_global_touch.yaml (A) or pi05_parl_global_local_touch.yaml (B) instead of --variant
 #   sbatch jobs/job_rl_parl.sh --variant A --start <SFT run> <step>                   # a main run of variant A: output in runs/rl/peg_insert/<experiment name>
 #   sbatch jobs/job_rl_parl.sh --variant B --start <SFT run> <step> --run-name probe --set total_episodes=100 --set warmup_critic_steps=500     # a short probe of variant B (the experiment's output_root)
 #   XLA_PYTHON_CLIENT_MEM_FRACTION=0.65 sbatch jobs/job_rl_parl.sh --variant A --start <SFT run> <step> --run-name probe2 --set total_episodes=100 --set warmup_critic_steps=5000   # another JAX share of the card for this run (default 0.6)
 #   sbatch jobs/job_rl_parl.sh --resume runs/rl/peg_insert/<run name>                 # after a stop or a failure: no --variant (the run carries its own); continues after the last finished stage (a stage = the warm-up, or one round with its critic updates AND its distillation / refresh)
 #   sbatch jobs/job_rl_parl.sh --resume runs/rl/peg_insert/<run name> --extend-to 1000   # a run that is done (or stopped) goes on to 1000 online episodes, as the same run: PA-RL first draws again the candidates of every state (the old last round did not; hours at the end of a run of 10 rounds, about 4.5 h at 0.2 s per state)
 # `--variant` also takes `global` / `global_local` (or `a` / `b`); `--experiment FILE` instead of `--variant` runs another PA-RL experiment (it must be a parl one: Best-of-N has jobs/job_rl_best_of_n.sh). Every other option goes to
-# `python -m scripts.rl` (see its --help). Look first, on the login node, at what would run:  python -m scripts.rl --experiment configs/experiment/rl/pi05_parl_global.yaml --start <run> <step> --dry-run
+# `python -m scripts.rl` (see its --help). Look first, on the login node, at what would run:  python -m scripts.rl --experiment configs/experiment/rl/peg_insert/pi05_parl_global.yaml --start <run> <step> --dry-run
 # Before the first run: the learner venv and the models fetched (uv sync --group vla; python -m scripts.fetch_models), the Isaac Lab venv (scripts/setup_isaac_venv.sh), wandb login (--set wandb_mode=offline | disabled to change).
 # Output: runs/rl/peg_insert/<name>/ (config.json, metrics.jsonl, wandb_id.txt, episodes/, resume/, critics/, vlas/, eval/results/<round>.json and eval/curve.png, logs/server_*.log), logs/slurm/rl_parl_<jobid>.out, logs/slurm/gpu_<jobid>.csv.
 # Disk: about 0.25 GB of episodes per round (images, uncompressed) + the critic's state (about 30 MB) rewritten every round + the VLA's trainable parameters of EVERY round (vlas/round_<r>/, about 1.7 GB each: about 17 GB for 10 rounds)
@@ -53,8 +53,8 @@ if [ -n "$variant" ]; then
     [ -z "$experiment" ] || { echo "--variant and --experiment both given: choose one" >&2; exit 1; }
     [ "$resume" -eq 0 ] || { echo "--variant is for a new run: a --resume continues the run's own experiment" >&2; exit 1; }
     case "${variant,,}" in
-        a|global) experiment=configs/experiment/rl/pi05_parl_global.yaml ;;
-        b|global_local|global+local) experiment=configs/experiment/rl/pi05_parl_global_local.yaml ;;
+        a|global) experiment=configs/experiment/rl/peg_insert/pi05_parl_global.yaml ;;
+        b|global_local|global+local) experiment=configs/experiment/rl/peg_insert/pi05_parl_global_local.yaml ;;
         *) echo "unknown --variant '$variant': A (global) or B (global_local)" >&2; exit 1 ;;
     esac
     args=(--experiment "$experiment" "${args[@]}")

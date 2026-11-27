@@ -1,18 +1,18 @@
 # SFT of pi0.5 with LoRA on the FORGE PegInsert noisy scripted (35 percent of the demonstrations with noise injection, clean labels) demonstrations (50 episodes, all of them).
 # Touch is NOT used: this is the SFT of expo-ft (cameras, joints, gripper, prompt), whose checkpoint the RL starts from. The taxels in the demonstrations are ignored.
-# Normalisation statistics: those computed on the NOISY demonstrations (assets/forge_demo_norm/forge_demos_robotiq_noisy), for the three demonstration types, as in the
-# SFT of expo-ft: the DROID ones squeeze FORGE's small motions into a few percent of [-1, 1] (docs/algos/sft.md, section 2b), and the same file for the three runs
-# means that the demonstrations are the only difference between them. The checkpoints carry them (checkpoints/<step>/assets/); an evaluation or an RL run that loads
-# one of them must use the same `norm_stats` block (model_set below).
+# Normalisation statistics: those computed on THE DEMONSTRATIONS OF THIS RUN (assets/forge_demo_norm/forge_demos_robotiq_noisy, 16 steps; scripts/demos/compute_demo_norm_stats.py): a model trained on a set
+# of demonstrations normalises with the statistics of that set (rule of Albert Zhan, docs/algos/sft.md, section 2b). The DROID ones squeeze FORGE's small motions into a few percent of [-1, 1].
+# The checkpoints carry them (checkpoints/<step>/assets/); an evaluation or an RL run that loads one of them must use the same `norm_stats` block (model_set below).
 # Everything else (steps, batch, learning rate, checkpoints every 200 steps, resume snapshots, wandb) is configs/algo/sft.yaml; the model is configs/model/pi05.yaml (LoRA).
 #
-#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/pi05_lora_noisy.yaml
+#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/peg_insert/pi05_lora_noisy.yaml
 #   continue it:  sbatch jobs/job_sft_lora.sh --resume runs/sft/peg_insert/peg_insert_pi05_lora_noisy
 # Output: runs/sft/peg_insert/peg_insert_pi05_lora_noisy/
 name: peg_insert_pi05_lora_noisy
 description: "pi0.5 LoRA SFT, PegInsert, noisy scripted (35 percent of the demonstrations with noise injection, clean labels) demonstrations, no touch"
 model: pi05
 full: false
+task: configs/task/peg_insert_forge.yaml         # recorded in the run's config.json: the evaluation and the RL use this env YAML; also checks the prompt of the demonstrations against it
 demos:
   - demos/isaaclab/ForgePegInsert_Robotiq_noisy
 set:

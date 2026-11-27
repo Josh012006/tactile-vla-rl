@@ -1,12 +1,12 @@
 #!/bin/bash
 # Online RL fine-tuning of pi0.5 on the FORGE PegInsert task, BEST-OF-N (scripts/rl.py): the VLA stays frozen, the online critic picks the argmax of the k = 32 candidates of the VLA. Isaac Sim (one env server at a time), the VLA and the critic share ONE L40S (46 GB).
-#   sbatch jobs/job_rl_best_of_n.sh --start <SFT run> <step>                          # a main run of configs/experiment/rl/pi05_best_of_n.yaml: output in runs/rl/peg_insert/<experiment name>
+#   sbatch jobs/job_rl_best_of_n.sh --start <SFT run> <step>                          # a main run of configs/experiment/rl/peg_insert/pi05_best_of_n.yaml: output in runs/rl/peg_insert/<experiment name>
 #   sbatch jobs/job_rl_best_of_n.sh --start <SFT run> <step> --run-name probe --set total_episodes=100 --set warmup_critic_steps=500     # a short probe (the experiment's output_root)
-#   sbatch jobs/job_rl_best_of_n.sh --experiment configs/experiment/rl/pi05_best_of_n_touch.yaml --start <SFT run> <step> --run-name <name>      # the same with tactile + measured force in the critic
+#   sbatch jobs/job_rl_best_of_n.sh --experiment configs/experiment/rl/peg_insert/pi05_best_of_n_touch.yaml --start <SFT run> <step> --run-name <name>      # the same with tactile + measured force in the critic
 #   sbatch jobs/job_rl_best_of_n.sh --resume runs/rl/peg_insert/<run name>            # after a stop or a failure: continues after the last finished stage (a stage = the warm-up, or one round with its critic updates)
 #   sbatch jobs/job_rl_best_of_n.sh --resume runs/rl/peg_insert/<run name> --extend-to 1000   # a run that is done (or stopped) goes on to 1000 online episodes, as the same run (the VLA stays frozen: nothing to prepare)
 # Every other option goes to `python -m scripts.rl` (see its --help); `--experiment FILE` replaces the default experiment (it must be a best_of_n one: PA-RL has jobs/job_rl_parl.sh). Look first, on the login node, at what would run:
-#   python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --start <run> <step> --dry-run
+#   python -m scripts.rl --experiment configs/experiment/rl/peg_insert/pi05_best_of_n.yaml --start <run> <step> --dry-run
 # Before the first run: the learner venv and the models fetched (uv sync --group vla; python -m scripts.fetch_models), the Isaac Lab venv (scripts/setup_isaac_venv.sh), wandb login (--set wandb_mode=offline | disabled to change).
 # Output: runs/rl/peg_insert/<name>/ (config.json, metrics.jsonl, wandb_id.txt, episodes/, resume/, critics/, eval/results/<round>.json and eval/curve.png, logs/server_*.log), logs/slurm/rl_bon_<jobid>.out, logs/slurm/gpu_<jobid>.csv.
 # Disk: about 0.25 GB of episodes per round (images, uncompressed) + the critic's state (about 30 MB) rewritten every round: a few GB in all.
@@ -41,7 +41,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
         --resume|--resume=*) resume=1 ;;
     esac
 done
-default_experiment=configs/experiment/rl/pi05_best_of_n.yaml
+default_experiment=configs/experiment/rl/peg_insert/pi05_best_of_n.yaml
 if [ -n "$experiment" ]; then
     root="${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}"
     file="$experiment"; [ -f "$file" ] || file="$root/$experiment"

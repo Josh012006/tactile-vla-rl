@@ -1,7 +1,7 @@
 """SFT of a VLA on the FORGE demonstrations: `python -m scripts.sft --model pi0_fast` (algorithm: src/algos/sft.py, settings: configs/algo/sft.yaml).
 
-    python -m scripts.sft --experiment configs/experiment/sft/pi05_lora_scripted.yaml           # a main run: everything it needs is in the experiment file
-    python -m scripts.sft --experiment configs/experiment/sft/pi05_lora_scripted.yaml --dry-run # reads the demonstrations and prints what would be trained on: no GPU, no model
+    python -m scripts.sft --experiment configs/experiment/sft/peg_insert/pi05_lora_scripted.yaml           # a main run: everything it needs is in the experiment file
+    python -m scripts.sft --experiment configs/experiment/sft/peg_insert/pi05_lora_scripted.yaml --dry-run # reads the demonstrations and prints what would be trained on: no GPU, no model
     python -m scripts.sft --model pi0_fast --dry-run                    # the same for a run given on the command line
     python -m scripts.sft --model pi0_fast                              # LoRA (the model YAML's), the demonstrations of configs/algo/sft.yaml
     python -m scripts.sft --model pi05 --full                           # full fine-tuning: use_lora false in every component
@@ -17,7 +17,7 @@ steps, at the last step and when the job gets a SIGTERM. The wandb run of the fi
 
 wandb: `wandb login` once on the login node; `--set wandb_mode=offline` (then `wandb sync <run>/wandb/offline-run-*`) or `--set wandb_mode=disabled` to change it.
 
---experiment FILE (configs/experiment/sft/*.yaml) gives the model, the demonstrations, the run name and the overrides of a MAIN run, whose output_root it sets
+--experiment FILE (configs/experiment/sft/<task>/*.yaml) gives the model, the demonstrations, the run name and the overrides of a MAIN run, whose output_root it sets
 (runs/sft/<task>: runs/sft/peg_insert, runs/sft/gear_mesh, runs/sft/nut_thread); what is given on the command line is added to it and wins. Without an experiment, a run
 is a probe: output_root is runs/sft/probing.
 
@@ -121,7 +121,7 @@ EXPERIMENT_KEYS = {"name", "description", "model", "full", "task", "demos", "set
 
 
 def load_experiment(path) -> dict:
-    """An experiment file (configs/experiment/sft/*.yaml): `name` (the run's folder), `model`, `full`, `task` (the task YAML of the demonstrations; absent = PegInsert), `demos`,
+    """An experiment file (configs/experiment/sft/<task>/*.yaml): `name` (the run's folder), `model`, `full`, `task` (the task YAML of the demonstrations; absent = PegInsert), `demos`,
     `set` (keys of the algorithm YAML), `model_set` (keys of the model YAML), `description`. Unknown keys and wrong types are refused, not ignored."""
     path = Path(path)
     if not path.exists() and not path.is_absolute():
@@ -188,7 +188,7 @@ def enable_compilation_cache() -> None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--experiment", metavar="FILE", help="experiment file (configs/experiment/sft/*.yaml): model, demonstrations, run name and overrides of a main run")
+    ap.add_argument("--experiment", metavar="FILE", help="experiment file (configs/experiment/sft/<task>/*.yaml): model, demonstrations, run name and overrides of a main run")
     ap.add_argument("--model", help="configs/model/<name>.yaml (not needed with --experiment or --resume)")
     ap.add_argument("--full", action="store_true", help="full fine-tuning (use_lora false in every component) instead of the YAML's LoRA")
     ap.add_argument("--demos", nargs="+", metavar="FOLDER", help="folders of ep_*.npz, instead of the `demos` of the config")

@@ -9,7 +9,7 @@ from scripts import rl as S  # noqa: E402
 from src.algos import rl_config  # noqa: E402
 
 EXP = {"name": "probe", "model": "pi05", "set": {"method": "best_of_n", "keep_top": 1, "local_steps": 0, "rollout_selection": "argmax"}}
-EXPERIMENT = "configs/experiment/rl/pi05_best_of_n.yaml"
+EXPERIMENT = "configs/experiment/rl/peg_insert/pi05_best_of_n.yaml"
 
 
 def make_sft_run(tmp_path, family="pi05", model_name="pi05", steps=(4000,)):
@@ -68,7 +68,7 @@ def test_the_dry_run_prints_the_plan_and_writes_nothing(tmp_path, capsys):
 
 def test_the_dry_run_of_a_parl_experiment_says_it_distils_and_keeps_a_vla_checkpoint_per_round(tmp_path, capsys):
     run = make_sft_run(tmp_path)
-    assert S.main(["--experiment", "configs/experiment/rl/pi05_parl_global_local.yaml", "--start", str(run), "4000", "--dry-run", "--run-name", "never_created"]) == 0
+    assert S.main(["--experiment", "configs/experiment/rl/peg_insert/pi05_parl_global_local.yaml", "--start", str(run), "4000", "--dry-run", "--run-name", "never_created"]) == 0
     out = capsys.readouterr().out
     assert "method parl_global_local" in out and "distillation after every round" in out and "a VLA checkpoint" in out
 
@@ -114,3 +114,15 @@ def test_extend_to_needs_a_resume_and_the_dry_run_extends_nothing(tmp_path, caps
     out = capsys.readouterr().out
     assert "EXTENDED: total_episodes 500 -> 1000 after stage 10" in out and "20 rounds of 50 episodes" in out and "the VLA stays frozen" in out
     assert json.loads((run / "config.json").read_text())["rl"]["total_episodes"] == 500                                       # a dry run writes nothing
+
+
+def test_the_experiment_and_the_sft_run_have_to_be_of_the_same_task():
+    from scripts import rl as S
+    assert S.check_same_task(None, "configs/task/gear_mesh_forge.yaml", None) is None                                    # an experiment without `task` takes the run's
+    assert S.check_same_task("configs/task/gear_mesh_forge.yaml", "configs/task/gear_mesh_forge.yaml", None) is None
+    assert S.check_same_task("configs/task/peg_insert_forge.yaml", None, None) is None                                   # a run that recorded none is PegInsert's
+    with pytest.raises(SystemExit, match="trained on gear_mesh_forge.yaml"):
+        S.check_same_task("configs/task/peg_insert_forge.yaml", "configs/task/gear_mesh_forge.yaml", None)
+    with pytest.raises(SystemExit, match="trained on peg_insert_forge.yaml"):
+        S.check_same_task("configs/task/nut_thread_forge.yaml", None, None)
+    assert S.check_same_task("configs/task/nut_thread_forge.yaml", None, "configs/task/peg_insert_forge.yaml") is None   # --task-config overrides on purpose

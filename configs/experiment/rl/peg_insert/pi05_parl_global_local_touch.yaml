@@ -1,21 +1,23 @@
-# RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE PegInsert task: PA-RL variant A (global optimisation: top-m of k = 32 by Q, then distillation, no gradient ascent).
-# TOUCH IN THE CRITIC: identical to pi05_parl_global.yaml except for the critic's inputs (taxels, 56 values, and the measured force, 4 values), so that the pair isolates what touch brings. Touch is NOT in the VLA (the SFT checkpoint is the same for every run).
+# RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE PegInsert task: PA-RL variant B (global + local optimisation: T = 10 gradient-ascent steps on Q, then distillation).
+# TOUCH IN THE CRITIC: identical to pi05_parl_global_local.yaml except for the critic's inputs (taxels, 56 values, and the measured force, 4 values), so that the pair isolates what touch brings. Touch is NOT in the VLA (the SFT checkpoint is the same for every run).
 # Needs the robot `robotiq_2f85_tsf` (the default of configs/task/peg_insert_forge.yaml): the server sends the taxels only for it.
 # Everything not written here is configs/algo/rl.yaml (the paper's values), except the budget and the distillation settings, written below; the model is configs/model/pi05.yaml. The SFT checkpoint to start from (`start: {run, step}`) is
 # given on the command line (`--start <SFT run> <step>`, jobs/job_rl_*.sh), so that one experiment file serves every starting point (docs/algos/rl.md).
-name: peg_insert_pi05_parl_global_touch
-description: "pi0.5 PA-RL variant A (global), PegInsert, one online critic, tactile + measured force in the critic"
+name: peg_insert_pi05_parl_global_local_touch
+description: "pi0.5 PA-RL variant B (global + local), PegInsert, one online critic, tactile + measured force in the critic"
 model: pi05
+task: configs/task/peg_insert_forge.yaml         # the env YAML of the run (the SFT run it starts from must have been trained on the same task: scripts/rl.py refuses otherwise)
 set:
   output_root: runs/rl/peg_insert
   seed: 42                         # as the SFT main runs
   method: parl
-  local_steps: 0
+  local_steps: 10
   warmup_episodes: 300             # PA-RL's warm-up (decision of 23 Nov. 2026: 300 / 30 000, not Best-of-N's 600 / 120 000): the run of 5 rounds at 600 / 120 000 did no better at round 0 (critic + VLA 51.4 against 51.8 at 300 / 30 000)
   warmup_critic_steps: 30000       # and the warm-up data is distilled and refreshed in every round, so a smaller one is cheaper
   total_episodes: 1000             # 20 rounds of 50 episodes, as Best-of-N (the same online budget); about 25 h calculated, jobs/job_rl_parl.sh asks for 36 h
   distill_selection: argmax         # label = the best candidate by Q (paper B.1); probes of 22-23 Nov. 2026 at warm-up 300/30k: argmax = softmax for the VLA alone, but critic + VLA held (53.2 at round 3) where softmax fell (47.2, paired +6.0, p = 0.005)
   distill_lr: 8.0e-8               # decision of 25 Nov. 2026 (2.5e-8 before). Variant B probes of 6 rounds (warm-up 300/30k, argmax), local_lr 3e-2: VLA alone at round 6 is 48.2 with 8e-8 against 44.4 with 2.5e-8, critic + VLA 68.8 against 65.4 (one run each, not established). 8e-8 is 3.2x the dose per step: variant A at 2.5e-8 lost the VLA alone over 20 rounds (teleop 48.2 -> 39.8 at round 10 -> 26.6 at round 20), hence 10 rounds first (docs/algos/rl.md)
+  local_lr: 3.0e-2                 # decision of 25 Nov. 2026: critic + VLA at round 3 was 51.8 / 56.0 / 68.8 for 3e-4 / 3e-3 / 3e-2 and stays 57 to 69 up to round 6; 1e-1 with distill 2.5e-8 collapsed (73.8 at round 2 -> 7.4 at round 6), 2e-1 and 3e-1 were worse
   critic_use_tactile: true         # the 56 taxels
   critic_use_force: true           # ft_force (3) + gripper_effort (1)
   critic_force_mode: measured      # not "proxy"

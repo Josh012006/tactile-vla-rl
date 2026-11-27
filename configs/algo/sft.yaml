@@ -60,6 +60,6 @@ wandb_project: tactile-vla-rl
 
 # -- Output ------------------------------------------------------------------------------------------------------------------------------
 # <output_root>/<run name>/{config.json, metrics.jsonl, summary.json, checkpoints/<step>/{params, meta.json}, resume/}. `runs` is a link to the scratch disk.
-# The default is for runs that only evaluate or probe something (runs/sft/probing). The main runs are the experiment files of configs/experiment/sft/, which put
+# The default is for runs that only evaluate or probe something (runs/sft/probing). The main runs are the experiment files of configs/experiment/sft/<task>/, which put
 # theirs in runs/sft/peg_insert.
 output_root: runs/sft/probing

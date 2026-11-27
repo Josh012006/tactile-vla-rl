@@ -1,0 +1,27 @@
+# SFT of pi0-FAST with LoRA on the FORGE PegInsert noisy scripted (35 percent of the demonstrations with noise injection, clean labels) demonstrations (50 episodes, all of them).
+# Touch is NOT used: this is the SFT of expo-ft (cameras, joints, gripper, prompt), whose checkpoint the RL starts from. The taxels in the demonstrations are ignored.
+# Normalisation statistics: those computed on THE DEMONSTRATIONS OF THIS RUN, over 10-step chunks (assets/forge_demo_norm/forge_demos_robotiq_noisy_h10: compute_demo_norm_stats --horizon 10
+# --droid-stats <the PolaRiS checkpoint's norm_stats.json>): a model trained on a set of demonstrations normalises with the statistics of that set (rule of Albert Zhan, docs/algos/sft.md, section 2b).
+# It replaces the checkpoint's own (DROID) statistics of the first runs, kept as references (runs without the `_demostats` suffix). Check the FAST round trip before training:
+# python -m scripts.fast_roundtrip --demos-dir <demos> --stats assets/forge_demo_norm:forge_demos_robotiq_noisy_h10 (undecodable chunks: docs/algos/sft.md, section 2b).
+# Everything else (steps, batch, learning rate, checkpoints every 200 steps, resume snapshots, wandb) is configs/algo/sft.yaml; the model is configs/model/pi0_fast.yaml (LoRA).
+#
+#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/peg_insert/pi0_fast_lora_noisy.yaml
+#   continue it:  sbatch jobs/job_sft_lora.sh --resume runs/sft/peg_insert/peg_insert_pi0_fast_lora_noisy_demostats
+# Output: runs/sft/peg_insert/peg_insert_pi0_fast_lora_noisy_demostats/
+name: peg_insert_pi0_fast_lora_noisy_demostats
+description: "pi0-FAST LoRA SFT, PegInsert, noisy scripted demonstrations, normalisation statistics of its own demonstrations (10 steps), no touch"
+model: pi0_fast
+full: false
+task: configs/task/peg_insert_forge.yaml         # recorded in the run's config.json: the evaluation and the RL use this env YAML; also checks the prompt of the demonstrations against it
+demos:
+  - demos/isaaclab/ForgePegInsert_Robotiq_noisy
+set:
+  output_root: runs/sft/peg_insert
+  num_demos: 50                    # the first 50 episodes of the folder (all of them): expo-ft's `num_data_sft: 50` (`--data.num-demos=50`), written here so that the file says it
+  seed: 42                         # the SFT seed, really used by the training: LoRA initialisation, order of the rows, noise (expo-ft's SFT ran with openpi's default seed, 42)
+model_set:                       # touch off in every component the model has (it is off in the model YAML too: written here so that the file says it)
+  vlm.use_tactile: false
+  vlm.use_force: false
+  norm_stats.dir: assets/forge_demo_norm            # <dir>/<asset_id>/norm_stats.json
+  norm_stats.asset_id: forge_demos_robotiq_noisy_h10

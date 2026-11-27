@@ -1,13 +1,16 @@
-# RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE PegInsert task: PA-RL variant B (global + local optimisation: T = 10 gradient-ascent steps on Q, then distillation).
+# NOT MEASURED for GearMesh: every number below (warm-up budget, number of rounds, candidates, learning rates) is PegInsert's, written to be revised once the GearMesh SFT runs exist and have been evaluated.
+# Starts from an SFT checkpoint trained on GearMesh (configs/experiment/sft/gear_mesh/): scripts/rl.py refuses a checkpoint of another task.
+# RL fine-tuning of pi0.5 (LoRA SFT checkpoint) on the FORGE GearMesh task: PA-RL variant B (global + local optimisation: T = 10 gradient-ascent steps on Q, then distillation).
 # TOUCH IN THE CRITIC: identical to pi05_parl_global_local.yaml except for the critic's inputs (taxels, 56 values, and the measured force, 4 values), so that the pair isolates what touch brings. Touch is NOT in the VLA (the SFT checkpoint is the same for every run).
-# Needs the robot `robotiq_2f85_tsf` (the default of configs/task/peg_insert_forge.yaml): the server sends the taxels only for it.
+# Needs the robot `robotiq_2f85_tsf` (the default of configs/task/gear_mesh_forge.yaml): the server sends the taxels only for it.
 # Everything not written here is configs/algo/rl.yaml (the paper's values), except the budget and the distillation settings, written below; the model is configs/model/pi05.yaml. The SFT checkpoint to start from (`start: {run, step}`) is
 # given on the command line (`--start <SFT run> <step>`, jobs/job_rl_*.sh), so that one experiment file serves every starting point (docs/algos/rl.md).
-name: peg_insert_pi05_parl_global_local_touch
-description: "pi0.5 PA-RL variant B (global + local), PegInsert, one online critic, tactile + measured force in the critic"
+name: gear_mesh_pi05_parl_global_local_touch
+description: "pi0.5 PA-RL variant B (global + local), GearMesh, one online critic, tactile + measured force in the critic"
 model: pi05
+task: configs/task/gear_mesh_forge.yaml         # the env YAML of the run (the SFT run it starts from must have been trained on the same task: scripts/rl.py refuses otherwise)
 set:
-  output_root: runs/rl/peg_insert
+  output_root: runs/rl/gear_mesh
   seed: 42                         # as the SFT main runs
   method: parl
   local_steps: 10

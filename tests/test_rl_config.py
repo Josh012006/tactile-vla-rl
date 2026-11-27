@@ -11,7 +11,7 @@ from src.algos import tracking
 from src.touch.features import TouchSpec
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPERIMENTS = sorted((ROOT / "configs" / "experiment" / "rl").glob("*.yaml"))
+EXPERIMENTS = sorted((ROOT / "configs" / "experiment" / "rl").glob("*/*.yaml"))
 
 
 def test_the_yaml_defaults_are_the_papers_and_the_groups():
@@ -39,7 +39,7 @@ def test_the_wandb_modes_are_the_trackings():
 
 def test_the_experiments_are_the_three_methods_and_best_of_n_with_touch():
     found = {}
-    for f in EXPERIMENTS:
+    for f in (f for f in EXPERIMENTS if f.parent.name == "peg_insert"):                                                  # PegInsert's six; every task's are in the next test
         exp, cfg = rc.load_rl_experiment(f)
         found[exp["name"]] = cfg
         assert exp["model"] == "pi05" and f.stem == exp["name"].replace("peg_insert_", "") and cfg.output_root == "runs/rl/peg_insert" and cfg.seed == 42
@@ -52,6 +52,22 @@ def test_the_experiments_are_the_three_methods_and_best_of_n_with_touch():
     assert all(c.num_candidates == 32 for c in found.values())                                                           # k = 32 for all
     assert not any(c.critic_touch.enabled for c in (best, a, b))                                                        # no touch in the three methods
     assert b.local_lr == 3.0e-2                                                                                          # probes of 23 Nov. 2026
+
+
+def test_each_task_has_the_same_six_rl_experiments_and_each_says_its_task():
+    tasks = ("peg_insert", "gear_mesh", "nut_thread")
+    names = {t: sorted(f.name for f in (ROOT / "configs" / "experiment" / "rl" / t).glob("*.yaml")) for t in tasks}
+    assert len(names["peg_insert"]) == 6 and names["gear_mesh"] == names["peg_insert"] == names["nut_thread"]
+    plain = {t: {f.name: rc.load_rl_experiment(f)[1] for f in (ROOT / "configs" / "experiment" / "rl" / t).glob("*.yaml")} for t in tasks}
+    for f in EXPERIMENTS:
+        task = f.parent.name
+        exp, cfg = rc.load_rl_experiment(f)
+        assert exp["name"] == f"{task}_{f.stem}" and exp["task"] == f"configs/task/{task}_forge.yaml" and (ROOT / exp["task"]).is_file()    # the folder, the name and the env YAML agree
+        assert cfg.output_root == f"runs/rl/{task}"
+    for name in names["peg_insert"]:                                                                                     # nothing but the task differs: PegInsert's numbers, not measured for the others
+        base = dataclasses.asdict(plain["peg_insert"][name])
+        for t in ("gear_mesh", "nut_thread"):
+            assert {k: v for k, v in dataclasses.asdict(plain[t][name]).items() if k != "output_root"} == {k: v for k, v in base.items() if k != "output_root"}
 
 
 def test_every_experiment_has_its_methods_warm_up_and_the_same_20_rounds():
@@ -71,15 +87,15 @@ def test_parl_with_touch_differs_from_parl_by_the_critics_touch_only():
     ignore = ("critic_use_tactile", "critic_use_force", "critic_force_mode")
     strip = lambda c: {k: v for k, v in dataclasses.asdict(c).items() if k not in ignore}
     for name in ("pi05_parl_global", "pi05_parl_global_local"):
-        _, plain = rc.load_rl_experiment(ROOT / f"configs/experiment/rl/{name}.yaml")
-        _, touch = rc.load_rl_experiment(ROOT / f"configs/experiment/rl/{name}_touch.yaml")
+        _, plain = rc.load_rl_experiment(ROOT / f"configs/experiment/rl/peg_insert/{name}.yaml")
+        _, touch = rc.load_rl_experiment(ROOT / f"configs/experiment/rl/peg_insert/{name}_touch.yaml")
         assert touch.critic_touch == TouchSpec(use_tactile=True, use_force=True, force_mode="measured") and not plain.critic_touch.enabled
         assert strip(plain) == strip(touch)
 
 
 def test_best_of_n_with_touch_differs_from_best_of_n_by_the_critics_touch_only():
-    _, plain = rc.load_rl_experiment(ROOT / "configs/experiment/rl/pi05_best_of_n.yaml")
-    _, touch = rc.load_rl_experiment(ROOT / "configs/experiment/rl/pi05_best_of_n_touch.yaml")
+    _, plain = rc.load_rl_experiment(ROOT / "configs/experiment/rl/peg_insert/pi05_best_of_n.yaml")
+    _, touch = rc.load_rl_experiment(ROOT / "configs/experiment/rl/peg_insert/pi05_best_of_n_touch.yaml")
     assert touch.critic_touch == TouchSpec(use_tactile=True, use_force=True, force_mode="measured") and touch.critic_touch.dim == 60
     assert not plain.critic_touch.enabled
     ignore = ("critic_use_tactile", "critic_use_force", "critic_force_mode")
@@ -88,7 +104,7 @@ def test_best_of_n_with_touch_differs_from_best_of_n_by_the_critics_touch_only()
 
 
 def test_the_command_line_wins_over_the_experiment():
-    _, cfg = rc.load_rl_experiment(ROOT / "configs/experiment/rl/pi05_parl_global.yaml", {"local_steps": 5, "num_candidates": 16})
+    _, cfg = rc.load_rl_experiment(ROOT / "configs/experiment/rl/peg_insert/pi05_parl_global.yaml", {"local_steps": 5, "num_candidates": 16})
     assert cfg.local_steps == 5 and cfg.num_candidates == 16 and cfg.variant == "parl_global_local"
 
 

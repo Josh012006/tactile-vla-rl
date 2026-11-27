@@ -1,12 +1,12 @@
 """Online RL fine-tuning of pi0.5 on the FORGE PegInsert task: Best-of-N (the VLA stays frozen) and PA-RL (variants A and B: the VLA is distilled after every round) (docs/algos/rl.md).
 
-    python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --start peg_insert_pi05_lora_teleop 4000      # SFT run (folder name or path) and checkpoint step to start from
-    python -m scripts.rl --experiment configs/experiment/rl/pi05_best_of_n.yaml --start <run> <step> --dry-run                # what would run: no GPU, no model, no server
+    python -m scripts.rl --experiment configs/experiment/rl/peg_insert/pi05_best_of_n.yaml --start peg_insert_pi05_lora_teleop 4000      # SFT run (folder name or path) and checkpoint step to start from
+    python -m scripts.rl --experiment configs/experiment/rl/peg_insert/pi05_best_of_n.yaml --start <run> <step> --dry-run                # what would run: no GPU, no model, no server
     python -m scripts.rl --experiment <file> --start <run> <step> --set total_episodes=100 --set warmup_critic_steps=500 --run-name probe       # a short probe, in the experiment's output_root
     python -m scripts.rl --resume runs/rl/peg_insert/<run name>                                                               # after a stop or a failure: continues after the last finished stage
     python -m scripts.rl --resume runs/rl/peg_insert/<run name> --extend-to 1000                                              # a run that is done (or stopped) goes on to 1000 online episodes: more rounds of the same run
 
-Run it through jobs/job_rl_best_of_n.sh (Best-of-N) or jobs/job_rl_parl.sh --variant A|B (PA-RL) (Isaac Sim, the VLA and the critic share one GPU). The experiment file (configs/experiment/rl/*.yaml) says the method and the name of the run; everything else is configs/algo/rl.yaml.
+Run it through jobs/job_rl_best_of_n.sh (Best-of-N) or jobs/job_rl_parl.sh --variant A|B (PA-RL) (Isaac Sim, the VLA and the critic share one GPU). The experiment file (configs/experiment/rl/<task>/*.yaml) says the method and the name of the run; everything else is configs/algo/rl.yaml.
 `--start` (or the experiment's `start: {run, step}`) is the SFT checkpoint the VLA starts from: the model is the SFT run's own (its model YAML, its LoRA, its normalisation statistics, compared byte for byte with the copy
 saved in the checkpoint, as in scripts/eval_sft.py).
 
@@ -68,6 +68,16 @@ def check_start(exp: dict, start: dict) -> dict:
     from src.eval.sweep import Job
     check_norm_stats(model_cfg, [Job(label=str(start["step"]), step=start["step"], checkpoint=Path(start["checkpoint"]))])
     return model_cfg
+
+
+def check_same_task(experiment_task: Optional[str], sft_task: Optional[str], override: Optional[str]) -> None:
+    """The experiment's `task` and the task the SFT run was trained on (its recorded `task`; none = PegInsert) have to be the same env YAML: a checkpoint of one task evaluated in the env of another
+    would read as a bad policy. `--task-config` overrides on purpose; an experiment without `task` takes the SFT run's."""
+    if override or not experiment_task:
+        return
+    wanted, trained = resolve_task_config(experiment_task), resolve_task_config(None, sft_task)
+    if wanted.resolve() != trained.resolve():
+        raise SystemExit(f"the experiment is for {wanted.name} but the SFT run it starts from was trained on {trained.name}: use the experiment file of the run's task (configs/experiment/rl/<task>/)")
 
 
 def run_config(exp: dict, cfg: rl_config.RLConfig, start: dict, model_cfg: dict, task: dict, name: str) -> dict:
@@ -150,7 +160,7 @@ def print_plan(cfg: rl_config.RLConfig, run_dir: Path, start: Optional[dict], mo
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--experiment", metavar="FILE", help="experiment file (configs/experiment/rl/*.yaml)")
+    ap.add_argument("--experiment", metavar="FILE", help="experiment file (configs/experiment/rl/<task>/*.yaml)")
     ap.add_argument("--start", nargs=2, metavar=("RUN", "STEP"), help="the SFT run (folder name or path) and the checkpoint step the VLA starts from (default: the experiment's `start`)")
     ap.add_argument("--set", action="append", metavar="KEY=VALUE", help="override a key of configs/algo/rl.yaml (the command line wins over the experiment)")
     ap.add_argument("--resume", metavar="RUN", help="continue the run RUN (a path, or a folder name under its output_root) after its last finished stage")
@@ -196,7 +206,8 @@ def main(argv=None) -> int:
         exp, cfg = rl_config.load_rl_experiment(args.experiment, sets)
         start = resolve_start(exp, tuple(args.start) if args.start else None)
         model_cfg = check_start(exp, start)
-        task_config = resolve_task_config(args.task_config, start["run_config"].get("task"))
+        check_same_task(exp.get("task"), start["run_config"].get("task"), args.task_config)
+        task_config = resolve_task_config(args.task_config, exp.get("task"), start["run_config"].get("task"))
         task = task_settings(task_config, args.env_set, cfg.envs_per_batch)
         name = args.run_name or exp["name"]
         run_dir = ROOT / cfg.output_root / name

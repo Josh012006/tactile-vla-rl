@@ -49,7 +49,7 @@ def test_the_success_height_is_the_hole_depth_for_peg_and_gear_and_the_thread_pi
 
 # -- the SFT experiments of the new tasks ---------------------------------------------------------------------------------------------------
 def new_experiments():
-    return sorted((REPO / "configs" / "experiment" / "sft").glob("gear_mesh_*.yaml")) + sorted((REPO / "configs" / "experiment" / "sft").glob("nut_thread_*.yaml"))
+    return [f for t in NEW_TASKS for f in sorted((REPO / "configs" / "experiment" / "sft" / t).glob("*.yaml"))]
 
 
 def test_each_new_task_has_a_pi05_and_a_pi0_fast_experiment_on_its_own_demos_and_its_own_runs_folder():
@@ -58,13 +58,13 @@ def test_each_new_task_has_a_pi05_and_a_pi0_fast_experiment_on_its_own_demos_and
     from src.models.interface import ROOT, apply_overrides, load_model_cfg, norm_stats_source
     from src.models.settings import parse_model_settings
     files = new_experiments()
-    assert [f.stem for f in files] == sorted(f"{t}_{m}_lora_teleop" for t in NEW_TASKS for m in ("pi05", "pi0_fast"))
+    assert [f"{f.parent.name}/{f.stem}" for f in files] == sorted(f"{t}/{m}_lora_teleop" for t in NEW_TASKS for m in ("pi05", "pi0_fast"))
     for f in files:
         exp = cli.load_experiment(f)
-        task = next(t for t in NEW_TASKS if f.stem.startswith(t))
-        model = f.stem[len(task) + 1:].removesuffix("_lora_teleop")
+        task = f.parent.name                                                                                # the folder says the task
+        model = f.stem.removesuffix("_lora_teleop")
         camel = "".join(p.capitalize() for p in task.split("_"))
-        assert exp["name"] == f.stem and exp["model"] == model and exp["full"] is False
+        assert exp["name"] == f"{task}_{f.stem}" and exp["model"] == model and exp["full"] is False
         assert exp["task"] == f"configs/task/{task}_forge.yaml" and (REPO / exp["task"]).is_file()
         assert exp["demos"] == [f"demos/isaaclab/Forge{camel}_Robotiq_teleop"]
         assert exp["set"]["output_root"] == f"runs/sft/{task}" and exp["set"]["seed"] == 42
@@ -74,10 +74,7 @@ def test_each_new_task_has_a_pi05_and_a_pi0_fast_experiment_on_its_own_demos_and
         settings = parse_model_settings(merged)
         assert settings.any_lora and not settings.active_touch
         stats = norm_stats_source(merged)
-        if model == "pi05":
-            assert stats == (ROOT / "assets" / "forge_demo_norm", f"forge_demos_robotiq_{task}_teleop")      # THIS task's statistics, not PegInsert's
-        else:
-            assert stats is None                                                                           # the checkpoint's own, as PegInsert's pi0-FAST
+        assert stats == (ROOT / "assets" / "forge_demo_norm", f"forge_demos_robotiq_{task}_teleop" + ("" if model == "pi05" else "_h10"))   # THIS task's demonstrations' statistics, not PegInsert's
 
 
 def test_the_prompt_of_the_demonstrations_has_to_be_the_one_of_the_task_yaml(tmp_path):
@@ -103,13 +100,16 @@ def test_the_dry_run_of_a_new_task_checks_the_prompt_and_says_the_task_and_the_f
     for folder, prompt in ((good, PROMPTS["gear_mesh"]), (bad, "Insert the peg into the socket.")):
         for i, steps in enumerate((6, 5)):
             write_demo(folder, f"ep_{i:04d}_seed{i}.npz", steps, seed=i, prompt=prompt)
-    experiment = str(REPO / "configs/experiment/sft/gear_mesh_pi0_fast_lora_teleop.yaml")
+    experiment = str(REPO / "configs/experiment/sft/gear_mesh/pi0_fast_lora_teleop.yaml")
+    (tmp_path / "stats" / "forge_demos_robotiq_gear_mesh_teleop_h10").mkdir(parents=True)                   # the experiment's statistics are computed once the demonstrations exist: a stand-in
+    (tmp_path / "stats" / "forge_demos_robotiq_gear_mesh_teleop_h10" / "norm_stats.json").write_text("{}")
     small = ["--set", "steps=20", "--set", "batch_size=4", "--set", "micro_batch_size=2"]
-    assert cli.main(["--experiment", experiment, "--demos", str(good), "--dry-run", *small]) == 0
+    stats = ["--model-set", f"norm_stats.dir={tmp_path / 'stats'}"]
+    assert cli.main(["--experiment", experiment, "--demos", str(good), "--dry-run", *small, *stats]) == 0
     out = capsys.readouterr().out
     assert "task: configs/task/gear_mesh_forge.yaml" in out and "runs/sft/gear_mesh/gear_mesh_pi0_fast_lora_teleop" in out and PROMPTS["gear_mesh"] in out
     with pytest.raises(SystemExit, match="language_instruction"):
-        cli.main(["--experiment", experiment, "--demos", str(bad), "--dry-run", *small])
+        cli.main(["--experiment", experiment, "--demos", str(bad), "--dry-run", *small, *stats])
     assert cli.main(["--model", "pi0_fast", "--demos", str(bad), "--dry-run", *small]) == 0               # a probe without a task: nothing to check, as before
     assert "none (PegInsert" in capsys.readouterr().out
 

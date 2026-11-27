@@ -1,5 +1,5 @@
 # Online RL fine-tuning of pi0.5 (pi0 shares its sampler; pi0-FAST is NOT part of these methods, docs/algos/rl.md) on the FORGE PegInsert task: Best-of-N and PA-RL (Policy Agnostic RL, Mark et al., arXiv 2412.06685v1). The ALGORITHM side only: the model, the SFT
-# checkpoint it starts from and the method are chosen by the experiment file (configs/experiment/rl/*.yaml). Design, decisions and sources of every value: docs/algos/rl.md.
+# checkpoint it starts from and the method are chosen by the experiment file (configs/experiment/rl/<task>/*.yaml). Design, decisions and sources of every value: docs/algos/rl.md.
 #
 # Rule: the DEFAULTS are the paper's (Appendix B.1, pp. 22-23). Where the paper has no value the comment says "decision" (a choice made for this repository) and docs/algos/rl.md
 # gives the reasoning. Read by src/algos/rl_config.py (an unknown key is an error, never ignored).
@@ -71,4 +71,4 @@ eval_every_rounds: 5    # an evaluation after the warm-up (round 0), then every 
 seed: 0
 wandb_mode: online      # online / offline / disabled, as the SFT (src/algos/tracking.py)
 wandb_project: tactile-vla-rl
-output_root: runs/rl/probing        # the main runs are the experiment files of configs/experiment/rl/, which put theirs in runs/rl/peg_insert
+output_root: runs/rl/probing        # the main runs are the experiment files of configs/experiment/rl/<task>/, which put theirs in runs/rl/<task>

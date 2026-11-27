@@ -10,7 +10,7 @@
 # (chosen on PegInsert). The task YAML below has the prompt the demonstrations carry; the script refuses a folder whose prompt is another one.
 # Everything else (steps, batch, learning rate, checkpoints every 200 steps, resume snapshots, wandb) is configs/algo/sft.yaml; the model is configs/model/pi05.yaml (LoRA).
 #
-#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/nut_thread_pi05_lora_teleop.yaml
+#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/nut_thread/pi05_lora_teleop.yaml
 #   continue it:  sbatch jobs/job_sft_lora.sh --resume runs/sft/nut_thread/nut_thread_pi05_lora_teleop
 #   evaluate it:  sbatch jobs/job_eval_sft.sh --run runs/sft/nut_thread/nut_thread_pi05_lora_teleop --n-episodes 50        (the env YAML is the `task` below: nothing else to give)
 # Output: runs/sft/nut_thread/nut_thread_pi05_lora_teleop/

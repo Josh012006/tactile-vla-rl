@@ -1,7 +1,7 @@
 #!/bin/bash
 # What does each stage of PA-RL cost? (scripts/probe_parl_cost.py: the real pi0.5 of an SFT checkpoint, synthetic states, no simulator, a few minutes after the model is loaded)
 #   sbatch jobs/job_probe_parl_cost.sh --start peg_insert_pi05_lora_teleop 4000                                           # variant B (the dearer), with the saves timed in $SLURM_TMPDIR
-#   sbatch jobs/job_probe_parl_cost.sh --experiment configs/experiment/rl/pi05_parl_global.yaml --start <run> <step>      # variant A
+#   sbatch jobs/job_probe_parl_cost.sh --experiment configs/experiment/rl/peg_insert/pi05_parl_global.yaml --start <run> <step>      # variant A
 # Every option goes to `python -m scripts.probe_parl_cost` (see its --help). Output: logs/slurm/probe_parl_cost_<jobid>.out, reports/probe_parl_cost_<time>_<jobid>.json.
 # Same card and XLA settings as a run (an L40S, JAX limited to half of it: the env server takes the rest). No mail (not a training job).
 #
