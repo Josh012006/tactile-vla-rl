@@ -1,0 +1,27 @@
+# SFT of pi0-FAST with LoRA on the FORGE GearMesh teleoperated demonstrations (all the episodes of the folder, at most `num_demos`).
+# Touch is NOT used: cameras, joints, gripper, prompt only, as the PegInsert SFTs the RL starts from. The taxels in the demonstrations are ignored.
+# Normalisation statistics: the CHECKPOINT's own (DROID's, from the PolaRiS checkpoint; no `norm_stats` block), as for PegInsert (configs/experiment/sft/pi0_fast_lora_teleop.yaml;
+# docs/algos/sft.md, section 2b): measured there, not for gear_mesh. Whether it also holds here is to be checked on the first demonstrations (scripts/fast_roundtrip.py,
+# scripts/fast_stats_fit.py take --demos-dir): a FAST round trip that cannot decode many chunks would show it.
+# NOT MEASURED YET for this task: the number of demonstrations (50 is PegInsert's: set `num_demos` to what is collected), and the training length / learning rate of configs/algo/sft.yaml
+# (chosen on PegInsert). The task YAML below has the prompt the demonstrations carry; the script refuses a folder whose prompt is another one.
+# Everything else (steps, batch, learning rate, checkpoints every 200 steps, resume snapshots, wandb) is configs/algo/sft.yaml; the model is configs/model/pi0_fast.yaml (LoRA).
+#
+#   sbatch jobs/job_sft_lora.sh --experiment configs/experiment/sft/gear_mesh_pi0_fast_lora_teleop.yaml
+#   continue it:  sbatch jobs/job_sft_lora.sh --resume runs/sft/gear_mesh/gear_mesh_pi0_fast_lora_teleop
+#   evaluate it:  sbatch jobs/job_eval_sft.sh --run runs/sft/gear_mesh/gear_mesh_pi0_fast_lora_teleop --n-episodes 50        (the env YAML is the `task` below: nothing else to give)
+# Output: runs/sft/gear_mesh/gear_mesh_pi0_fast_lora_teleop/
+name: gear_mesh_pi0_fast_lora_teleop
+description: "pi0-FAST LoRA SFT, GearMesh, teleoperated demonstrations, normalisation statistics of the checkpoint (DROID), no touch"
+model: pi0_fast
+full: false
+task: configs/task/gear_mesh_forge.yaml         # recorded in the run's config.json: the evaluation and the RL use this env YAML; also checks the prompt of the demonstrations against it
+demos:
+  - demos/isaaclab/ForgeGearMesh_Robotiq_teleop
+set:
+  output_root: runs/sft/gear_mesh
+  num_demos: 50                    # the first 50 episodes of the folder: PegInsert's number, to be set to what is collected
+  seed: 42                         # the SFT seed, really used by the training: LoRA initialisation, order of the rows, noise
+model_set:                       # touch off in every component the model has (it is off in the model YAML too: written here so that the file says it); no `norm_stats`: the checkpoint's own
+  vlm.use_tactile: false
+  vlm.use_force: false

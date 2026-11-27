@@ -1,10 +1,11 @@
 #!/bin/bash
 # The env server for TELEOPERATION, alone on an L40S: you drive it from your PC with scripts/demos/teleop_client.py, through an ssh tunnel.
-#   sbatch jobs/job_teleop_server.sh                       # 8 h, port 8102
+#   sbatch jobs/job_teleop_server.sh                       # 8 h, port 8102, PegInsert
+#   sbatch jobs/job_teleop_server.sh gear_mesh              # the task is the first word: configs/task/<task>_forge.yaml (peg_insert, gear_mesh, nut_thread); ENV_CONFIG=<yaml> wins over it
 #   sbatch --time=03:00:00 jobs/job_teleop_server.sh        # shorter
 # Then read logs/slurm/teleop_server_<jobid>.out: it prints the node and the two commands to run on your PC (tunnel, then the client).
-# The demos you record are written by the server in `demos/...` (the link to scratch), whatever --out-dir you give the client (it is relative
-# to the project root and must stay inside it). Cancel the job when you are done (scancel <jobid>).
+# The demos you record are written by the server in `demos/...` (the link to scratch), in the folder the client asks (--out-dir, relative to the project root, which must stay inside it;
+# by default demos/isaaclab/Forge<Task>_Robotiq_teleop for the server's task: ForgePegInsert, ForgeGearMesh, ForgeNutThread). Cancel the job when you are done (scancel <jobid>).
 # Extra server settings: DEMO_SERVER_SETS="--set robot=robotiq_2f85" sbatch --export=ALL jobs/job_teleop_server.sh
 #
 #SBATCH --job-name=teleop_server
@@ -21,6 +22,8 @@
 set -u
 cd "${SLURM_SUBMIT_DIR:-$HOME/projects/tactile-vla-rl}" || exit 1
 mkdir -p logs/slurm
+export ENV_CONFIG="${ENV_CONFIG:-configs/task/${1:-peg_insert}_forge.yaml}"      # read by jobs/env_server.sh
+[ -f "$ENV_CONFIG" ] || { echo "ERROR: no task YAML $ENV_CONFIG (the first word is a task: peg_insert, gear_mesh, nut_thread)"; exit 1; }
 PORT="${DEMO_PORT:-8102}"
 SERVER_LOG="logs/slurm/teleop_server_server_${SLURM_JOB_ID:-local}.log"
 
@@ -41,7 +44,7 @@ done
 grep -q "\[env_server\] ready" "$SERVER_LOG" || { echo "ERROR: the env server did not become ready in 30 min"; tail -30 "$SERVER_LOG"; exit 1; }
 NODE="$(hostname)"
 echo
-echo "READY on $NODE, port $PORT. On your PC:"
+echo "READY on $NODE, port $PORT, task YAML $ENV_CONFIG. On your PC:"
 echo "  1. tunnel (leave it open):   ssh -J mila -L $PORT:localhost:$PORT $NODE"
 echo "  2. client:                   python teleop_client.py --host localhost --port $PORT --seed 100"
 echo "(copy scripts/demos/teleop_client.py to the PC once; pip install numpy pygame websockets msgpack)"

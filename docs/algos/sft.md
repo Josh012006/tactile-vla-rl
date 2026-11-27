@@ -22,8 +22,10 @@ checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/alg
 
 ### Main runs and probes
 
-- **Main runs** are the experiment files of `configs/experiment/sft/`: one file = one run (`name`, `model`, `full`, `demos`, `set`, `model_set`, `description`; any other key is refused). They go to
-  **`runs/sft/peg_insert/<name>/`** (`output_root` in their `set`). What is given on the command line is added to the file and wins (`--set steps=100`, `--run-name`).
+- **Main runs** are the experiment files of `configs/experiment/sft/`: one file = one run (`name`, `model`, `full`, `task`, `demos`, `set`, `model_set`, `description`; any other key is refused). They go to
+  **`runs/sft/peg_insert/<name>/`** (`output_root` in their `set`; `runs/sft/gear_mesh/`, `runs/sft/nut_thread/` for the other tasks). `task` is the task YAML of the demonstrations (`configs/task/<task>_forge.yaml`;
+  none = PegInsert, as every file above): it is written in the run's `config.json`, so that `scripts/eval_sft.py`, `scripts/eval_rl.py` and `scripts/rl.py` use the same env YAML without `--task-config`, and the
+  script refuses demonstrations whose prompt is not the YAML's `language_instruction` (the evaluation prompts the policy with the latter). The SFT itself never starts the simulator. What is given on the command line is added to the file and wins (`--set steps=100`, `--run-name`).
 - **Probes** (a run to measure or look at something, not a main run) have no experiment file: their default `output_root` is **`runs/sft/probing`**.
 - The six SFTs of PegInsert, all LoRA, without touch (the SFT of expo-ft: cameras, joints, gripper, prompt; the taxels in the demonstrations are not read by the model): the three pi0.5 runs and the three
   pi0-FAST runs, one per demonstration type. Normalisation statistics (section 2b): pi0.5 the noisy demonstrations', pi0-FAST the checkpoint's own (DROID), the same for the three runs of a model.
@@ -36,6 +38,20 @@ checkpoint the RL starts from. Settings: `configs/algo/sft.yaml`. Code: `src/alg
 | `pi0_fast_lora_scripted.yaml` | `peg_insert_pi0_fast_lora_scripted` | pi0-FAST | `ForgePegInsert_Robotiq_scripted` | the checkpoint's (DROID) |
 | `pi0_fast_lora_noisy.yaml` | `peg_insert_pi0_fast_lora_noisy` | pi0-FAST | `ForgePegInsert_Robotiq_noisy` | the checkpoint's (DROID) |
 | `pi0_fast_lora_teleop.yaml` | `peg_insert_pi0_fast_lora_teleop` | pi0-FAST | `ForgePegInsert_Robotiq_teleop` | the checkpoint's (DROID) |
+
+GearMesh and NutThread: one experiment per model, on the teleoperated demonstrations (the only ones that can exist for now, `docs/demos.md`); the training length, the number of demonstrations and the learning
+rate are PegInsert's, not tuned for them.
+
+| experiment file | run folder under `runs/sft/<task>/` | model | demonstrations | normalisation statistics |
+|---|---|---|---|---|
+| `gear_mesh_pi05_lora_teleop.yaml` | `gear_mesh_pi05_lora_teleop` | pi0.5 | `ForgeGearMesh_Robotiq_teleop` | asset `forge_demos_robotiq_gear_mesh_teleop`, to compute first (`docs/demos.md`) |
+| `gear_mesh_pi0_fast_lora_teleop.yaml` | `gear_mesh_pi0_fast_lora_teleop` | pi0-FAST | `ForgeGearMesh_Robotiq_teleop` | the checkpoint's (DROID) |
+| `nut_thread_pi05_lora_teleop.yaml` | `nut_thread_pi05_lora_teleop` | pi0.5 | `ForgeNutThread_Robotiq_teleop` | asset `forge_demos_robotiq_nut_thread_teleop`, to compute first |
+| `nut_thread_pi0_fast_lora_teleop.yaml` | `nut_thread_pi0_fast_lora_teleop` | pi0-FAST | `ForgeNutThread_Robotiq_teleop` | the checkpoint's (DROID) |
+
+PegInsert's pi0.5 statistics are those of the noisy demonstrations (section 2b); the new tasks have no noisy ones yet, so their pi0.5 files use the statistics of their own teleoperated demonstrations. That is a
+choice to be revisited when the noisy demonstrations exist (the same file for every demonstration type of a task). Whether the checkpoint's statistics also suit pi0-FAST on these tasks is not measured
+(`scripts/fast_roundtrip.py --demos-dir <folder>` shows it on the first demonstrations).
 
 `--set KEY=VALUE` overrides a key of `configs/algo/sft.yaml`; `--model-set KEY=VALUE` a key of the model YAML (`<component>.<key>`, the
 probe's `--set`); `--full` is `use_lora: false` in every component the model has. Before the first job, on the login node:

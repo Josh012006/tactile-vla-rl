@@ -31,7 +31,7 @@ have: a resume at the episode, a deterministic policy for both models, several c
 | what a worker costs, and whether more workers pay off (measured: they do not on one L40S) | `sbatch jobs/job_probe_eval_parallel.sh --model pi05 --workers 1 2 --episodes 4` (section 6) |
 
 Before the first run: `uv sync --group vla` (matplotlib is in that group since this file), the models fetched, the Isaac Lab venv (`scripts/setup_isaac_venv.sh`), the SFT run's checkpoints.
-`--run` is a path, or the folder name under `runs/sft/peg_insert/` or `runs/sft/probing/`. The job mails (`--mail-user`, `--mail-type=ALL`, like the SFT jobs) and is requeueable (`--requeue`): a preemption or a node failure restarts the script, which is the same command, so the evaluation continues; a time limit is not
+`--run` is a path, or the folder name under any `runs/sft/<task>/` (`peg_insert`, `gear_mesh`, `nut_thread`, `probing`). The job mails (`--mail-user`, `--mail-type=ALL`, like the SFT jobs) and is requeueable (`--requeue`): a preemption or a node failure restarts the script, which is the same command, so the evaluation continues; a time limit is not
 a requeue, send the command again. Resources for one worker: 1 L40S, 6 CPUs, 40 G, 14 h (`sacct -j <jobid> --format=JobID,Elapsed,AllocCPUS,TotalCPU,MaxRSS,ReqMem` says what a job really used).
 
 ## 2. What is evaluated
@@ -58,7 +58,8 @@ a requeue, send the command again. Resources for one worker: 1 L40S, 6 CPUs, 40 
   The seeds of `episode_seeds.json` are not used to start the simulator any more (the start is a function of the master seed and the batch); they seed the model's noise.
 - **An episode.** A chunk is executed `--replan` steps (default: half of the model's chunk: 8 for pi0.5, 5 for pi0-FAST; expo-ft's ratio is 8 of 16), then the model is called again. At most
   `max_steps_per_episode` of the task YAML (150) steps; success is the environment's `success` (`success_hold_steps`). An episode that does not end within that length is an error, never a recorded failure.
-  `--task-config` / `--env-set KEY=VALUE` change the server's settings; they are part of the protocol (section 5).
+  `--task-config` / `--env-set KEY=VALUE` change the server's settings; they are part of the protocol (section 5). Without `--task-config` the env YAML is the `task` the SFT run recorded in its
+  `config.json` (`configs/task/gear_mesh_forge.yaml` for a `gear_mesh_*` run), and PegInsert's for a run that recorded none: the evaluation of a GearMesh run needs no extra argument. The seed (42) and the protocol are the same for the three tasks.
 
 ## 3. Deterministic evaluation
 

@@ -250,7 +250,7 @@ def test_the_sft_experiments_are_the_three_pi05_runs_and_the_three_pi0_fast_runs
     from scripts import sft as cli
     from src.models.interface import ROOT, apply_overrides, load_model_cfg, norm_stats_source
     from src.models.settings import parse_model_settings
-    files = experiment_files()
+    files = [f for f in experiment_files() if not f.stem.startswith(("gear_mesh_", "nut_thread_"))]       # PegInsert's: the other tasks' are in tests/test_tasks.py
     assert [f.stem for f in files] == sorted(["pi05_lora_scripted", "pi05_lora_noisy", "pi05_lora_teleop", "pi0_fast_lora_scripted", "pi0_fast_lora_noisy", "pi0_fast_lora_teleop"])
     names = set()
     for f in files:

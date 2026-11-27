@@ -17,6 +17,23 @@ taxels. To check what the existing demonstrations contain:
 
 The SFT reads these `.npz` files directly (touch included): `docs/algos/sft.md`.
 
+## The other tasks: GearMesh and NutThread
+
+The tools are the same for the three FORGE tasks: **the task is the server's YAML**, nothing is repeated per task. A task has its own folders, named `Forge<Task>_Robotiq_<kind>`
+(`ForgeGearMesh_Robotiq_teleop`, `ForgeNutThread_Robotiq_teleop`, ...), and a demonstration carries the prompt of its task (`language_instruction` of the YAML): the SFT of a
+run whose experiment has a `task` refuses demonstrations of another prompt (`docs/algos/sft.md`).
+
+| What | Command |
+|---|---|
+| teleoperation server of a task | `sbatch jobs/job_teleop_server.sh gear_mesh` (or `nut_thread`; `ENV_CONFIG=<yaml>` for any other file), then the two commands it prints |
+| teleoperation client | the same `teleop_client.py`: it reads the task from the server and writes in `demos/isaaclab/Forge<Task>_Robotiq_teleop` (`--out-dir` to change it); **Q / E turn the hand** about the vertical (`--yaw-rate-deg`, 3 degrees per step), the nut has to be screwed on |
+| replay of a task's demonstrations | `ENV_CONFIG=configs/task/gear_mesh_forge.yaml sbatch --export=ALL jobs/job_demos.sh replay --demos-dir demos/isaaclab/ForgeGearMesh_Robotiq_teleop --save-videos` |
+| normalisation statistics of a task (pi0.5) | `python -m scripts.demos.compute_demo_norm_stats --demos-dir demos/isaaclab/ForgeGearMesh_Robotiq_teleop --output-dir assets/forge_demo_norm --asset-id forge_demos_robotiq_gear_mesh_teleop` |
+
+**Not available yet:** scripted and noisy demonstrations (`collect_waypoint_demos.py` follows PegInsert's waypoints: how a scripted GearMesh / NutThread is done, the nut needs a turn, is open),
+and every physical value of the two YAMLs (grip, gains, episode length): see `docs/envs/isaaclab_env.md`, section 2. The teleoperated yaw is untested: whether the held object turns about the
+fingertip or about its own axis, and the sign of Q / E, are to be seen with the first episode.
+
 ## The server must be set up for these tools
 
 One environment, an episode that ends after 5 consecutive "inserted" steps (the demonstration rule: the script stops recording at the same

@@ -65,19 +65,35 @@ DEFAULT_ENVS_PER_SERVER = 100
 # Most rows of one model call (`OpenPIPolicy.max_rows`): a larger batch is split in equal calls. Measured on an L40S with the policy limited to half the card (12 Nov. 2026, scripts/probe_batch_cost.py):
 # pi0.5 fits 64 rows (14.2 GiB) and not 100; pi0-FAST fits 16 rows (13.3 GiB) and not 20 (prefill logits).
 DEFAULT_MODEL_BATCH = {"pi05": 64, "pi0": 64, "pi0_fast": 16}
-DEFAULT_TASK = "configs/task/peg_insert_forge.yaml"
+DEFAULT_TASK = "configs/task/peg_insert_forge.yaml"         # the task of every run that does not record one (all the PegInsert runs made before the `task` key of the SFT experiments)
 XLA_DETERMINISTIC = "--xla_gpu_deterministic_ops=true"
 FORBIDDEN_ENV_SET = ("num_envs", "server_port")                     # num_envs: --envs-per-server
 NORM_STATS_FILE = "norm_stats.json"
 
 
 # -- the run and its checkpoints -------------------------------------------------------------------------------------------------------
+def run_roots(kind: str, root: Optional[Path] = None) -> List[Path]:
+    """The folders that hold runs of a kind ("sft" or "rl"): runs/<kind>/<task>/ for every task that has some (peg_insert, gear_mesh, nut_thread, ...), the probes (probing) last."""
+    folders = [p for p in ((root or ROOT) / "runs" / kind).glob("*") if p.is_dir()]
+    return sorted(folders, key=lambda p: (p.name == "probing", p.name))
+
+
+def resolve_task_config(requested: Optional[str], *recorded: Optional[str]) -> Path:
+    """The env server YAML: the one asked for (--task-config), else the first that a run recorded (the SFT run's `task`, the RL run's `task_config`), else DEFAULT_TASK.
+    Absolute, or relative to the repository; it has to exist."""
+    chosen = requested or next((r for r in recorded if r), None) or DEFAULT_TASK
+    path = Path(chosen) if Path(chosen).is_absolute() else ROOT / chosen
+    if not path.is_file():
+        raise SystemExit(f"no task YAML {path}")
+    return path
+
+
 def find_run_dir(name_or_path: str) -> Path:
-    """A run given as a path (absolute, or relative to where the command runs or to the repository) or as its folder name under runs/sft/peg_insert or runs/sft/probing."""
-    for candidate in (Path(name_or_path), ROOT / name_or_path, ROOT / "runs/sft/peg_insert" / name_or_path, ROOT / "runs/sft/probing" / name_or_path):
+    """A run given as a path (absolute, or relative to where the command runs or to the repository) or as its folder name under runs/sft/<task>/ (peg_insert, gear_mesh, nut_thread, probing, ...)."""
+    for candidate in (Path(name_or_path), ROOT / name_or_path, *(folder / name_or_path for folder in run_roots("sft", ROOT))):
         if (candidate / "config.json").exists():
             return candidate.resolve()
-    raise SystemExit(f"no SFT run {name_or_path!r} (looked for config.json at that path and under runs/sft/peg_insert/ and runs/sft/probing/)")
+    raise SystemExit(f"no SFT run {name_or_path!r} (looked for config.json at that path and under runs/sft/*/)")
 
 
 def run_seed(config: dict) -> int:
@@ -241,7 +257,7 @@ def print_table(results_dir: Path) -> None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", required=True, metavar="RUN", help="an SFT run: its path, or its folder name under runs/sft/peg_insert/ or runs/sft/probing/")
+    ap.add_argument("--run", required=True, metavar="RUN", help="an SFT run: its path, or its folder name under runs/sft/<task>/ (peg_insert, gear_mesh, nut_thread) or runs/sft/probing/")
     ap.add_argument("--n-episodes", type=int, default=50, help="episodes per checkpoint (default 50, expo-ft's); may grow between runs")
     ap.add_argument("--seed", type=int, default=E.DEFAULT_SEED, help="master seed of the fixed episode list (default 42)")
     ap.add_argument("--steps", type=int, nargs="+", metavar="STEP", help="only these checkpoints (0 = the run's initial state); default: 0 and every checkpoint of the run")
@@ -254,7 +270,7 @@ def main(argv=None) -> int:
                     "(the model's time is linear in the rows, so it costs nothing; it is the model's memory that limits M). Part of the protocol: it changes the shapes the model is compiled for")
     ap.add_argument("--workers", type=int, default=1, help="checkpoints evaluated at the same time (default 1): one thread, one env server and one policy each")
     ap.add_argument("--replan", type=int, help="steps executed per chunk before the model is called again (default: half the model's chunk)")
-    ap.add_argument("--task-config", default=DEFAULT_TASK, help=f"env server YAML (default {DEFAULT_TASK})")
+    ap.add_argument("--task-config", default=None, help=f"env server YAML (default: the task the SFT run recorded in its config.json, {DEFAULT_TASK} when it recorded none)")
     ap.add_argument("--env-set", action="append", default=[], metavar="KEY=VALUE", help="override a key of the task YAML for the servers (not num_envs / server_port)")
     ap.add_argument("--save-videos", action="store_true", help="videos of the first --video-episodes episodes of each checkpoint in <output-dir>/videos/<step>/")
     ap.add_argument("--video-episodes", type=int, default=5, help="how many episodes of a checkpoint are filmed with --save-videos (default 5)")
@@ -286,9 +302,7 @@ def main(argv=None) -> int:
     jobs = select_jobs(found, args.steps, args.no_initial)
     if not jobs:
         raise SystemExit(f"{run_dir} has no checkpoint yet (checkpoints/<step>/meta.json)")
-    task_config = Path(args.task_config) if Path(args.task_config).is_absolute() else ROOT / args.task_config
-    if not task_config.is_file():
-        raise SystemExit(f"no task YAML {task_config}")
+    task_config = resolve_task_config(args.task_config, run_config.get("task"))
     if args.envs_per_server < 1:
         raise SystemExit("--envs-per-server must be at least 1")
     task = task_settings(task_config, args.env_set, args.envs_per_server)

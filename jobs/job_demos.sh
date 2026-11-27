@@ -9,7 +9,10 @@
 #   collect, replay : success_hold_steps=5, gripper_can_open=false   (the peg stays in the closed gripper; an episode ends 5 'inserted' steps in a row)
 #   robot_check     : gripper_can_open=true                          (it opens and closes the gripper)
 # Extra server settings: DEMO_SERVER_SETS="--set robot=robotiq_2f85 --set reset_passes=3" sbatch --export=ALL jobs/job_demos.sh ...
-# The task YAML is configs/task/peg_insert_forge.yaml (ENV_CONFIG=... to change it): its robot is robotiq_2f85_tsf, so the demos carry the taxels.
+# The task YAML is configs/task/peg_insert_forge.yaml (ENV_CONFIG=... to change it): its robot is robotiq_2f85_tsf, so the demos carry the taxels. Another task:
+#   ENV_CONFIG=configs/task/gear_mesh_forge.yaml sbatch --export=ALL jobs/job_demos.sh replay --demos-dir demos/isaaclab/ForgeGearMesh_Robotiq_teleop --save-videos
+# (a replay needs the server of the task the demonstrations are of: its object, its reset, its prompt; collect_waypoint_demos.py's waypoints are PegInsert's: scripted
+#  and noisy demonstrations of the other tasks are not available yet).
 # Teleoperation is not a job: see jobs/job_teleop_server.sh (the client runs on your PC).
 # Output: logs/slurm/demos_<jobid>.out (the tool), logs/slurm/demos_server_<jobid>.log (Isaac Lab), and what the tool writes (demos in
 # the `demos` link, videos and reports where its flags say).

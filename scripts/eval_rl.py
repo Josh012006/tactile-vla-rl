@@ -40,7 +40,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from scripts.eval_sft import (DEFAULT_ENVS_PER_SERVER, DEFAULT_TASK, acquire_run_lock, check_norm_stats, file_sha, git_commit, norm_stats_path, print_table, progress_of, set_aside, task_settings,
+from scripts.eval_sft import (DEFAULT_ENVS_PER_SERVER, DEFAULT_TASK, resolve_task_config, run_roots, acquire_run_lock, check_norm_stats, file_sha, git_commit, norm_stats_path, print_table, progress_of, set_aside, task_settings,
                               with_deterministic_xla)
 from scripts.sft import enable_compilation_cache, parse_assignments
 from src.algos import rl_config
@@ -58,11 +58,11 @@ PROTOCOL_KEYS = ("variant", "num_candidates", "keep_top", "local_steps", "local_
 
 # -- the run and its rounds -----------------------------------------------------------------------------------------------------------------------
 def find_rl_run_dir(name_or_path: str) -> Path:
-    """A run given as a path (absolute, or relative to where the command runs or to the repository) or as its folder name under runs/rl/peg_insert or runs/rl/probing."""
-    for candidate in (Path(name_or_path), ROOT / name_or_path, ROOT / "runs/rl/peg_insert" / name_or_path, ROOT / "runs/rl/probing" / name_or_path):
+    """A run given as a path (absolute, or relative to where the command runs or to the repository) or as its folder name under runs/rl/<task>/ (peg_insert, ..., probing)."""
+    for candidate in (Path(name_or_path), ROOT / name_or_path, *(folder / name_or_path for folder in run_roots("rl", ROOT))):
         if (candidate / "config.json").exists():
             return candidate.resolve()
-    raise SystemExit(f"no RL run {name_or_path!r} (looked for config.json at that path and under runs/rl/peg_insert/ and runs/rl/probing/)")
+    raise SystemExit(f"no RL run {name_or_path!r} (looked for config.json at that path and under runs/rl/*/)")
 
 
 def vla_checkpoint(run_dir: Path, cfg: rl_config.RLConfig, start_checkpoint: str, r: int) -> Path:
@@ -143,7 +143,7 @@ def load_critic(path: Path, net, horizon: int):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", required=True, metavar="RUN", help="an RL run: its path, or its folder name under runs/rl/peg_insert/ or runs/rl/probing/")
+    ap.add_argument("--run", required=True, metavar="RUN", help="an RL run: its path, or its folder name under runs/rl/<task>/ or runs/rl/probing/")
     ap.add_argument("--n-episodes", type=int, default=None, help="episodes per round (default: the run's own `eval_episodes`, 100); may grow between runs")
     ap.add_argument("--seed", type=int, default=E.DEFAULT_SEED, help="master seed of the fixed episode list (default 42, the SFT evaluations' and the run's)")
     ap.add_argument("--rounds", type=int, nargs="+", metavar="R", help="only these rounds (0 = after the warm-up); default: every finished round whose critic and VLA were kept")
@@ -156,7 +156,7 @@ def main(argv=None) -> int:
     ap.add_argument("--selection", choices=("argmax", "vla"), default=None,
                     help="what is executed: 'argmax' = the critic's argmax over the optimised candidates (default: the run's eval_selection); 'vla' = the VLA alone (its first candidate, no critic). "
                          "Part of the folder's protocol: use another --output-dir")
-    ap.add_argument("--task-config", default=DEFAULT_TASK, help=f"env server YAML (default {DEFAULT_TASK}); the run's own `env_set` is applied on top, then --env-set")
+    ap.add_argument("--task-config", default=None, help=f"env server YAML (default: the one the RL run recorded, then {DEFAULT_TASK}, the PegInsert one that every run without a `task_config` used); the run's own `env_set` is applied on top, then --env-set")
     ap.add_argument("--env-set", action="append", default=[], metavar="KEY=VALUE", help="override a key of the task YAML for the servers (not num_envs / server_port)")
     ap.add_argument("--save-videos", action="store_true", help="videos of the first --video-episodes episodes of each round in <output-dir>/videos/<round>/")
     ap.add_argument("--video-episodes", type=int, default=5, help="how many episodes of a round are filmed with --save-videos (default 5)")
@@ -195,9 +195,7 @@ def main(argv=None) -> int:
     n_episodes = args.n_episodes or cfg.eval_episodes
     if args.envs_per_server < 1:
         raise SystemExit("--envs-per-server must be at least 1")
-    task_config = Path(args.task_config) if Path(args.task_config).is_absolute() else ROOT / args.task_config
-    if not task_config.is_file():
-        raise SystemExit(f"no task YAML {task_config}")
+    task_config = resolve_task_config(args.task_config, saved.get("task_config"))
     task = task_settings(task_config, list(saved.get("env_set") or []) + list(args.env_set), args.envs_per_server)
     protocol = build_protocol(args, run_dir, saved, cfg, task)
     norm = check_norm_stats(model_cfg, jobs)
